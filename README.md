@@ -5,7 +5,7 @@
 [![C11](https://img.shields.io/badge/C-11-blue)](https://en.cppreference.com/w/c/11)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[English version](README_en.md) | [GitLab](https://gitlab.com/awg-proxy/awg-proxy)
+[English version](README_en.md) | [GitHub](https://github.com/timbrs/amneziawg-mikrotik-c)
 
 Легковесный Docker-контейнер, который позволяет MikroTik подключаться к серверам AmneziaWG. Весь трафик шифруется нативным WireGuard-клиентом роутера, а контейнер только преобразует формат пакетов.
 
@@ -40,7 +40,7 @@ MikroTik WG-клиент ──UDP──> [awg-proxy] ──UDP──> серв�
 ## Быстрый старт (конфигуратор)
 
 1. Экспортируйте `.conf`-файл из AmneziaVPN (см. [Получение параметров AWG](#получение-параметров-awg))
-2. Откройте [конфигуратор](https://awg-proxy.gitlab.io/awg-proxy/configurator.html)
+2. Откройте [конфигуратор](https://timbrs.github.io/amneziawg-mikrotik-c/configurator.html)
 3. Вставьте содержимое `.conf`-файла
 4. Скопируйте сгенерированные команды и выполните их в терминале MikroTik
 
@@ -78,12 +78,12 @@ MikroTik WG-клиент ──UDP──> [awg-proxy] ──UDP──> серв�
 
 ### 2. Загрузка образа
 
-Скачайте `awg-proxy-{arch}.tar.gz` со страницы [Releases](https://gitlab.com/awg-proxy/awg-proxy/-/releases) и загрузите на роутер через Winbox или SCP. Для RouterOS 7.20 и ниже используйте файлы с суффиксом `-7.20-Docker` (Docker-формат).
+Скачайте `awg-proxy-{arch}.tar.gz` со страницы [Releases](https://github.com/timbrs/amneziawg-mikrotik-c/releases) и загрузите на роутер через Winbox или SCP. Для RouterOS 7.20 и ниже используйте файлы с суффиксом `-7.20-Docker` (Docker-формат).
 
 Или скачайте прямо на роутер (замените URL на актуальный):
 
 ```routeros
-/tool/fetch url="https://gitlab.com/awg-proxy/awg-proxy/-/releases/permalink/latest/downloads/awg-proxy-arm64.tar.gz" dst-path=awg-proxy-arm64.tar.gz
+/tool/fetch url="https://github.com/timbrs/amneziawg-mikrotik-c/releases/latest/download/awg-proxy-arm64.tar.gz" dst-path=awg-proxy-arm64.tar.gz
 ```
 
 ### 3. Настройка сети

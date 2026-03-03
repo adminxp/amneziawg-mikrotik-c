@@ -5,7 +5,7 @@
 [![C11](https://img.shields.io/badge/C-11-blue)](https://en.cppreference.com/w/c/11)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Русская версия](README.md) | [GitLab](https://gitlab.com/awg-proxy/awg-proxy)
+[Русская версия](README.md) | [GitHub](https://github.com/timbrs/amneziawg-mikrotik-c)
 
 Lightweight Docker container that allows MikroTik routers to connect to AmneziaWG servers. All traffic is encrypted by the router's native WireGuard client; the container only transforms the packet format.
 
@@ -40,7 +40,7 @@ Compatible with AWG v1 and v2 -- the version is detected automatically based on 
 ## Quick Start (Configurator)
 
 1. Export a `.conf` file from AmneziaVPN (see [Getting AWG Parameters](#getting-awg-parameters))
-2. Open the [configurator](https://awg-proxy.gitlab.io/awg-proxy/configurator.html)
+2. Open the [configurator](https://timbrs.github.io/amneziawg-mikrotik-c/configurator.html)
 3. Paste the `.conf` file contents
 4. Copy the generated commands and run them in MikroTik terminal
 
@@ -76,12 +76,12 @@ The router will ask for confirmation (button press or reboot, depending on the m
 
 ### 2. Upload Image
 
-Download `awg-proxy-{arch}.tar.gz` from [Releases](https://gitlab.com/awg-proxy/awg-proxy/-/releases) and upload it to the router via Winbox or SCP. For RouterOS 7.20 and below, use files with the `-7.20-Docker` suffix (Docker format).
+Download `awg-proxy-{arch}.tar.gz` from [Releases](https://github.com/timbrs/amneziawg-mikrotik-c/releases) and upload it to the router via Winbox or SCP. For RouterOS 7.20 and below, use files with the `-7.20-Docker` suffix (Docker format).
 
 Or download directly on the router (replace URL with the actual one):
 
 ```routeros
-/tool/fetch url="https://gitlab.com/awg-proxy/awg-proxy/-/releases/permalink/latest/downloads/awg-proxy-arm64.tar.gz" dst-path=awg-proxy-arm64.tar.gz
+/tool/fetch url="https://github.com/timbrs/amneziawg-mikrotik-c/releases/latest/download/awg-proxy-arm64.tar.gz" dst-path=awg-proxy-arm64.tar.gz
 ```
 
 ### 3. Network Setup
