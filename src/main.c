@@ -164,6 +164,19 @@ int main(void) {
     if ((v = getenv("AWG_SRC_PORT")) && v[0])
         src_port = parse_int_str(v);
 
+    /* CPU affinity */
+    cfg->cpu_c2s = -1;
+    cfg->cpu_s2c = -1;
+    if ((v = getenv("AWG_CPU_C2S")) && v[0])
+        cfg->cpu_c2s = parse_int_str(v);
+    if ((v = getenv("AWG_CPU_S2C")) && v[0])
+        cfg->cpu_s2c = parse_int_str(v);
+
+    /* Busy poll */
+    cfg->busy_poll = 0;
+    if ((v = getenv("AWG_BUSY_POLL")) && v[0])
+        cfg->busy_poll = parse_int_str(v);
+
     /* Determine protocol mode */
     const char *mode = "v1";
     if (cfg->s3 > 0 || cfg->s4 > 0 ||
@@ -197,6 +210,15 @@ int main(void) {
         const char *parts[] = { "config: H1=", h1_str, " H2=", h2_str,
             " H3=", h3_str, " H4=", h4_str };
         log_infon(parts, 8);
+    }
+    if (cfg->cpu_c2s >= 0 || cfg->cpu_s2c >= 0 || cfg->busy_poll > 0) {
+        char c2sb[12], s2cb[12], bpb[12];
+        const char *parts[] = {
+            "perf: cpu_c2s=", cfg->cpu_c2s >= 0 ? u32_to_str(c2sb, cfg->cpu_c2s) : "auto",
+            " cpu_s2c=", cfg->cpu_s2c >= 0 ? u32_to_str(s2cb, cfg->cpu_s2c) : "auto",
+            " busy_poll=", cfg->busy_poll > 0 ? u32_to_str(bpb, cfg->busy_poll) : "off"
+        };
+        log_infon(parts, 6);
     }
 
     /* Init and run proxy */

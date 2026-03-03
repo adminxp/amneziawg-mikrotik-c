@@ -81,6 +81,10 @@ typedef struct {
     int log_level;
     int socket_buf;     /* socket buffer size */
     int src_port;       /* 0 = auto */
+
+    int cpu_c2s;        /* CPU affinity for c2s thread (-1 = auto) */
+    int cpu_s2c;        /* CPU affinity for s2c thread (-1 = auto) */
+    int busy_poll;      /* SO_BUSY_POLL timeout in μs (0 = off) */
 } awg_config_t;
 
 /* Compute MAC1 keys and fast-path flags. Call after setting all config fields. */

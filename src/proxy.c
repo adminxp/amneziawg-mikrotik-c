@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <sys/epoll.h>
 #include <sys/signalfd.h>
 #include <sys/timerfd.h>
@@ -87,6 +88,27 @@ static void set_socket_buffers(int fd, int size) {
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
 }
 
+static void set_busy_poll(int fd, int usec) {
+    if (usec <= 0) return;
+    setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &usec, sizeof(usec));
+#ifdef SO_BUSY_POLL_BUDGET
+    int budget = BATCH_SIZE;
+    setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+#endif
+}
+
+static void set_thread_affinity(int cpu, const char *name) {
+    if (cpu < 0) return;
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu, &cpuset);
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset) == 0) {
+        char buf[12];
+        const char *parts[] = { name, " pinned to cpu", u32_to_str(buf, cpu) };
+        log_infon(parts, 3);
+    }
+}
+
 static void log_socket_buffers(int fd, const awg_config_t *cfg, const char *label) {
     int r = 0, w = 0;
     socklen_t len = sizeof(r);
@@ -126,6 +148,7 @@ static int dial_remote(proxy_t *p, int blocking) {
     }
 
     set_socket_buffers(fd, p->cfg->socket_buf);
+    set_busy_poll(fd, p->cfg->busy_poll);
     return fd;
 }
 
@@ -372,6 +395,7 @@ __attribute__((hot))
 static void *c2s_thread(void *arg) {
     proxy_t *p = (proxy_t *)arg;
     awg_config_t *cfg = p->cfg;
+    set_thread_affinity(cfg->cpu_c2s, "c2s");
     int prefix = cfg->s4;
     int prev_nrecv = BATCH_SIZE;
 
@@ -559,6 +583,7 @@ static int do_reconnect(proxy_t *p) {
 __attribute__((hot))
 static void *s2c_thread(void *arg) {
     proxy_t *p = (proxy_t *)arg;
+    set_thread_affinity(p->cfg->cpu_s2c, "s2c");
     int reconnect_backoff = 1;
     int prev_nrecv = BATCH_SIZE;
 
@@ -692,6 +717,7 @@ int proxy_run(proxy_t *p) {
         return -1;
     }
     set_socket_buffers(p->listen_fd, cfg->socket_buf);
+    set_busy_poll(p->listen_fd, cfg->busy_poll);
     log_socket_buffers(p->listen_fd, cfg, "listen");
 
     /* Connect to remote (blocking for s2c thread) */

@@ -19,7 +19,7 @@ for spec in "arm64:linux/arm64" "arm:linux/arm/v7" "armv5:linux/arm/v5" "amd64:l
   arch="${spec%%:*}"
   platform="${spec#*:}"
   (
-    docker buildx build --no-cache --platform "$platform" \
+    docker buildx build --platform "$platform" \
       --build-arg VERSION="$VERSION" \
       --output "type=local,dest=$DIR/bin-$arch" .
     mv "$DIR/bin-$arch/awg-proxy" "$DIR/$IMAGE-linux-$arch"
@@ -36,7 +36,7 @@ for spec in "arm64:linux/arm64" "arm:linux/arm/v7" "armv5:linux/arm/v5" "amd64:l
   arch="${spec%%:*}"
   platform="${spec#*:}"
   (
-    docker buildx build --no-cache --platform "$platform" \
+    docker buildx build --platform "$platform" \
       --build-arg VERSION="$VERSION" \
       --output "type=oci,dest=$DIR/$IMAGE-$arch.tar" \
       -t "$IMAGE:$VERSION-$arch" .

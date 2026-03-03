@@ -180,6 +180,9 @@ The obfuscation parameters (`Jc`, `Jmin`, `Jmax`, `S1`, `S2`, `H1`--`H4`) are in
 | `AWG_TIMEOUT` | No | Inactivity timeout in seconds (default: 180) |
 | `AWG_LOG_LEVEL` | No | `none`, `error`, `info`, `debug` (default: `info`) |
 | `AWG_SOCKET_BUF` | No | Socket buffer size in bytes (default: 16 MB) |
+| `AWG_CPU_C2S` | No | CPU affinity for client→server thread (-1 = auto, default: -1) |
+| `AWG_CPU_S2C` | No | CPU affinity for server→client thread (-1 = auto, default: -1) |
+| `AWG_BUSY_POLL` | No | SO_BUSY_POLL timeout in μs (0 = off, default: 0) |
 
 The protocol version is detected automatically: **v2** if S3/S4 are set or H values are ranges, **v1.5** if CPS templates (I1-I5) are set, otherwise **v1**.
 
