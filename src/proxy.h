@@ -10,7 +10,7 @@
 
 #define BUF_SIZE       1500
 #define BATCH_SIZE     128
-#define H4_RING_SIZE   256
+#define H4_RING_SIZE   65536
 #define GRO_BUF_SIZE   65536
 
 #ifndef UDP_GRO
@@ -42,7 +42,6 @@ typedef struct {
 
     /* State — shared between threads */
     _Atomic int stopped;
-    _Atomic int handshake_done;
     _Atomic int last_active;          /* activity flag */
     int auto_src_port;
     int local_port;           /* desired src port, 0 = kernel assigns */
@@ -59,7 +58,7 @@ typedef struct {
 
     /* H4 ring buffer */
     uint32_t h4_ring[H4_RING_SIZE];
-    uint8_t h4_idx;
+    uint16_t h4_idx;
 
     /* Batch I/O buffers — c2s direction */
     struct {

@@ -14,9 +14,11 @@ static int hex_val(char c) {
 }
 
 static int parse_int(const char *s, int len) {
+    if (len <= 0) return -1;
     int v = 0;
     for (int i = 0; i < len; i++) {
         if (s[i] < '0' || s[i] > '9') return -1;
+        if (v > 100000) return -1;
         v = v * 10 + (s[i] - '0');
     }
     return v;

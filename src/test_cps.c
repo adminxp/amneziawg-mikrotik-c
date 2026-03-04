@@ -141,6 +141,76 @@ static void test_parse_invalid(void) {
     ASSERT_EQ(cps_parse("<b 0xFF", &tmpl), -1);
 }
 
+static void test_parse_large_static(void) {
+    /* Real SIP INVITE template ~348 bytes hex = 174 bytes binary */
+    /* Simulate with 348 hex chars (174 bytes) */
+    char tmpl_str[1024];
+    int pos = 0;
+    memcpy(tmpl_str + pos, "<b 0x", 5); pos += 5;
+    for (int i = 0; i < 348; i++) {
+        tmpl_str[pos++] = "0123456789ABCDEF"[i % 16];
+    }
+    tmpl_str[pos++] = '>';
+    tmpl_str[pos] = '\0';
+    cps_template_t tmpl;
+    ASSERT_EQ(cps_parse(tmpl_str, &tmpl), 0);
+    ASSERT_EQ(tmpl.nseg, 1);
+    ASSERT_EQ(tmpl.segs[0].data_len, 174);
+}
+
+static void test_parse_max_static(void) {
+    /* 1500 bytes = 3000 hex chars — exactly at the limit */
+    char tmpl_str[3100];
+    int pos = 0;
+    memcpy(tmpl_str + pos, "<b 0x", 5); pos += 5;
+    for (int i = 0; i < 3000; i++) {
+        tmpl_str[pos++] = "AA"[i % 2];
+    }
+    tmpl_str[pos++] = '>';
+    tmpl_str[pos] = '\0';
+    cps_template_t tmpl;
+    ASSERT_EQ(cps_parse(tmpl_str, &tmpl), 0);
+    ASSERT_EQ(tmpl.segs[0].data_len, 1500);
+}
+
+static void test_parse_overflow_static(void) {
+    /* 1502 bytes = 3004 hex chars — over the limit */
+    char tmpl_str[3100];
+    int pos = 0;
+    memcpy(tmpl_str + pos, "<b 0x", 5); pos += 5;
+    for (int i = 0; i < 3004; i++) {
+        tmpl_str[pos++] = "BB"[i % 2];
+    }
+    tmpl_str[pos++] = '>';
+    tmpl_str[pos] = '\0';
+    cps_template_t tmpl;
+    ASSERT_EQ(cps_parse(tmpl_str, &tmpl), -1);
+}
+
+static void test_generate_large_static(void) {
+    /* Parse a 200-byte static block and verify generate outputs it correctly */
+    char tmpl_str[512];
+    int pos = 0;
+    memcpy(tmpl_str + pos, "<b 0x", 5); pos += 5;
+    for (int i = 0; i < 400; i++) {
+        tmpl_str[pos++] = "0123456789ABCDEF"[i % 16];
+    }
+    tmpl_str[pos++] = '>';
+    tmpl_str[pos] = '\0';
+    cps_template_t tmpl;
+    ASSERT_EQ(cps_parse(tmpl_str, &tmpl), 0);
+    ASSERT_EQ(tmpl.segs[0].data_len, 200);
+    uint8_t buf[256];
+    int n = cps_generate(&tmpl, 0, buf, 256);
+    ASSERT_EQ(n, 200);
+    ASSERT_MEM_EQ(buf, tmpl.static_data, 200);
+}
+
+static void test_parse_int_overflow(void) {
+    cps_template_t tmpl;
+    ASSERT_EQ(cps_parse("<r 99999999999>", &tmpl), -1);
+}
+
 static void test_generate_cps(void) {
     cps_template_t tmpl;
     uint8_t buf[64];
@@ -172,5 +242,10 @@ int main(void) {
     RUN_TEST(parse_empty);
     RUN_TEST(parse_invalid);
     RUN_TEST(generate_cps);
+    RUN_TEST(parse_large_static);
+    RUN_TEST(parse_max_static);
+    RUN_TEST(parse_overflow_static);
+    RUN_TEST(generate_large_static);
+    RUN_TEST(parse_int_overflow);
     TEST_MAIN_END();
 }

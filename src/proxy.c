@@ -385,7 +385,9 @@ static void send_batch_gso(proxy_t *p, int fd, struct mmsghdr *msgs,
         }
     }
     if (sent < nsend) {
-        sendmmsg(fd, msgs + sent, nsend - sent, MSG_DONTWAIT | MSG_NOSIGNAL);
+        int r = sendmmsg(fd, msgs + sent, nsend - sent, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (r < 0)
+            log_debug2("sendmmsg fallback failed: ", strerror(errno));
     }
 }
 
@@ -492,10 +494,9 @@ static void *c2s_thread(void *arg) {
                                                cfg, fastrand_u64(&p->rng),
                                                &out_len, &sendJunk);
 
-            if (sendJunk && !atomic_load(&p->handshake_done)) {
+            if (sendJunk) {
                 send_junk_and_cps(p, remote_fd);
-                if (send_packet(remote_fd, out, out_len) >= 0)
-                    atomic_store(&p->handshake_done, 1);
+                send_packet(remote_fd, out, out_len);
                 continue;
             }
 
@@ -572,7 +573,6 @@ static int do_reconnect(proxy_t *p) {
 
     atomic_store(&p->remote_fd, fd);
     atomic_store(&p->last_active, 1);
-    atomic_store(&p->handshake_done, 0);
     atomic_store(&p->has_client, 0);
     atomic_store(&p->reconnect_needed, 0);
 

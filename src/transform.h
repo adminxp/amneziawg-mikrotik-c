@@ -39,7 +39,7 @@ static inline int hrange_contains(const hrange_t *r, uint32_t v) {
 #define CPS_RANDOM_DIGITS 'D'
 
 #define CPS_MAX_SEGMENTS 32
-#define CPS_MAX_STATIC   256
+#define CPS_MAX_STATIC   1500
 
 typedef struct {
     uint8_t kind;
