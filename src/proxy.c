@@ -137,12 +137,14 @@ static int dial_remote(proxy_t *p, int blocking) {
         int opt = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
         if (bind(fd, (struct sockaddr *)&local, sizeof(local)) < 0) {
+            log_error2("bind failed: ", strerror(errno));
             close(fd);
             return -1;
         }
     }
 
     if (connect(fd, (struct sockaddr *)&p->remote_addr, sizeof(p->remote_addr)) < 0) {
+        log_error2("connect failed: ", strerror(errno));
         close(fd);
         return -1;
     }
@@ -344,7 +346,10 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
 /* ---- Send helpers ---- */
 
 static int send_packet(int fd, const void *data, int len) {
-    return (int)send(fd, data, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+    int r = (int)send(fd, data, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (r < 0)
+        log_debug2("send_packet failed: ", strerror(errno));
+    return r;
 }
 
 static void send_junk_and_cps(proxy_t *p, int fd) {
@@ -446,6 +451,7 @@ static void *c2s_thread(void *arg) {
                             /* Signal reconnect needed; s2c thread will handle */
                             atomic_store(&p->reconnect_needed, 1);
                             shutdown(old_fd, SHUT_RDWR);
+                            continue; /* skip batch — WG retries in ~5s */
                         }
                     }
                 }
@@ -495,6 +501,7 @@ static void *c2s_thread(void *arg) {
                                                &out_len, &sendJunk);
 
             if (sendJunk) {
+                log_debug("c2s: handshake init, sending junk");
                 send_junk_and_cps(p, remote_fd);
                 send_packet(remote_fd, out, out_len);
                 continue;
@@ -589,11 +596,13 @@ static void *s2c_thread(void *arg) {
 
     /* Try to enable GRO on initial remote fd */
     int remote_fd = atomic_load(&p->remote_fd);
-    if (remote_fd >= 0) {
+    if (remote_fd >= 0 && !p->cfg->no_gro) {
         p->gro_enabled = enable_gro(remote_fd);
         if (p->gro_enabled)
             log_info("s2c: UDP GRO enabled");
     }
+    if (p->cfg->no_gro)
+        log_info("s2c: UDP GRO disabled (AWG_NO_GRO)");
 
     while (!atomic_load(&p->stopped)) {
         remote_fd = atomic_load(&p->remote_fd);
@@ -614,9 +623,11 @@ static void *s2c_thread(void *arg) {
             reconnect_backoff = 1;
             remote_fd = new_fd;
             /* Re-enable GRO on new fd */
-            p->gro_enabled = enable_gro(remote_fd);
-            if (p->gro_enabled)
-                log_info("s2c: UDP GRO re-enabled");
+            if (!p->cfg->no_gro) {
+                p->gro_enabled = enable_gro(remote_fd);
+                if (p->gro_enabled)
+                    log_info("s2c: UDP GRO re-enabled");
+            }
             prev_nrecv = BATCH_SIZE;
             continue;
         }
@@ -629,9 +640,10 @@ static void *s2c_thread(void *arg) {
             int seg_size;
             int n = recv_gro(p, remote_fd, &seg_size);
             if (n <= 0) {
-                if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+                int saved_errno = errno;
+                if (n == 0 || (saved_errno != EAGAIN && saved_errno != EWOULDBLOCK && saved_errno != EINTR)) {
                     if (!atomic_load(&p->stopped)) {
-                        log_info("remote read error, will reconnect");
+                        log_info3("remote read error (", strerror(saved_errno), "), will reconnect");
                         atomic_store(&p->reconnect_needed, 1);
                     }
                 }
@@ -644,6 +656,9 @@ static void *s2c_thread(void *arg) {
             if (!atomic_load(&p->has_client)) continue;
 
             if (seg_size > 0 && n > seg_size) {
+                char nb[12], sb[12];
+                log_debug3("s2c: GRO recv bytes=", u32_to_str(nb, n), u32_to_str(sb, seg_size));
+
                 /* Coalesced: split buffer by seg_size */
                 for (int off = 0; off < n && nsend < BATCH_SIZE; off += seg_size) {
                     int end = off + seg_size;
@@ -665,9 +680,10 @@ static void *s2c_thread(void *arg) {
             int nrecv = recvmmsg(remote_fd, p->recv_s2c.msgs, BATCH_SIZE,
                                  MSG_WAITFORONE, NULL);
             if (nrecv <= 0) {
-                if (nrecv == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+                int saved_errno = errno;
+                if (nrecv == 0 || (saved_errno != EAGAIN && saved_errno != EWOULDBLOCK && saved_errno != EINTR)) {
                     if (!atomic_load(&p->stopped)) {
-                        log_info("remote read error, will reconnect");
+                        log_info3("remote read error (", strerror(saved_errno), "), will reconnect");
                         atomic_store(&p->reconnect_needed, 1);
                     }
                 }

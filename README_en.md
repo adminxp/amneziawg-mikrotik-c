@@ -159,32 +159,179 @@ The obfuscation parameters (`Jc`, `Jmin`, `Jmax`, `S1`, `S2`, `H1`--`H4`) are in
 
 ### All Environment Variables
 
-| Variable | Required | Description |
-|----------|:---:|-------------|
-| `AWG_LISTEN` | Yes | Listen address (e.g., `:51820`) |
-| `AWG_REMOTE` | Yes | AWG server address -- Endpoint from `[Peer]` (e.g., `1.2.3.4:443`) |
-| `AWG_JC` | Yes | Junk packet count (Jc from .conf) |
-| `AWG_JMIN` | Yes | Min junk packet size (Jmin) |
-| `AWG_JMAX` | Yes | Max junk packet size (Jmax) |
-| `AWG_S1` | Yes | Handshake init padding bytes (S1) |
-| `AWG_S2` | Yes | Handshake response padding bytes (S2) |
-| `AWG_H1` | Yes | Handshake init type (H1); can be a `min-max` range for v2 |
-| `AWG_H2` | Yes | Handshake response type (H2); can be a range for v2 |
-| `AWG_H3` | Yes | Cookie reply type (H3); can be a range for v2 |
-| `AWG_H4` | Yes | Transport data type (H4); can be a range for v2 |
-| `AWG_SERVER_PUB` | Yes | Server public key, base64 (PublicKey from `[Peer]`) |
-| `AWG_CLIENT_PUB` | Yes | Client public key, base64 |
-| `AWG_S3` | No | Cookie reply padding bytes (v2) |
-| `AWG_S4` | No | Transport data padding bytes (v2) |
-| `AWG_I1`--`AWG_I5` | No | CPS templates (v1.5/v2); up to 5 templates |
-| `AWG_TIMEOUT` | No | Inactivity timeout in seconds (default: 180) |
-| `AWG_LOG_LEVEL` | No | `none`, `error`, `info`, `debug` (default: `info`) |
-| `AWG_SOCKET_BUF` | No | Socket buffer size in bytes (default: 16 MB) |
-| `AWG_CPU_C2S` | No | CPU affinity for client→server thread (-1 = auto, default: -1) |
-| `AWG_CPU_S2C` | No | CPU affinity for server→client thread (-1 = auto, default: -1) |
-| `AWG_BUSY_POLL` | No | SO_BUSY_POLL timeout in μs (0 = off, default: 0) |
+| Variable | Required | Default | Description |
+|----------|:---:|:---:|-------------|
+| `AWG_LISTEN` | Yes | -- | Listen address |
+| `AWG_REMOTE` | Yes | -- | AWG server address |
+| `AWG_JC` | Yes | -- | Junk packet count |
+| `AWG_JMIN` | Yes | -- | Min junk packet size |
+| `AWG_JMAX` | Yes | -- | Max junk packet size |
+| `AWG_S1` | Yes | -- | Handshake init padding |
+| `AWG_S2` | Yes | -- | Handshake response padding |
+| `AWG_H1`--`AWG_H4` | Yes | -- | Message types |
+| `AWG_SERVER_PUB` | Yes | -- | Server public key |
+| `AWG_CLIENT_PUB` | Yes | -- | Client public key |
+| `AWG_S3` | No | `0` | Cookie reply padding (v2) |
+| `AWG_S4` | No | `0` | Transport data padding (v2) |
+| `AWG_I1`--`AWG_I5` | No | -- | CPS templates (v1.5/v2) |
+| `AWG_SRC_PORT` | No | auto | Outgoing port to server |
+| `AWG_TIMEOUT` | No | `180` | Inactivity timeout (sec) |
+| `AWG_LOG_LEVEL` | No | `info` | Log level |
+| `AWG_NO_GRO` | No | `0` | Disable UDP GRO |
+| `AWG_SOCKET_BUF` | No | `16777216` | Socket buffer size |
+| `AWG_CPU_C2S` | No | `-1` | CPU for client→server thread |
+| `AWG_CPU_S2C` | No | `-1` | CPU for server→client thread |
+| `AWG_BUSY_POLL` | No | `0` | SO_BUSY_POLL timeout (μs) |
 
 The protocol version is detected automatically: **v2** if S3/S4 are set or H values are ranges, **v1.5** if CPS templates (I1-I5) are set, otherwise **v1**.
+
+### Detailed Variable Descriptions
+
+#### Required -- Obfuscation Parameters
+
+All values are taken from the `.conf` file exported from AmneziaVPN (`[Interface]` and `[Peer]` sections). They must **exactly** match the server parameters, otherwise the handshake will fail.
+
+**`AWG_LISTEN`** -- address and port where the proxy listens for UDP packets from the router's WireGuard client. Format: `address:port` or `:port` (listen on all interfaces).
+
+```
+AWG_LISTEN=:51820          # all interfaces, port 51820 (standard)
+AWG_LISTEN=172.18.0.2:9000 # specific address and port
+```
+
+**`AWG_REMOTE`** -- address and port of the AWG server (`Endpoint` from `[Peer]`). Supports both IP addresses and domain names.
+
+```
+AWG_REMOTE=1.2.3.4:443            # IP + port
+AWG_REMOTE=vpn.example.com:51820  # domain + port
+```
+
+**`AWG_JC`**, **`AWG_JMIN`**, **`AWG_JMAX`** -- junk packet parameters. Before each handshake init, `JC` random UDP packets of size between `JMIN` and `JMAX` bytes are sent. The server discards them, but they look like regular traffic to DPI. Values from `.conf` (`Jc`, `Jmin`, `Jmax`).
+
+```
+AWG_JC=5      # 5 junk packets before handshake
+AWG_JMIN=30   # minimum 30 bytes
+AWG_JMAX=500  # maximum 500 bytes
+
+AWG_JC=0      # junk packets disabled
+```
+
+**`AWG_S1`**, **`AWG_S2`** -- number of padding bytes added to handshake init (S1) and handshake response (S2). Changes packet sizes so DPI cannot identify WireGuard handshake by its characteristic sizes of 148 and 92 bytes. Values from `.conf` (`S1`, `S2`).
+
+```
+AWG_S1=20   # +20 bytes to handshake init (148 → 168)
+AWG_S2=20   # +20 bytes to handshake response (92 → 112)
+
+AWG_S1=0    # padding disabled
+AWG_S2=0
+```
+
+**`AWG_H1`**, **`AWG_H2`**, **`AWG_H3`**, **`AWG_H4`** -- WireGuard message type substitution. Standard types (1, 2, 3, 4) are replaced with the specified values so DPI cannot recognize the protocol. In v1 -- fixed numbers, in v2 -- can be `min-max` ranges. Values from `.conf` (`H1`--`H4`).
+
+```
+# v1: fixed values
+AWG_H1=1234567890
+AWG_H2=1234567891
+AWG_H3=1234567892
+AWG_H4=1234567893
+
+# v2: ranges (random value from range for each packet)
+AWG_H1=100-200
+AWG_H4=1000-2000
+```
+
+**`AWG_SERVER_PUB`**, **`AWG_CLIENT_PUB`** -- server and client public keys in base64 format (44 characters). Used for MAC1 recalculation in handshake packets after header substitution. Without correct keys, the MAC check on the server will fail.
+
+```
+AWG_SERVER_PUB=kB3VpJIEGVTW2D4GR0cC/c3bOEG3jNIm5MjHJkSIj2I=
+AWG_CLIENT_PUB=aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/ABCD=
+
+# Automatic retrieval from the router's WireGuard interface:
+AWG_CLIENT_PUB=[/interface/wireguard/get [find name=wg-awg-proxy] public-key]
+```
+
+#### Optional -- Protocol v2
+
+**`AWG_S3`**, **`AWG_S4`** -- padding for cookie reply (S3) and transport data (S4). Introduced in AWG v2. If S3 > 0 or S4 > 0 are set, the proxy automatically switches to v2 mode.
+
+```
+AWG_S3=0    # default, no padding
+AWG_S4=16   # +16 bytes to each transport data packet
+```
+
+**`AWG_I1`--`AWG_I5`** -- CPS templates (Constant Packet Size). Up to 5 templates for generating fixed-format packets before handshake. If set without S3/S4/H ranges, the proxy operates in v1.5 mode. Template format is described in the AWG documentation.
+
+```
+AWG_I1=b:48656c6c6f,r:10,t:4,c:4
+```
+
+#### Optional -- Network and Diagnostics
+
+**`AWG_SRC_PORT`** -- outgoing UDP port for the connection to the AWG server. By default (`auto`), the proxy uses the WireGuard client's port -- this is needed for correct NAT operation on the router. If a number is specified, a fixed port is used.
+
+```
+AWG_SRC_PORT=auto    # default, copies the WG client port
+AWG_SRC_PORT=0       # same as auto
+AWG_SRC_PORT=12345   # fixed port 12345
+```
+
+**`AWG_TIMEOUT`** -- inactivity timeout in seconds. If no packets are sent or received in either direction within this time, the proxy reconnects to the server (re-resolves DNS + new socket). Useful when the server's IP address changes behind DNS.
+
+```
+AWG_TIMEOUT=180   # default, 3 minutes
+AWG_TIMEOUT=60    # aggressive timeout for unstable connections
+AWG_TIMEOUT=3600  # 1 hour, for stable links
+```
+
+**`AWG_LOG_LEVEL`** -- logging level. Controls the verbosity of output in `/container/print` and the router's syslog.
+
+- `none` -- no output (for production on low-power devices)
+- `error` -- errors only (bind/connect failed, reconnect)
+- `info` -- startup config, client connections, reconnects (default)
+- `debug` -- packet tracing: handshake init, junk sending, GRO segments, send errors. Needed for diagnosing handshake problems
+
+```
+AWG_LOG_LEVEL=info    # default
+AWG_LOG_LEVEL=debug   # full tracing for debugging
+AWG_LOG_LEVEL=error   # errors only
+AWG_LOG_LEVEL=none    # silence
+```
+
+**`AWG_NO_GRO`** -- disables UDP GRO (Generic Receive Offload) on the server socket. GRO coalesces multiple incoming UDP packets into a single buffer, reducing the number of system calls. Enabled by default if the kernel supports it. On some platforms (ARM64 on RouterOS) the kernel accepts the setsockopt call, but GRO doesn't actually work -- in this case the proxy hangs waiting for packets. Set `AWG_NO_GRO=1` to force disable.
+
+```
+AWG_NO_GRO=0   # default, GRO enabled (if kernel supports it)
+AWG_NO_GRO=1   # force disable GRO, use recvmmsg instead
+```
+
+**`AWG_SOCKET_BUF`** -- receive/send buffer sizes (SO_RCVBUF/SO_SNDBUF) for UDP sockets in bytes. The kernel typically doubles the requested value. Larger buffers reduce packet loss under load but consume more RAM.
+
+```
+AWG_SOCKET_BUF=16777216  # default, 16 MB
+AWG_SOCKET_BUF=4194304   # 4 MB, for memory-constrained devices
+AWG_SOCKET_BUF=1048576   # 1 MB, minimum recommended
+```
+
+#### Optional -- Performance
+
+These parameters are only relevant on powerful devices with multiple CPU cores. On typical MikroTik routers (1-2 cores), leave the defaults.
+
+**`AWG_CPU_C2S`**, **`AWG_CPU_S2C`** -- thread-to-CPU pinning (CPU affinity). The proxy uses two threads: c2s (client→server, outbound packet processing) and s2c (server→client, inbound). Pinning to different cores prevents thread migration and improves cache efficiency.
+
+```
+AWG_CPU_C2S=-1   # default, OS chooses the core
+AWG_CPU_S2C=-1
+
+AWG_CPU_C2S=0    # c2s on core 0
+AWG_CPU_S2C=1    # s2c on core 1
+```
+
+**`AWG_BUSY_POLL`** -- enables SO_BUSY_POLL on sockets. The kernel actively polls the network driver for the specified time (in microseconds) instead of going to sleep. Reduces latency by ~50 μs but increases CPU usage. Requires network driver support.
+
+```
+AWG_BUSY_POLL=0     # default, disabled
+AWG_BUSY_POLL=50    # 50 μs of active polling
+AWG_BUSY_POLL=100   # 100 μs, for minimum latency
+```
 
 ### Routing Traffic Through the Tunnel
 
@@ -285,7 +432,7 @@ The script removes the container, WireGuard interface, NAT rules, routes, enviro
 
 **Container does not start** -- check the container package is installed (`/system/package/print`), device mode is enabled (`/system/device-mode/print`), and there is enough disk space (`/system/resource/print`).
 
-**No handshake** -- make sure all AWG parameters (Jc, Jmin, Jmax, S1, S2, H1--H4) exactly match the server. Verify `AWG_REMOTE`, `AWG_SERVER_PUB`, and `AWG_CLIENT_PUB`.
+**No handshake** -- make sure all AWG parameters (Jc, Jmin, Jmax, S1, S2, H1--H4) exactly match the server. Verify `AWG_REMOTE`, `AWG_SERVER_PUB`, and `AWG_CLIENT_PUB`. For diagnostics, set `AWG_LOG_LEVEL=debug` -- logs will show handshake init and junk packet sending. If you see `remote read error (Connection refused)` -- the server is unreachable or the port is wrong. On ARM64, try `AWG_NO_GRO=1` -- if the kernel doesn't support GRO, the proxy may hang waiting for a response.
 
 **No traffic after handshake** -- check the NAT rule (`/ip/firewall/nat/print`), routing, and the peer's `endpoint-address` (should be `172.18.0.2`).
 

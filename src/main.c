@@ -177,6 +177,11 @@ int main(void) {
     if ((v = getenv("AWG_BUSY_POLL")) && v[0])
         cfg->busy_poll = parse_int_str(v);
 
+    /* No GRO */
+    cfg->no_gro = 0;
+    if ((v = getenv("AWG_NO_GRO")) && v[0])
+        cfg->no_gro = parse_int_str(v);
+
     /* Determine protocol mode */
     const char *mode = "v1";
     if (cfg->s3 > 0 || cfg->s4 > 0 ||
@@ -199,6 +204,13 @@ int main(void) {
         log_infon(parts, 6);
     }
     {
+        char jcb[12], jminb[12], jmaxb[12];
+        const char *parts[] = { "config: JC=", u32_to_str(jcb, cfg->jc),
+            " JMIN=", u32_to_str(jminb, cfg->jmin),
+            " JMAX=", u32_to_str(jmaxb, cfg->jmax) };
+        log_infon(parts, 6);
+    }
+    {
         char s1b[12], s2b[12], s3b[12], s4b[12];
         const char *parts[] = { "config: S1=", u32_to_str(s1b, cfg->s1),
             " S2=", u32_to_str(s2b, cfg->s2),
@@ -211,6 +223,8 @@ int main(void) {
             " H3=", h3_str, " H4=", h4_str };
         log_infon(parts, 8);
     }
+    if (cfg->no_gro)
+        log_info("config: UDP GRO disabled (AWG_NO_GRO=1)");
     if (cfg->cpu_c2s >= 0 || cfg->cpu_s2c >= 0 || cfg->busy_poll > 0) {
         char c2sb[12], s2cb[12], bpb[12];
         const char *parts[] = {

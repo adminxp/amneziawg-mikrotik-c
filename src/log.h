@@ -20,6 +20,7 @@ void log_msgn(const char *prefix, const char **parts, int count);
 
 #define log_info3(a,b,c)  do { if (g_log_level >= LOG_INFO)  log_msg3("INFO: ",  a, b, c); } while(0)
 #define log_error3(a,b,c) do { if (g_log_level >= LOG_ERROR) log_msg3("ERROR: ", a, b, c); } while(0)
+#define log_debug3(a,b,c) do { if (g_log_level >= LOG_DEBUG) log_msg3("DEBUG: ", a, b, c); } while(0)
 
 #define log_infon(p,n)  do { if (g_log_level >= LOG_INFO)  log_msgn("INFO: ",  p, n); } while(0)
 #define log_debugn(p,n) do { if (g_log_level >= LOG_DEBUG) log_msgn("DEBUG: ", p, n); } while(0)
