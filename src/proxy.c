@@ -47,8 +47,12 @@ static int resolve_addr(const char *host, uint16_t port, struct sockaddr_in *add
 
     struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM };
     struct addrinfo *res;
-    if (getaddrinfo(host, NULL, &hints, &res) != 0)
+    int gai_err = getaddrinfo(host, NULL, &hints, &res);
+    if (gai_err != 0) {
+        const char *parts[] = {"resolve ", host, ": ", gai_strerror(gai_err)};
+        if (g_log_level >= LOG_ERROR) log_msgn("ERROR: ", parts, 4);
         return -1;
+    }
     memcpy(addr, res->ai_addr, sizeof(*addr));
     addr->sin_port = htons(port);
     freeaddrinfo(res);
@@ -124,10 +128,8 @@ static void log_socket_buffers(int fd, const awg_config_t *cfg, const char *labe
 }
 
 static int dial_remote(proxy_t *p, int blocking) {
-    if (resolve_addr(p->remote_host, p->remote_port, &p->remote_addr) < 0) {
-        log_error("resolve failed");
+    if (resolve_addr(p->remote_host, p->remote_port, &p->remote_addr) < 0)
         return -1;
-    }
 
     int fd = create_udp_socket(blocking);
     if (fd < 0) return -1;
@@ -571,9 +573,7 @@ static int do_reconnect(proxy_t *p) {
         atomic_store(&p->remote_fd, -1);
     }
 
-    char abuf[64];
-    inet_ntop(AF_INET, &p->remote_addr.sin_addr, abuf, sizeof(abuf));
-    log_info2("reconnecting to ", abuf);
+    log_info2("reconnecting to ", p->remote_host);
 
     int fd = dial_remote(p, 1);
     if (fd < 0) return -1;
@@ -583,7 +583,7 @@ static int do_reconnect(proxy_t *p) {
     atomic_store(&p->has_client, 0);
     atomic_store(&p->reconnect_needed, 0);
 
-    log_info2("reconnected to ", abuf);
+    log_info2("reconnected to ", p->remote_host);
     return fd;
 }
 
@@ -736,10 +736,22 @@ int proxy_run(proxy_t *p) {
     set_busy_poll(p->listen_fd, cfg->busy_poll);
     log_socket_buffers(p->listen_fd, cfg, "listen");
 
-    /* Connect to remote (blocking for s2c thread) */
-    int rfd = dial_remote(p, 1);
+    /* Connect to remote with retry */
+    int rfd = -1;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        rfd = dial_remote(p, 1);
+        if (rfd >= 0) break;
+        if (attempt < 4) {
+            int delay = 1 << attempt; /* 1, 2, 4, 8 sec */
+            if (delay > 10) delay = 10;
+            char db[12];
+            log_error2("initial connect failed, retrying in ", u32_to_str(db, delay));
+            struct timespec slp = { .tv_sec = delay };
+            nanosleep(&slp, NULL);
+        }
+    }
     if (rfd < 0) {
-        log_error("initial connect failed");
+        log_error("initial connect failed after 5 attempts");
         return -1;
     }
     atomic_store(&p->remote_fd, rfd);
