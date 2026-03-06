@@ -730,6 +730,7 @@ int proxy_run(proxy_t *p) {
     if (bind(p->listen_fd, (struct sockaddr *)&p->listen_addr,
              sizeof(p->listen_addr)) < 0) {
         log_error("bind failed");
+        close(p->listen_fd);
         return -1;
     }
     set_socket_buffers(p->listen_fd, cfg->socket_buf);
@@ -752,6 +753,7 @@ int proxy_run(proxy_t *p) {
     }
     if (rfd < 0) {
         log_error("initial connect failed after 5 attempts");
+        close(p->listen_fd);
         return -1;
     }
     atomic_store(&p->remote_fd, rfd);
