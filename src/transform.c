@@ -156,6 +156,8 @@ uint8_t *transform_inbound(uint8_t *buf, int n, const awg_config_t *cfg, int *ou
         uint32_t h = read32_le(buf + cfg->s1);
         if (hrange_contains(&cfg->h1, h)) {
             write32_le(buf + cfg->s1, WG_HANDSHAKE_INIT);
+            if (cfg->mode != AWG_MODE_NORMAL && cfg->has_client_pub)
+                recompute_mac1(buf + cfg->s1, cfg->mac1key_client);
             *out_len = n - cfg->s1;
             return buf + cfg->s1;
         }

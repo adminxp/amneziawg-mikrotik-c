@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -272,7 +272,7 @@
             gap: 8px;
         }
 
-        pre#output, pre#uninstall-output {
+        pre#output, pre#uninstall-output, pre#routing-output, pre.s2s-output {
             font-family: var(--mono);
             font-size: 0.8rem;
             line-height: 1.6;
@@ -285,11 +285,11 @@
             tab-size: 2;
         }
 
-        pre#output .comment, pre#uninstall-output .comment {
+        pre#output .comment, pre#uninstall-output .comment, pre#routing-output .comment, pre.s2s-output .comment {
             color: #64748b;
         }
 
-        pre#output .cmd, pre#uninstall-output .cmd {
+        pre#output .cmd, pre#uninstall-output .cmd, pre#routing-output .cmd, pre.s2s-output .cmd {
             color: #7dd3fc;
         }
 
@@ -310,8 +310,40 @@
             margin-bottom: 4px;
         }
 
-        #parsed-section, #output-section, #routing-section, #uninstall-section {
+        #parsed-section, #output-section, #routing-section, #uninstall-section, #s2s-output-section {
             display: none;
+        }
+
+        .s2s-fields {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .s2s-fields label {
+            font-size: 0.82rem;
+        }
+
+        .s2s-fields input[type="text"], .s2s-fields select {
+            width: 100%;
+        }
+
+        .s2s-side {
+            margin-bottom: 20px;
+        }
+
+        .s2s-side-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+
+        @media (max-width: 600px) {
+            .s2s-fields {
+                grid-template-columns: 1fr;
+            }
         }
 
         footer {
@@ -379,6 +411,38 @@
             margin-top: 4px;
         }
 
+        .dns-info-icon {
+            display: inline-block;
+            cursor: help;
+            font-size: 1rem;
+            color: var(--accent);
+            position: relative;
+        }
+
+        .dns-info-icon:hover::after {
+            content: attr(title);
+            position: absolute;
+            bottom: 120%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #1e293b;
+            color: #e2e8f0;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            white-space: pre-line;
+            width: 320px;
+            z-index: 10;
+            pointer-events: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            line-height: 1.5;
+        }
+
+        pre.collapsed { max-height: calc(15 * 1.6em); overflow: hidden; position: relative; }
+        pre.collapsed::after { content:''; position:absolute; bottom:0; left:0; right:0; height:3em; background:linear-gradient(transparent, #0f172a); pointer-events:none; }
+        .btn-expand { display:block; width:100%; margin-top:4px; padding:6px; background:#1e293b; color:#94a3b8; border:1px solid #334155; border-radius:0 0 8px 8px; font-size:0.8rem; cursor:pointer; text-align:center; }
+        .btn-expand:hover { background:#334155; color:#e2e8f0; }
+
         @media (max-width: 600px) {
             header h1 {
                 font-size: 1.4rem;
@@ -391,6 +455,12 @@
             pre#output {
                 font-size: 0.72rem;
                 padding: 14px;
+            }
+
+            .dns-info-icon:hover::after {
+                width: 240px;
+                left: 0;
+                transform: none;
             }
         }
     </style>
@@ -419,26 +489,41 @@
             <div class="radio-group">
                 <label><input type="radio" name="deploy-mode" value="container" checked onchange="onModeChange()"> <span data-i18n="modeContainer">MikroTik + Container (Docker)</span></label>
                 <label><input type="radio" name="deploy-mode" value="standalone" onchange="onModeChange()"> <span data-i18n="modeStandalone">MikroTik + Server (Standalone)</span></label>
+                <label><input type="radio" name="deploy-mode" value="site-to-site" onchange="onModeChange()"> <span data-i18n="modeSiteToSite">Site-to-site (two MikroTik)</span></label>
             </div>
             <div id="mode-hint" class="hint" data-i18n="modeContainerHint">WireGuard client on MikroTik + awg-proxy runs inside a Docker container directly on the router</div>
         </div>
         <div id="scenario-row" style="margin-top:14px">
             <label data-i18n="scenarioLabel">Routing scenario</label>
             <div class="radio-group">
-                <label><input type="radio" name="scenario" value="tunnel" checked onchange="onScenarioChange()"> <span data-i18n="scenarioTunnel">Tunnel only (manual routes)</span></label>
-                <label><input type="radio" name="scenario" value="dns-fwd" onchange="onScenarioChange()"> <span data-i18n="scenarioDns">DNS-based routing for services</span></label>
+                <label><input type="radio" name="scenario" value="dns-fwd" checked onchange="onScenarioChange()"> <span data-i18n="scenarioDns">DNS-based routing for services</span></label>
+                <label><input type="radio" name="scenario" value="tunnel" onchange="onScenarioChange()"> <span data-i18n="scenarioTunnel">Tunnel only (manual routes)</span></label>
                 <label><input type="radio" name="scenario" value="non-ru" onchange="onScenarioChange()"> <span data-i18n="scenarioNonRu">All non-RU traffic through tunnel</span></label>
             </div>
-            <div id="scenario-hint" class="hint" data-i18n="scenarioTunnelHint">You configure routes manually via /ip/route or other methods. For advanced users.</div>
+            <div id="scenario-hint" class="hint" data-i18n="scenarioDnsHint">Routes traffic to selected services through the tunnel using DNS forwarding (DoH). <span class="dns-info-icon" title="" data-i18n-title="dnsBrowserHint">&#9432;</span></div>
         </div>
-        <div id="fasttrack-warn" class="alert alert-warning" style="display:none;margin-top:8px" data-i18n="warnFasttrack">Fasttrack rules will be disabled for routing to work correctly. Uninstall script restores them.</div>
-        <div id="services-panel" style="display:none" class="scenario-panel">
+        <div id="fasttrack-warn" class="alert alert-warning" style="margin-top:8px" data-i18n="warnFasttrack">Fasttrack rules will be disabled for routing to work correctly. Uninstall script restores them.</div>
+        <div id="non-ru-warn" class="alert alert-error" style="display:none;margin-top:8px" data-i18n="scenarioNonRuWarn"></div>
+        <div id="services-panel" class="scenario-panel">
             <div class="scenario-panel-header">
                 <label style="margin-bottom:0" data-i18n="servicesLabel">Services to route through tunnel</label>
                 <div>
                     <button class="btn btn-secondary btn-sm" onclick="toggleAllServices(true)" data-i18n="btnSelectAll">Select all</button>
                     <button class="btn btn-secondary btn-sm" onclick="toggleAllServices(false)" data-i18n="btnDeselectAll">Deselect all</button>
                 </div>
+            </div>
+            <div style="margin-bottom:10px">
+                <label data-i18n="dohForwarderLabel">DNS-forwarder (DoH)</label>
+                <div class="radio-group" id="doh-selector">
+                    <label><input type="radio" name="doh-fwd" value="GoogleDNS" checked> Google</label>
+                    <label><input type="radio" name="doh-fwd" value="CloudFlare"> CloudFlare</label>
+                    <label><input type="radio" name="doh-fwd" value="Comss"> Comss</label>
+                    <label><input type="radio" name="doh-fwd" value="Quad9"> Quad9</label>
+                    <label><input type="radio" name="doh-fwd" value="Yandex"> Yandex</label>
+                    <label><input type="radio" name="doh-fwd" value="__custom"> <span data-i18n="dohCustom">Custom...</span></label>
+                </div>
+                <input type="text" id="doh-custom-url" placeholder="https://your-dns/dns-query or IP" style="display:none;margin-top:6px;width:100%">
+                <div class="hint" data-i18n="dohHint">All services will use this DNS-over-HTTPS (DoH) provider for domain resolution.</div>
             </div>
             <div id="services-grid" class="checkbox-grid"></div>
         </div>
@@ -479,6 +564,43 @@
             <input type="text" id="prefix-custom" placeholder="e.g. awg-office" style="display:none">
             <div class="hint" data-i18n="prefixHint">Change the prefix only if you need 2+ tunnels with different routing rules</div>
         </div>
+        <div id="s2s-panel" style="display:none;margin-top:14px">
+            <div class="s2s-fields">
+                <div>
+                    <label for="s2s-endpoint-b" data-i18n="s2sEndpointB">Server endpoint (Side B IP or domain)</label>
+                    <input type="text" id="s2s-endpoint-b" placeholder="e.g. 198.51.100.1">
+                </div>
+                <div>
+                    <label for="s2s-awg-port" data-i18n="s2sAwgPort">AWG port on server (Side B)</label>
+                    <input type="text" id="s2s-awg-port">
+                </div>
+                <div>
+                    <label for="s2s-tunnel-subnet" data-i18n="s2sTunnelSubnet">Tunnel subnet</label>
+                    <input type="text" id="s2s-tunnel-subnet" value="10.0.0.0/30">
+                </div>
+            </div>
+            <div class="s2s-fields">
+                <div>
+                    <label for="s2s-storage-a" data-i18n="s2sStorageA">Side A storage</label>
+                    <select id="s2s-storage-a">
+                        <option value="__auto" data-i18n="sAuto">Auto (usb1/ &rarr; disk1/)</option>
+                        <option value="disk1" data-i18n="sDisk1">disk1/</option>
+                        <option value="usb1" data-i18n="sUsb1">usb1/</option>
+                        <option value="usb1-part1">usb1-part1/</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="s2s-storage-b" data-i18n="s2sStorageB">Side B storage</label>
+                    <select id="s2s-storage-b">
+                        <option value="__auto" data-i18n="sAuto">Auto (usb1/ &rarr; disk1/)</option>
+                        <option value="disk1" data-i18n="sDisk1">disk1/</option>
+                        <option value="usb1" data-i18n="sUsb1">usb1/</option>
+                        <option value="usb1-part1">usb1-part1/</option>
+                    </select>
+                </div>
+            </div>
+            <button class="btn btn-secondary" onclick="regenerateS2SParams()" data-i18n="s2sRegenerate">Regenerate AWG params</button>
+        </div>
         <div class="actions">
             <button class="btn btn-primary" id="btn-generate" onclick="generate()" data-i18n="btnGenerate">Generate commands</button>
             <button class="btn btn-secondary" onclick="clearAll()" data-i18n="btnClear">Clear</button>
@@ -498,6 +620,7 @@
             <button class="btn btn-secondary" id="copy-btn" onclick="copyOutput('output','copy-btn')" data-i18n="btnCopy">Copy all</button>
         </div>
         <pre id="output"></pre>
+        <button class="btn-expand" id="expand-output" onclick="toggleCollapse('output','expand-output')" data-i18n="btnExpand" style="display:none">Show all</button>
     </div>
 
     <div id="routing-section" class="card" style="display:none">
@@ -505,8 +628,9 @@
             <div class="card-title" style="margin-bottom:0" data-i18n="routingTitle">Step 2: Routing Setup</div>
             <button class="btn btn-secondary" id="copy-routing-btn" onclick="copyOutput('routing-output','copy-routing-btn')" data-i18n="btnCopyRouting">Copy routing</button>
         </div>
-        <div class="alert-warning" data-i18n="routingNote">Paste this AFTER Step 1 completes (wait for "Installation complete!").</div>
+        <div class="alert alert-warning" data-i18n="routingNote">Paste this AFTER Step 1 completes (wait for "Installation complete!").</div>
         <pre id="routing-output"></pre>
+        <button class="btn-expand" id="expand-routing" onclick="toggleCollapse('routing-output','expand-routing')" data-i18n="btnExpand" style="display:none">Show all</button>
     </div>
 
     <div id="uninstall-section" class="card">
@@ -516,6 +640,32 @@
                     onclick="copyOutput('uninstall-output','copy-uninstall-btn')" data-i18n="btnCopyUn">Copy uninstall</button>
         </div>
         <pre id="uninstall-output"></pre>
+        <button class="btn-expand" id="expand-uninstall" onclick="toggleCollapse('uninstall-output','expand-uninstall')" data-i18n="btnExpand" style="display:none">Show all</button>
+    </div>
+
+    <div id="s2s-output-section">
+        <div class="card s2s-side">
+            <div class="s2s-side-header">
+                <div class="card-title" style="margin-bottom:0" data-i18n="s2sOutputA">Side A (MikroTik 1) — client</div>
+                <button class="btn btn-secondary" id="s2s-copy-a" onclick="copyOutput('s2s-out-a','s2s-copy-a')" data-i18n="btnCopy">Copy all</button>
+            </div>
+            <pre id="s2s-out-a" class="s2s-output"></pre>
+            <div style="margin-top:12px">
+                <div class="card-title" style="font-size:0.9rem" data-i18n="s2sUninstallA">Uninstall Side A (client)</div>
+                <pre id="s2s-uninst-a" class="s2s-output"></pre>
+            </div>
+        </div>
+        <div class="card s2s-side">
+            <div class="s2s-side-header">
+                <div class="card-title" style="margin-bottom:0" data-i18n="s2sOutputB">Side B (MikroTik 2) — server</div>
+                <button class="btn btn-secondary" id="s2s-copy-b" onclick="copyOutput('s2s-out-b','s2s-copy-b')" data-i18n="btnCopy">Copy all</button>
+            </div>
+            <pre id="s2s-out-b" class="s2s-output"></pre>
+            <div style="margin-top:12px">
+                <div class="card-title" style="font-size:0.9rem" data-i18n="s2sUninstallB">Uninstall Side B (server)</div>
+                <pre id="s2s-uninst-b" class="s2s-output"></pre>
+            </div>
+        </div>
     </div>
 
     <footer data-i18n="footer">Works entirely offline &mdash; no data leaves your browser.</footer>
@@ -529,7 +679,7 @@
     // ============================================================
     var currentLang = (function() {
         try { var s = localStorage.getItem('awg-lang'); if (s === 'ru' || s === 'en') return s; } catch(e) {}
-        return (navigator.language && navigator.language.slice(0,2) === 'ru') ? 'ru' : 'en';
+        return (navigator.language && navigator.language.slice(0,2) === 'en') ? 'en' : 'ru';
     })();
 
     var REPO = (function() {
@@ -602,14 +752,36 @@
             btnSelectAll: 'Select all',
             btnDeselectAll: 'Deselect all',
             sAuto: 'Auto (usb1/ \u2192 disk1/)',
-            warnFasttrack: 'Fasttrack rules will be disabled for routing to work correctly. Uninstall script restores them.',
+            warnFasttrack: 'Fasttrack rules will be disabled. Fasttrack is a MikroTik feature that speeds up packet forwarding by bypassing firewall rules. It must be disabled so that policy routing (mangle rules) can work correctly and traffic is routed through the tunnel.',
             noServiceSelected: 'Select at least one service.',
             modeContainerHint: 'WireGuard client on MikroTik + awg-proxy runs inside a Docker container directly on the router',
-            modeStandaloneHint: 'WireGuard client on MikroTik + awg-proxy runs on a separate device (Raspberry Pi, VPS, or another server)',
+            modeStandaloneHint: 'WireGuard client on MikroTik + awg-proxy runs on a separate device (Raspberry Pi, VPS, or another server). Use this mode for MikroTik routers that do not support containers.',
             scenarioTunnelHint: 'You configure routes manually via /ip/route or other methods. For advanced users.',
-            scenarioDnsHint: 'Routes traffic to selected services through the tunnel using DNS forwarding rules. Works best on a clean (reset) configuration.',
+            scenarioDnsHint: 'Routes traffic to selected services through the tunnel using DNS forwarding (DoH). MikroTik resolves domains via DNS-over-HTTPS and collects IPs into address lists. Firewall mangle rules then route this traffic through the tunnel. Works best on a clean (reset) configuration. Important: disable Secure DNS (DoH) in your browser so that DNS queries go through MikroTik.',
             scenarioNonRuHint: 'All traffic goes through the tunnel except Russian IP ranges (auto-updated daily). Works best on a clean (reset) configuration.',
-            prefixHint: 'Change the prefix only if you need 2+ tunnels with different routing rules'
+            prefixHint: 'Change the prefix only if you need 2+ tunnels with different routing rules',
+            modeSiteToSite: 'Site-to-site (two MikroTik)',
+            modeSiteToSiteHint: 'Two MikroTik routers connected via AmneziaWG tunnel. WG keys and AWG params are generated automatically.',
+            s2sEndpointB: 'Server endpoint (Side B IP or domain)',
+            s2sTunnelSubnet: 'Tunnel subnet',
+            s2sAwgPort: 'AWG port on server (Side B)',
+            s2sStorageA: 'Side A storage',
+            s2sStorageB: 'Side B storage',
+            s2sRegenerate: 'Regenerate AWG params',
+            s2sOutputA: 'Side A (MikroTik 1) \u2014 client',
+            s2sOutputB: 'Side B (MikroTik 2) \u2014 server',
+            s2sUninstallA: 'Uninstall Side A (client)',
+            s2sUninstallB: 'Uninstall Side B (server)',
+            errEndpointB: 'Server endpoint is required (Side B IP address or domain).',
+            errTunnelSubnet: 'Invalid tunnel subnet. Use /30 CIDR (e.g. 10.0.0.0/30).',
+            errAwgPort: 'AWG port must be 1024\u201365535.',
+            scenarioNonRuWarn: 'WARNING: All foreign traffic will go through VPN. Make sure your server can handle the load. Most VPS have limited bandwidth. A typical household with video services easily consumes 10+ TB/month. ALL torrent traffic will also go through the tunnel (that is A LOT of data). Game traffic may also be routed through it. Choose this option only if you are 100% sure.',
+            btnExpand: 'Show all',
+            btnCollapse: 'Collapse',
+            dohForwarderLabel: 'DNS forwarder (DoH)',
+            dohCustom: 'Custom...',
+            dohHint: 'All services will use this DNS-over-HTTPS (DoH) provider for domain resolution.',
+            dnsBrowserHint: 'Disable Secure DNS (DoH) in your browser.\nChrome: Settings \u2192 Privacy \u2192 Security \u2192 Use secure DNS \u2192 Off\nFirefox: Settings \u2192 Privacy \u2192 DNS over HTTPS \u2192 Off\nEdge: Settings \u2192 Privacy \u2192 Security \u2192 Use secure DNS \u2192 Off\nOtherwise MikroTik will not see your DNS queries and cannot route traffic.'
         },
         ru: {
             title: 'AWG Proxy \u2014 \u041e\u0444\u043b\u0430\u0439\u043d-\u0433\u0435\u043d\u0435\u0440\u0430\u0442\u043e\u0440 \u043a\u043e\u043c\u0430\u043d\u0434 MikroTik',
@@ -664,14 +836,36 @@
             btnSelectAll: '\u0412\u044b\u0431\u0440\u0430\u0442\u044c \u0432\u0441\u0435',
             btnDeselectAll: '\u0421\u043d\u044f\u0442\u044c \u0432\u0441\u0435',
             sAuto: 'Auto (usb1/ \u2192 disk1/)',
-            warnFasttrack: '\u041f\u0440\u0430\u0432\u0438\u043b\u0430 Fasttrack \u0431\u0443\u0434\u0443\u0442 \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0434\u043b\u044f \u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u043e\u0439 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438. \u0421\u043a\u0440\u0438\u043f\u0442 \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u044f \u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442 \u0438\u0445.',
+            warnFasttrack: '\u041f\u0440\u0430\u0432\u0438\u043b\u0430 Fasttrack \u0431\u0443\u0434\u0443\u0442 \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b. Fasttrack \u2014 \u0444\u0443\u043d\u043a\u0446\u0438\u044f MikroTik, \u0443\u0441\u043a\u043e\u0440\u044f\u044e\u0449\u0430\u044f \u043f\u0435\u0440\u0435\u0441\u044b\u043b\u043a\u0443 \u043f\u0430\u043a\u0435\u0442\u043e\u0432 \u0432 \u043e\u0431\u0445\u043e\u0434 \u043f\u0440\u0430\u0432\u0438\u043b \u0444\u0430\u0439\u0440\u0432\u043e\u043b\u0430. \u0415\u0433\u043e \u043d\u0435\u043e\u0431\u0445\u043e\u0434\u0438\u043c\u043e \u043e\u0442\u043a\u043b\u044e\u0447\u0438\u0442\u044c, \u0447\u0442\u043e\u0431\u044b policy-\u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f (mangle-\u043f\u0440\u0430\u0432\u0438\u043b\u0430) \u0440\u0430\u0431\u043e\u0442\u0430\u043b\u0430 \u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u043e \u0438 \u0442\u0440\u0430\u0444\u0438\u043a \u043d\u0430\u043f\u0440\u0430\u0432\u043b\u044f\u043b\u0441\u044f \u0432 \u0442\u0443\u043d\u043d\u0435\u043b\u044c.',
             noServiceSelected: '\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0445\u043e\u0442\u044f \u0431\u044b \u043e\u0434\u0438\u043d \u0441\u0435\u0440\u0432\u0438\u0441.',
             modeContainerHint: 'WireGuard-\u043a\u043b\u0438\u0435\u043d\u0442 \u043d\u0430 MikroTik + awg-proxy \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442\u0441\u044f \u0432 Docker-\u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u0435 \u043f\u0440\u044f\u043c\u043e \u043d\u0430 \u0440\u043e\u0443\u0442\u0435\u0440\u0435',
-            modeStandaloneHint: 'WireGuard-\u043a\u043b\u0438\u0435\u043d\u0442 \u043d\u0430 MikroTik + awg-proxy \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e\u043c \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0435 (Raspberry Pi, VPS \u0438\u043b\u0438 \u0434\u0440\u0443\u0433\u043e\u0439 \u0441\u0435\u0440\u0432\u0435\u0440)',
+            modeStandaloneHint: 'WireGuard-\u043a\u043b\u0438\u0435\u043d\u0442 \u043d\u0430 MikroTik + awg-proxy \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e\u043c \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0435 (Raspberry Pi, VPS \u0438\u043b\u0438 \u0434\u0440\u0443\u0433\u043e\u0439 \u0441\u0435\u0440\u0432\u0435\u0440). \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u044d\u0442\u043e\u0442 \u0440\u0435\u0436\u0438\u043c \u0434\u043b\u044f MikroTik, \u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u043d\u0435 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u044e\u0442 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u044b.',
             scenarioTunnelHint: '\u041c\u0430\u0440\u0448\u0440\u0443\u0442\u044b \u043d\u0430\u0441\u0442\u0440\u0430\u0438\u0432\u0430\u0435\u0442\u0435 \u0441\u0430\u043c\u043e\u0441\u0442\u043e\u044f\u0442\u0435\u043b\u044c\u043d\u043e \u0447\u0435\u0440\u0435\u0437 /ip/route \u0438\u043b\u0438 \u0434\u0440\u0443\u0433\u0438\u043c\u0438 \u0441\u043f\u043e\u0441\u043e\u0431\u0430\u043c\u0438. \u0414\u043b\u044f \u043e\u043f\u044b\u0442\u043d\u044b\u0445 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0435\u0439.',
-            scenarioDnsHint: '\u041d\u0430\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u0440\u0430\u0444\u0438\u043a \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0445 \u0441\u0435\u0440\u0432\u0438\u0441\u043e\u0432 \u0447\u0435\u0440\u0435\u0437 \u0442\u0443\u043d\u043d\u0435\u043b\u044c \u0441 \u043f\u043e\u043c\u043e\u0449\u044c\u044e DNS-\u043f\u0440\u0430\u0432\u0438\u043b. \u041b\u0443\u0447\u0448\u0435 \u0432\u0441\u0435\u0433\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u043d\u0430 \u0447\u0438\u0441\u0442\u043e\u0439 (reset) \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438.',
+            scenarioDnsHint: '\u041d\u0430\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u0440\u0430\u0444\u0438\u043a \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0445 \u0441\u0435\u0440\u0432\u0438\u0441\u043e\u0432 \u0447\u0435\u0440\u0435\u0437 \u0442\u0443\u043d\u043d\u0435\u043b\u044c \u0441 \u043f\u043e\u043c\u043e\u0449\u044c\u044e DNS-\u0444\u043e\u0440\u0432\u0430\u0440\u0434\u0438\u043d\u0433\u0430 (DoH). MikroTik \u0440\u0435\u0437\u043e\u043b\u0432\u0438\u0442 \u0434\u043e\u043c\u0435\u043d\u044b \u0447\u0435\u0440\u0435\u0437 DNS-over-HTTPS \u0438 \u0441\u043e\u0431\u0438\u0440\u0430\u0435\u0442 IP \u0432 \u0430\u0434\u0440\u0435\u0441\u043d\u044b\u0435 \u0441\u043f\u0438\u0441\u043a\u0438. Mangle-\u043f\u0440\u0430\u0432\u0438\u043b\u0430 \u0444\u0430\u0439\u0440\u0432\u043e\u043b\u0430 \u0437\u0430\u0442\u0435\u043c \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0438\u0440\u0443\u044e\u0442 \u044d\u0442\u043e\u0442 \u0442\u0440\u0430\u0444\u0438\u043a \u0447\u0435\u0440\u0435\u0437 \u0442\u0443\u043d\u043d\u0435\u043b\u044c. \u041b\u0443\u0447\u0448\u0435 \u0432\u0441\u0435\u0433\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u043d\u0430 \u0447\u0438\u0441\u0442\u043e\u0439 (reset) \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438. \u0412\u0430\u0436\u043d\u043e: \u043e\u0442\u043a\u043b\u044e\u0447\u0438\u0442\u0435 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u044b\u0439 DNS (DoH) \u0432 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435, \u0447\u0442\u043e\u0431\u044b DNS-\u0437\u0430\u043f\u0440\u043e\u0441\u044b \u0448\u043b\u0438 \u0447\u0435\u0440\u0435\u0437 MikroTik.',
             scenarioNonRuHint: '\u0412\u0435\u0441\u044c \u0442\u0440\u0430\u0444\u0438\u043a \u0438\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 \u0442\u0443\u043d\u043d\u0435\u043b\u044c, \u043a\u0440\u043e\u043c\u0435 \u0440\u043e\u0441\u0441\u0438\u0439\u0441\u043a\u0438\u0445 IP-\u0434\u0438\u0430\u043f\u0430\u0437\u043e\u043d\u043e\u0432 (\u043e\u0431\u043d\u043e\u0432\u043b\u044f\u044e\u0442\u0441\u044f \u0435\u0436\u0435\u0434\u043d\u0435\u0432\u043d\u043e). \u041b\u0443\u0447\u0448\u0435 \u0432\u0441\u0435\u0433\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u043d\u0430 \u0447\u0438\u0441\u0442\u043e\u0439 (reset) \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438.',
-            prefixHint: '\u041c\u0435\u043d\u044f\u0439\u0442\u0435 \u043f\u0440\u0435\u0444\u0438\u043a\u0441, \u0442\u043e\u043b\u044c\u043a\u043e \u0435\u0441\u043b\u0438 \u043d\u0443\u0436\u043d\u043e 2+ \u0442\u0443\u043d\u043d\u0435\u043b\u044f \u0441 \u0440\u0430\u0437\u043d\u044b\u043c\u0438 \u043f\u0440\u0430\u0432\u0438\u043b\u0430\u043c\u0438 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438'
+            prefixHint: '\u041c\u0435\u043d\u044f\u0439\u0442\u0435 \u043f\u0440\u0435\u0444\u0438\u043a\u0441, \u0442\u043e\u043b\u044c\u043a\u043e \u0435\u0441\u043b\u0438 \u043d\u0443\u0436\u043d\u043e 2+ \u0442\u0443\u043d\u043d\u0435\u043b\u044f \u0441 \u0440\u0430\u0437\u043d\u044b\u043c\u0438 \u043f\u0440\u0430\u0432\u0438\u043b\u0430\u043c\u0438 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438',
+            modeSiteToSite: 'Site-to-site (\u0434\u0432\u0430 MikroTik)',
+            modeSiteToSiteHint: '\u0414\u0432\u0430 \u0440\u043e\u0443\u0442\u0435\u0440\u0430 MikroTik, \u0441\u043e\u0435\u0434\u0438\u043d\u0451\u043d\u043d\u044b\u0435 \u0447\u0435\u0440\u0435\u0437 AmneziaWG-\u0442\u0443\u043d\u043d\u0435\u043b\u044c. WG-\u043a\u043b\u044e\u0447\u0438 \u0438 AWG-\u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u0433\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u044e\u0442\u0441\u044f \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438.',
+            s2sEndpointB: 'Endpoint \u0441\u0435\u0440\u0432\u0435\u0440\u0430 (\u0441\u0442\u043e\u0440\u043e\u043d\u0430 B, IP \u0438\u043b\u0438 \u0434\u043e\u043c\u0435\u043d)',
+            s2sTunnelSubnet: '\u041f\u043e\u0434\u0441\u0435\u0442\u044c \u0442\u0443\u043d\u043d\u0435\u043b\u044f',
+            s2sAwgPort: 'AWG-\u043f\u043e\u0440\u0442 \u043d\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435 (\u0441\u0442\u043e\u0440\u043e\u043d\u0430 B)',
+            s2sStorageA: '\u0425\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435 \u0441\u0442\u043e\u0440\u043e\u043d\u044b A',
+            s2sStorageB: '\u0425\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435 \u0441\u0442\u043e\u0440\u043e\u043d\u044b B',
+            s2sRegenerate: '\u041f\u0435\u0440\u0435\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c AWG-\u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b',
+            s2sOutputA: '\u0421\u0442\u043e\u0440\u043e\u043d\u0430 A (MikroTik 1) \u2014 \u043a\u043b\u0438\u0435\u043d\u0442',
+            s2sOutputB: '\u0421\u0442\u043e\u0440\u043e\u043d\u0430 B (MikroTik 2) \u2014 \u0441\u0435\u0440\u0432\u0435\u0440',
+            s2sUninstallA: '\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435 \u0441\u0442\u043e\u0440\u043e\u043d\u044b A (\u043a\u043b\u0438\u0435\u043d\u0442)',
+            s2sUninstallB: '\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435 \u0441\u0442\u043e\u0440\u043e\u043d\u044b B (\u0441\u0435\u0440\u0432\u0435\u0440)',
+            errEndpointB: '\u0423\u043a\u0430\u0436\u0438\u0442\u0435 endpoint \u0441\u0442\u043e\u0440\u043e\u043d\u044b B (IP-\u0430\u0434\u0440\u0435\u0441 \u0438\u043b\u0438 \u0434\u043e\u043c\u0435\u043d).',
+            errTunnelSubnet: '\u041d\u0435\u0432\u0435\u0440\u043d\u0430\u044f \u043f\u043e\u0434\u0441\u0435\u0442\u044c. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 /30 CIDR (\u043d\u0430\u043f\u0440. 10.0.0.0/30).',
+            errAwgPort: 'AWG-\u043f\u043e\u0440\u0442 \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c 1024\u201365535.',
+            scenarioNonRuWarn: '\u0412\u041d\u0418\u041c\u0410\u041d\u0418\u0415: \u0412\u0435\u0441\u044c \u0437\u0430\u0440\u0443\u0431\u0435\u0436\u043d\u044b\u0439 \u0442\u0440\u0430\u0444\u0438\u043a \u043f\u043e\u0439\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 VPN. \u0423\u0431\u0435\u0434\u0438\u0442\u0435\u0441\u044c, \u0447\u0442\u043e \u0432\u0430\u0448 \u0441\u0435\u0440\u0432\u0435\u0440 \u0432\u044b\u0434\u0435\u0440\u0436\u0438\u0442 \u043d\u0430\u0433\u0440\u0443\u0437\u043a\u0443. \u0411\u043e\u043b\u044c\u0448\u0438\u043d\u0441\u0442\u0432\u043e VPS \u0438\u043c\u0435\u044e\u0442 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u043d\u044b\u0439 \u0442\u0440\u0430\u0444\u0438\u043a. \u0422\u0438\u043f\u0438\u0447\u043d\u043e\u0435 \u0434\u043e\u043c\u043e\u0445\u043e\u0437\u044f\u0439\u0441\u0442\u0432\u043e \u0441 \u0432\u0438\u0434\u0435\u043e\u0441\u0435\u0440\u0432\u0438\u0441\u0430\u043c\u0438 \u043b\u0435\u0433\u043a\u043e \u043f\u043e\u0442\u0440\u0435\u0431\u043b\u044f\u0435\u0442 10+ \u0422\u0411/\u043c\u0435\u0441. \u0412\u0415\u0421\u042c \u0442\u043e\u0440\u0440\u0435\u043d\u0442-\u0442\u0440\u0430\u0444\u0438\u043a \u0442\u043e\u0436\u0435 \u043f\u043e\u0439\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 \u0442\u0443\u043d\u043d\u0435\u043b\u044c (\u0430 \u044d\u0442\u043e \u041e\u0427\u0415\u041d\u042c \u043c\u043d\u043e\u0433\u043e \u0434\u0430\u043d\u043d\u044b\u0445). \u0418\u0433\u0440\u043e\u0432\u043e\u0439 \u0442\u0440\u0430\u0444\u0438\u043a \u0442\u043e\u0436\u0435 \u043c\u043e\u0436\u0435\u0442 \u043b\u0435\u0433\u043a\u043e \u0437\u0430\u0432\u0435\u0440\u043d\u0443\u0442\u044c\u0441\u044f \u0442\u0443\u0434\u0430. \u0412\u044b\u0431\u0438\u0440\u0430\u0439\u0442\u0435 \u044d\u0442\u043e\u0442 \u0432\u0430\u0440\u0438\u0430\u043d\u0442, \u0442\u043e\u043b\u044c\u043a\u043e \u0435\u0441\u043b\u0438 \u043d\u0430 100% \u0443\u0432\u0435\u0440\u0435\u043d\u044b.',
+            btnExpand: '\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0432\u0441\u0451',
+            btnCollapse: '\u0421\u0432\u0435\u0440\u043d\u0443\u0442\u044c',
+            dohForwarderLabel: 'DNS-\u0444\u043e\u0440\u0432\u0430\u0440\u0434\u0435\u0440 (DoH)',
+            dohCustom: '\u0421\u0432\u043e\u0439...',
+            dohHint: '\u0412\u0441\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u044b \u0431\u0443\u0434\u0443\u0442 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u044c \u044d\u0442\u043e\u0433\u043e DNS-over-HTTPS (DoH) \u043f\u0440\u043e\u0432\u0430\u0439\u0434\u0435\u0440\u0430 \u0434\u043b\u044f \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043d\u0438\u044f \u0434\u043e\u043c\u0435\u043d\u043e\u0432.',
+            dnsBrowserHint: '\u041e\u0442\u043a\u043b\u044e\u0447\u0438\u0442\u0435 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u044b\u0439 DNS (DoH) \u0432 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435.\nChrome: \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u2192 \u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u044b\u0439 DNS \u2192 \u0412\u044b\u043a\u043b\nFirefox: \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u2192 \u041f\u0440\u0438\u0432\u0430\u0442\u043d\u043e\u0441\u0442\u044c \u2192 DNS \u0447\u0435\u0440\u0435\u0437 HTTPS \u2192 \u0412\u044b\u043a\u043b\nEdge: \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u2192 \u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u044b\u0439 DNS \u2192 \u0412\u044b\u043a\u043b\n\u0418\u043d\u0430\u0447\u0435 MikroTik \u043d\u0435 \u0443\u0432\u0438\u0434\u0438\u0442 \u0432\u0430\u0448\u0438 DNS-\u0437\u0430\u043f\u0440\u043e\u0441\u044b \u0438 \u043d\u0435 \u0441\u043c\u043e\u0436\u0435\u0442 \u043d\u0430\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0442\u0440\u0430\u0444\u0438\u043a.'
         }
     };
 
@@ -681,12 +875,17 @@
         currentLang = lang;
         try { localStorage.setItem('awg-lang', lang); } catch(e) {}
         applyI18n();
+        onScenarioChange();
     }
 
     function applyI18n() {
         var els = document.querySelectorAll('[data-i18n]');
         for (var i = 0; i < els.length; i++) {
             els[i].textContent = t(els[i].getAttribute('data-i18n'));
+        }
+        var titles = document.querySelectorAll('[data-i18n-title]');
+        for (var i = 0; i < titles.length; i++) {
+            titles[i].title = t(titles[i].getAttribute('data-i18n-title'));
         }
         var phs = document.querySelectorAll('[data-i18n-ph]');
         for (var i = 0; i < phs.length; i++) {
@@ -984,48 +1183,52 @@
     // Services & exclusions data
     // ============================================================
     var SERVICES = {
-        telegram:  {list:'Telegram',  fwd:'Google', d:['telegram.org','t.me','telesco.pe','tdesktop.com','telegram.me','telegram.dog','telegra.ph'], r:['telegram'], on:true},
-        youtube:   {list:'YouTube',   fwd:'Google', d:['youtube.com','youtu.be','googlevideo.com','ytimg.com','yt3.ggpht.com','yt.be','youtube-nocookie.com','youtubekids.com','youtube-ui.l.google.com'], r:['youtube','googlevideo'], on:true},
-        instagram: {list:'Instagram', fwd:'Google', d:['ig.me','instagram.com','cdninstagram.com','instagram.net'], r:['instagram'], on:true},
-        discord:   {list:'Discord',   fwd:'Google', d:['discord.com','discord.gg','discordapp.com','discordapp.net','dis.gd','discord.media'], r:['discord'], on:true},
-        openai:    {list:'OpenAI',    fwd:'Comss',  d:['openai.com','chatgpt.com','sora.com','oaiusercontent.com','oaistatic.com'], r:[], on:true},
-        netflix:   {list:'NetFlix',   fwd:'Google', d:['netflix.com','netflix.net','nflximg.com','nflximg.net','nflxvideo.net','nflxso.net','nflxext.com','fast.com'], r:[], on:true},
-        spotify:   {list:'Spotify',   fwd:'Google', d:['spotify.com','spoti.fi','scdn.co','spotifycdn.com','spotifycdn.net','byspotify.com','pscdn.co','spotify-everywhere.com','spotify.design','spotifycharts.com','spotifycodes.com','spotifyforbrands.com','spotifyjobs.com'], r:[], on:true},
-        twitter:   {list:'Twitter',   fwd:'Google', d:['twitter.com','x.com','t.co','twimg.com','twitpic.com','vine.co'], r:[], on:true},
-        tiktok:    {list:'TikTok',    fwd:'Google', d:['tiktok.com','tiktokcdn.com','tiktokv.com','musical.ly','tiktokcdn-us.com','tiktokd.org','byteoversea.com','ibyteimg.com','ibytedtos.com','byteimg.com'], r:[], on:true},
-        meta:      {list:'META',      fwd:'Google', d:['facebook.com','fbcdn.net','fb.com','fb.me','fbsbx.com','whatsapp.com','whatsapp.net','oculus.com','oculuscdn.com','instagram.com','cdninstagram.com'], r:['facebook','instagram','oculus','whatsapp'], on:false},
-        samsung:   {list:'Samsung',   fwd:'Google', d:['samsung.com','samsungcloud.com','samsungapps.com','samsungdm.com','samsungelectronics.com'], r:[], on:false},
-        intel:     {list:'Intel',     fwd:'Comss',  d:['intel.com','intel.co.uk','intel.co.jp','intel.de','intel.fr'], r:['intel'], on:false},
-        lg:        {list:'LG',        fwd:'Google', d:['lg.com','lgappstv.com','lge.com','lgsmartad.com'], r:[], on:false},
-        tmdb:      {list:'TMDB',      fwd:'Comss',  d:['themoviedb.org','tmdb.org','tmdb-image-prod.b-cdn.net'], r:[], on:false},
-        rezka:     {list:'Rezka',     fwd:'Comss',  d:['stream.voidboost.cc','zerocdn.com'], r:['rezka'], on:false},
-        tidal:     {list:'Tidal',     fwd:'Google', d:['tidal.com','tidalhifi.com','wimpmusic.com'], r:[], on:false},
-        steam:     {list:'Steam',     fwd:'Google', d:['steampowered.com','steamcommunity.com','steamstatic.com','steamcdn-a.akamaihd.net','steamgames.com','steamusercontent.com','valve.software','valvesoftware.com'], r:[], on:false}
+        claude:    {list:'Claude',    d:['claude.ai','anthropic.com'], r:[], on:true},
+        discord:   {list:'Discord',   d:['discord.com','discord.gg','discordapp.com','discordapp.net','dis.gd','discord.media'], r:['discord'], on:true},
+        gemini:    {list:'Gemini',    d:['gemini.google.com','aistudio.google.com','generativelanguage.googleapis.com','deepmind.google','deepmind.com'], r:[], on:false},
+        google:    {list:'GoogleWeb', d:['google.com','googleapis.com','gstatic.com','google-analytics.com','googleusercontent.com','googlesyndication.com','doubleclick.net','google.ru'], r:[], on:false},
+        instagram: {list:'Instagram', d:['ig.me','instagram.com','cdninstagram.com','instagram.net'], r:['instagram'], on:true},
+        intel:     {list:'Intel',     d:['intel.com','intel.co.uk','intel.co.jp','intel.de','intel.fr'], r:['intel'], on:false},
+        lg:        {list:'LG',        d:['lg.com','lgappstv.com','lge.com','lgsmartad.com'], r:[], on:false},
+        meta:      {list:'META',      d:['facebook.com','fbcdn.net','fb.com','fb.me','fbsbx.com','whatsapp.com','whatsapp.net','oculus.com','oculuscdn.com','instagram.com','cdninstagram.com'], r:['facebook','instagram','oculus','whatsapp'], on:false},
+        netflix:   {list:'NetFlix',   d:['netflix.com','netflix.net','nflximg.com','nflximg.net','nflxvideo.net','nflxso.net','nflxext.com','fast.com'], r:[], on:true},
+        openai:    {list:'OpenAI',    d:['openai.com','chatgpt.com','sora.com','oaiusercontent.com','oaistatic.com'], r:[], on:true},
+        rezka:     {list:'Rezka',     d:['stream.voidboost.cc','zerocdn.com'], r:['rezka'], on:false},
+        samsung:   {list:'Samsung',   d:['samsung.com','samsungcloud.com','samsungapps.com','samsungdm.com','samsungelectronics.com'], r:[], on:false},
+        spotify:   {list:'Spotify',   d:['spotify.com','spoti.fi','scdn.co','spotifycdn.com','spotifycdn.net','byspotify.com','pscdn.co','spotify-everywhere.com','spotify.design','spotifycharts.com','spotifycodes.com','spotifyforbrands.com','spotifyjobs.com'], r:[], on:true},
+        steam:     {list:'Steam',     d:['steampowered.com','steamcommunity.com','steamstatic.com','steamcdn-a.akamaihd.net','steamgames.com','steamusercontent.com','valve.software','valvesoftware.com'], r:[], on:false},
+        telegram:  {list:'Telegram',  d:['telegram.org','t.me','telesco.pe','tdesktop.com','telegram.me','telegram.dog','telegra.ph'], r:['telegram'], on:true},
+        tiktok:    {list:'TikTok',    d:['tiktok.com','tiktokcdn.com','tiktokv.com','musical.ly','tiktokcdn-us.com','tiktokd.org','byteoversea.com','ibyteimg.com','ibytedtos.com','byteimg.com'], r:[], on:true},
+        twitter:   {list:'Twitter',   d:['twitter.com','x.com','t.co','twimg.com','twitpic.com','vine.co'], r:[], on:true},
+        youtube:   {list:'YouTube',   d:['youtube.com','youtu.be','googlevideo.com','ytimg.com','yt3.ggpht.com','yt.be','youtube-nocookie.com','youtubekids.com','youtube-ui.l.google.com'], r:['youtube','googlevideo'], on:true}
     };
 
     var EXCLUSIONS = {
-        steam:   {list:'Steam',      label:'Steam',       d:['steampowered.com','steamcommunity.com','steamstatic.com','steamcdn-a.akamaihd.net','steamgames.com','steamusercontent.com','valve.software','valvesoftware.com'], r:[], fwd:'Google', on:true},
-        epic:    {list:'EpicGames',   label:'Epic Games',  d:['epicgames.com','unrealengine.com','fortnite.com','epicgames.dev'], r:[], fwd:'Google', on:false},
-        blizzard:{list:'Blizzard',    label:'Battle.net',  d:['blizzard.com','battle.net','blizzard.net'], r:[], fwd:'Google', on:false},
-        apple:   {list:'Apple',       label:'Apple',       d:['apple.com','icloud.com','mzstatic.com','apple-dns.net','cdn-apple.com'], r:[], fwd:'Google', on:false},
-        microsoft:{list:'Microsoft',  label:'Microsoft',   d:['microsoft.com','windowsupdate.com','live.com','office.com','office.net','msftconnecttest.com','azure.com'], r:[], fwd:'Google', on:false}
+        steam:   {list:'Steam',      label:'Steam',       d:['steampowered.com','steamcommunity.com','steamstatic.com','steamcdn-a.akamaihd.net','steamgames.com','steamusercontent.com','valve.software','valvesoftware.com'], r:[], on:true},
+        epic:    {list:'EpicGames',   label:'Epic Games',  d:['epicgames.com','unrealengine.com','fortnite.com','epicgames.dev'], r:[], on:false},
+        blizzard:{list:'Blizzard',    label:'Battle.net',  d:['blizzard.com','battle.net','blizzard.net'], r:[], on:false},
+        apple:   {list:'Apple',       label:'Apple',       d:['apple.com','icloud.com','mzstatic.com','apple-dns.net','cdn-apple.com'], r:[], on:false},
+        microsoft:{list:'Microsoft',  label:'Microsoft',   d:['microsoft.com','windowsupdate.com','live.com','office.com','office.net','msftconnecttest.com','azure.com'], r:[], on:false}
     };
 
     var DOH_FORWARDERS = [
-        {doh:'https://dns.google/dns-query', name:'Google'},
-        {doh:'https://dns.comss.one/mikrotik', name:'Comss'},
+        {doh:'https://dns.google/dns-query', name:'GoogleDNS'},
         {doh:'https://cloudflare-dns.com/dns-query', name:'CloudFlare'},
-        {doh:'https://dns.quad9.net/dns-query', name:'Quad9'}
+        {doh:'https://dns.comss.one/mikrotik', name:'Comss'},
+        {doh:'https://dns.quad9.net/dns-query', name:'Quad9'},
+        {doh:'https://common.dot.dns.yandex.net/dns-query', name:'Yandex'}
     ];
 
     var DNS_STATICS = [
+        {addr:'8.8.8.8', comment:'DNS GoogleDNS', name:'dns.google'},
+        {addr:'8.8.4.4', comment:'DNS GoogleDNS', name:'dns.google'},
         {addr:'1.1.1.1', comment:'DNS CloudFlare', name:'cloudflare-dns.com'},
         {addr:'1.0.0.1', comment:'DNS CloudFlare', name:'cloudflare-dns.com'},
-        {addr:'8.8.8.8', comment:'DNS Google', name:'dns.google'},
-        {addr:'8.8.4.4', comment:'DNS Google', name:'dns.google'},
+        {addr:'195.133.25.16', comment:'DNS Comss', name:'dns.comss.one'},
         {addr:'9.9.9.9', comment:'DNS Quad9', name:'dns.quad9.net'},
         {addr:'149.112.112.112', comment:'DNS Quad9', name:'dns.quad9.net'},
-        {addr:'195.133.25.16', comment:'DNS Comss', name:'dns.comss.one'}
+        {addr:'77.88.8.8', comment:'DNS Yandex', name:'common.dot.dns.yandex.net'},
+        {addr:'77.88.8.1', comment:'DNS Yandex', name:'common.dot.dns.yandex.net'}
     ];
 
     // ============================================================
@@ -1036,7 +1239,7 @@
         for (var i = 0; i < radios.length; i++) {
             if (radios[i].checked) return radios[i].value;
         }
-        return 'tunnel';
+        return 'dns-fwd';
     }
 
     function onScenarioChange() {
@@ -1044,9 +1247,15 @@
         document.getElementById('services-panel').style.display = s === 'dns-fwd' ? 'block' : 'none';
         document.getElementById('exclusions-panel').style.display = s === 'non-ru' ? 'block' : 'none';
         document.getElementById('fasttrack-warn').style.display = (s === 'dns-fwd' || s === 'non-ru') ? 'block' : 'none';
+        document.getElementById('non-ru-warn').style.display = s === 'non-ru' ? 'block' : 'none';
         var hintKey = s === 'dns-fwd' ? 'scenarioDnsHint' : s === 'non-ru' ? 'scenarioNonRuHint' : 'scenarioTunnelHint';
-        document.getElementById('scenario-hint').setAttribute('data-i18n', hintKey);
-        document.getElementById('scenario-hint').textContent = t(hintKey);
+        var hintEl = document.getElementById('scenario-hint');
+        hintEl.setAttribute('data-i18n', hintKey);
+        if (s === 'dns-fwd') {
+            hintEl.innerHTML = t(hintKey) + ' <span class="dns-info-icon" title="' + esc(t('dnsBrowserHint')).replace(/\n/g, '&#10;') + '" data-i18n-title="dnsBrowserHint">&#9432;</span>';
+        } else {
+            hintEl.textContent = t(hintKey);
+        }
     }
 
     function initServiceCheckboxes() {
@@ -1095,20 +1304,19 @@
     // ============================================================
     // Routing scenario builders
     // ============================================================
-    function buildFwdEntries(prefix, serviceKeys, svcMap) {
+    function buildFwdEntries(prefix, serviceKeys, svcMap, forwarderName) {
         var lines = [];
         for (var i = 0; i < serviceKeys.length; i++) {
             var svc = svcMap[serviceKeys[i]];
             if (!svc) continue;
-            // Compact: foreach loop over domain array
             var domains = [];
             for (var j = 0; j < svc.d.length; j++) domains.push('"' + svc.d[j] + '"');
             lines.push(':foreach d in={' + domains.join(';') + '} do={');
-            lines.push('  /ip/dns/static/add address-list=' + svc.list + ' forward-to=' + svc.fwd + ' match-subdomain=yes type=FWD name=$d comment=' + prefix + '-dns-fwd');
+            lines.push('  /ip/dns/static/add address-list=' + svc.list + ' forward-to=' + forwarderName + ' match-subdomain=yes type=FWD name=$d comment=' + prefix + '-dns-fwd');
             lines.push('}');
             if (svc.r) {
                 for (var j = 0; j < svc.r.length; j++) {
-                    lines.push('/ip/dns/static/add address-list=' + svc.list + ' forward-to=' + svc.fwd + ' type=FWD regexp=' + svc.r[j] + ' comment=' + prefix + '-dns-fwd');
+                    lines.push('/ip/dns/static/add address-list=' + svc.list + ' forward-to=' + forwarderName + ' type=FWD regexp=' + svc.r[j] + ' comment=' + prefix + '-dns-fwd');
                 }
             }
         }
@@ -1132,27 +1340,58 @@
         ];
     }
 
-    function buildDnsRoutingScenario(prefix, selectedServices) {
+    function getSelectedDohForwarder() {
+        var radios = document.getElementsByName('doh-fwd');
+        for (var i = 0; i < radios.length; i++) {
+            if (radios[i].checked) return radios[i].value;
+        }
+        return 'GoogleDNS';
+    }
+
+    function getDohForwarderInfo(forwarderName) {
+        if (forwarderName === '__custom') {
+            var url = document.getElementById('doh-custom-url').value.trim();
+            if (url.indexOf('https://') === 0) {
+                return {doh: url, name: 'CustomDoH', isDoH: true};
+            }
+            return {addr: url, name: 'CustomDNS', isDoH: false};
+        }
+        for (var i = 0; i < DOH_FORWARDERS.length; i++) {
+            if (DOH_FORWARDERS[i].name === forwarderName) return {doh: DOH_FORWARDERS[i].doh, name: DOH_FORWARDERS[i].name, isDoH: true};
+        }
+        return {doh: DOH_FORWARDERS[0].doh, name: DOH_FORWARDERS[0].name, isDoH: true};
+    }
+
+    function getDnsStaticsForForwarder(forwarderName) {
+        return DNS_STATICS.filter(function(s) { return s.comment === 'DNS ' + forwarderName; });
+    }
+
+    function buildDnsRoutingScenario(prefix, selectedServices, forwarderName) {
+        var fwd = getDohForwarderInfo(forwarderName);
         var lines = [];
         lines.push('');
         lines.push('# ============================================================');
         lines.push('# DNS-based routing for selected services');
         lines.push('# ============================================================');
         lines.push('{');
-        lines.push('# DoH forwarders');
-        for (var i = 0; i < DOH_FORWARDERS.length; i++) {
-            var f = DOH_FORWARDERS[i];
-            lines.push(':do { /ip/dns/forwarders/add doh-servers=' + f.doh + ' name=' + f.name + ' comment=' + prefix + '-dns-fwd } on-error={}');
+        if (fwd.isDoH) {
+            lines.push('# DoH forwarder');
+            lines.push(':do { /ip/dns/forwarders/add doh-servers=' + fwd.doh + ' name=' + fwd.name + ' comment=' + prefix + '-dns-fwd } on-error={}');
+            var statics = getDnsStaticsForForwarder(fwd.name);
+            if (statics.length > 0) {
+                lines.push('# DNS static entries for DoH resolver IPs');
+                for (var i = 0; i < statics.length; i++) {
+                    lines.push('/ip/dns/static/add address=' + statics[i].addr + ' comment="' + prefix + '-dns-fwd" name=' + statics[i].name + ' type=A');
+                }
+            }
+        } else {
+            lines.push('# Custom DNS static entry');
+            lines.push('/ip/dns/static/add address=' + fwd.addr + ' comment="' + prefix + '-dns-fwd" name=' + fwd.name + ' type=A');
         }
-        lines.push('# DNS static entries for DoH resolver IPs');
-        for (var i = 0; i < DNS_STATICS.length; i++) {
-            var s = DNS_STATICS[i];
-            lines.push('/ip/dns/static/add address=' + s.addr + ' comment="' + prefix + '-dns-fwd" name=' + s.name + ' type=A');
-        }
+        var fwdName = fwd.name;
         lines.push('# FWD entries');
-        lines = lines.concat(buildFwdEntries(prefix, selectedServices, SERVICES));
+        lines = lines.concat(buildFwdEntries(prefix, selectedServices, SERVICES, fwdName));
         lines.push('# Mangle rules');
-        // Compact: foreach loop over address-list names
         var listNames = [];
         for (var i = 0; i < selectedServices.length; i++) {
             var svc = SERVICES[selectedServices[i]];
@@ -1173,7 +1412,8 @@
         return lines;
     }
 
-    function buildNonRuScenario(prefix, exclusionKeys) {
+    function buildNonRuScenario(prefix, exclusionKeys, forwarderName, storageDisk) {
+        var fwd = getDohForwarderInfo(forwarderName);
         var lines = [];
         lines.push('');
         lines.push('# ============================================================');
@@ -1183,7 +1423,15 @@
         lines.push('# RU address-list update script');
         lines.push('/system/script/add name=' + prefix + '-update-ru policy=read,write,test,ftp comment=' + prefix + '-ru source={');
         lines.push('  :local url "' + REPO.dl + 'ru_ranges.rsc"');
-        lines.push('  :local fileName "ru_ranges.rsc"');
+        if (storageDisk === '__auto') {
+            lines.push('  :local awgDisk "disk1"');
+            lines.push('  :do { :set awgDisk [/container/envs/get [find where list="' + prefix + '-env" key="AWG_STORAGE"] value] } on-error={}');
+            lines.push('  :local fileName ($awgDisk . "/ru_ranges.rsc")');
+        } else if (storageDisk === 'disk1') {
+            lines.push('  :local fileName "ru_ranges.rsc"');
+        } else {
+            lines.push('  :local fileName "' + storageDisk + '/ru_ranges.rsc"');
+        }
         lines.push('  :do { /tool/fetch url=$url dst-path=$fileName mode=https http-header-field="User-Agent: MikroTik" http-max-redirect-count=10');
         lines.push('  } on-error={ :log error "RU list: fetch failed"; :error "fetch failed" }');
         lines.push('  :delay 2s');
@@ -1213,18 +1461,22 @@
         // Mangle + routing wrapped in a single block
         lines.push('{');
         if (exclusionKeys.length > 0) {
-            lines.push('# DoH forwarders');
-            for (var i = 0; i < DOH_FORWARDERS.length; i++) {
-                var f = DOH_FORWARDERS[i];
-                lines.push(':do { /ip/dns/forwarders/add doh-servers=' + f.doh + ' name=' + f.name + ' comment=' + prefix + '-dns-fwd } on-error={}');
-            }
-            lines.push('# DNS static entries for DoH resolver IPs');
-            for (var i = 0; i < DNS_STATICS.length; i++) {
-                var s = DNS_STATICS[i];
-                lines.push('/ip/dns/static/add address=' + s.addr + ' comment="' + prefix + '-dns-fwd" name=' + s.name + ' type=A');
+            if (fwd.isDoH) {
+                lines.push('# DoH forwarder');
+                lines.push(':do { /ip/dns/forwarders/add doh-servers=' + fwd.doh + ' name=' + fwd.name + ' comment=' + prefix + '-dns-fwd } on-error={}');
+                var statics = getDnsStaticsForForwarder(fwd.name);
+                if (statics.length > 0) {
+                    lines.push('# DNS static entries for DoH resolver IPs');
+                    for (var i = 0; i < statics.length; i++) {
+                        lines.push('/ip/dns/static/add address=' + statics[i].addr + ' comment="' + prefix + '-dns-fwd" name=' + statics[i].name + ' type=A');
+                    }
+                }
+            } else {
+                lines.push('# Custom DNS static entry');
+                lines.push('/ip/dns/static/add address=' + fwd.addr + ' comment="' + prefix + '-dns-fwd" name=' + fwd.name + ' type=A');
             }
             lines.push('# FWD entries for exclusions');
-            lines = lines.concat(buildFwdEntries(prefix, exclusionKeys, EXCLUSIONS));
+            lines = lines.concat(buildFwdEntries(prefix, exclusionKeys, EXCLUSIONS, fwd.name));
         }
 
         lines.push('# Mangle: accept private & special networks');
@@ -1855,11 +2107,27 @@
 
     function onModeChange() {
         var mode = getDeployMode();
+        var isS2S = mode === 'site-to-site';
         document.getElementById('storage-row').style.display = mode === 'container' ? 'block' : 'none';
         document.getElementById('proxy-ip-row').style.display = mode === 'standalone' ? 'block' : 'none';
-        document.getElementById('mode-hint').setAttribute('data-i18n',
-            mode === 'container' ? 'modeContainerHint' : 'modeStandaloneHint');
-        document.getElementById('mode-hint').textContent = t(mode === 'container' ? 'modeContainerHint' : 'modeStandaloneHint');
+        document.getElementById('s2s-panel').style.display = isS2S ? 'block' : 'none';
+        document.getElementById('conf-input').style.display = isS2S ? 'none' : 'block';
+        document.querySelector('label[for="conf-input"]').style.display = isS2S ? 'none' : 'block';
+        document.getElementById('scenario-row').style.display = isS2S ? 'none' : 'block';
+        if (isS2S) {
+            document.getElementById('services-panel').style.display = 'none';
+            document.getElementById('exclusions-panel').style.display = 'none';
+            document.getElementById('fasttrack-warn').style.display = 'none';
+            document.getElementById('non-ru-warn').style.display = 'none';
+        } else {
+            onScenarioChange();
+        }
+        // Hide prefix row for s2s (always uses awg-proxy)
+        document.getElementById('prefix-select').parentElement.style.display = isS2S ? 'none' : 'block';
+        var hintKey = isS2S ? 'modeSiteToSiteHint' : (mode === 'container' ? 'modeContainerHint' : 'modeStandaloneHint');
+        document.getElementById('mode-hint').setAttribute('data-i18n', hintKey);
+        document.getElementById('mode-hint').textContent = t(hintKey);
+        if (isS2S) ensureS2SParams();
     }
 
     // ============================================================
@@ -1925,15 +2193,470 @@
     }
 
     // ============================================================
+    // Curve25519 key generation (Montgomery ladder, BigInt)
+    // ============================================================
+    function curve25519ScalarMult(scalar, point) {
+        var P = (1n << 255n) - 19n;
+        function mod(a) { a = a % P; return a < 0n ? a + P : a; }
+        function modPow(b, e, m) {
+            var r = 1n; b = ((b % m) + m) % m;
+            while (e > 0n) { if (e & 1n) r = r * b % m; e >>= 1n; b = b * b % m; }
+            return r;
+        }
+        function inv(a) { return modPow(a, P - 2n, P); }
+
+        var k = new Uint8Array(scalar);
+        k[0] &= 248; k[31] &= 127; k[31] |= 64;
+        var kn = 0n;
+        for (var i = 31; i >= 0; i--) kn = (kn << 8n) | BigInt(k[i]);
+
+        var u = 0n;
+        for (var i = 31; i >= 0; i--) u = (u << 8n) | BigInt(point[i]);
+
+        var x_1 = u, x_2 = 1n, z_2 = 0n, x_3 = u, z_3 = 1n, swap = 0n;
+        var A24 = 121665n;
+
+        for (var pos = 254; pos >= 0; pos--) {
+            var bit = (kn >> BigInt(pos)) & 1n;
+            swap ^= bit;
+            // cswap
+            var d1 = swap * (x_2 - x_3), d2 = swap * (z_2 - z_3);
+            x_2 = mod(x_2 - d1); x_3 = mod(x_3 + d1);
+            z_2 = mod(z_2 - d2); z_3 = mod(z_3 + d2);
+            swap = bit;
+
+            var A = mod(x_2 + z_2), AA = mod(A * A);
+            var B = mod(x_2 - z_2), BB = mod(B * B);
+            var E = mod(AA - BB);
+            var C = mod(x_3 + z_3), D = mod(x_3 - z_3);
+            var DA = mod(D * A), CB = mod(C * B);
+            x_3 = mod(mod(DA + CB) * mod(DA + CB));
+            z_3 = mod(x_1 * mod(mod(DA - CB) * mod(DA - CB)));
+            x_2 = mod(AA * BB);
+            z_2 = mod(E * mod(AA + mod(A24 * E)));
+        }
+        // final cswap
+        var d1 = swap * (x_2 - x_3), d2 = swap * (z_2 - z_3);
+        x_2 = mod(x_2 - d1); z_2 = mod(z_2 - d2);
+
+        var result = mod(x_2 * inv(z_2));
+        var out = new Uint8Array(32);
+        for (var i = 0; i < 32; i++) { out[i] = Number(result & 0xFFn); result >>= 8n; }
+        return out;
+    }
+
+    function generateWgKeyPair() {
+        var priv = new Uint8Array(32);
+        crypto.getRandomValues(priv);
+        var basepoint = new Uint8Array(32);
+        basepoint[0] = 9;
+        var pub = curve25519ScalarMult(priv, basepoint);
+        return {
+            privateKey: uint8ToBase64(priv),
+            publicKey: uint8ToBase64(pub)
+        };
+    }
+
+    function uint8ToBase64(arr) {
+        var s = '';
+        for (var i = 0; i < arr.length; i++) s += String.fromCharCode(arr[i]);
+        return btoa(s);
+    }
+
+    // ============================================================
+    // Random AWG parameter generation
+    // ============================================================
+    function randomInt(min, max) {
+        var range = max - min + 1;
+        var arr = new Uint32Array(1);
+        crypto.getRandomValues(arr);
+        return min + (arr[0] % range);
+    }
+
+    function randomUint32() {
+        var arr = new Uint32Array(1);
+        crypto.getRandomValues(arr);
+        return arr[0];
+    }
+
+    function generateAWGParams() {
+        return {
+            jc: randomInt(3, 8),
+            jmin: randomInt(50, 250),
+            jmax: randomInt(500, 1000),
+            s1: randomInt(15, 150),
+            s2: randomInt(15, 150),
+            h1: randomUint32(),
+            h2: randomUint32(),
+            h3: randomUint32(),
+            h4: randomUint32(),
+            port: randomInt(10000, 60000)
+        };
+    }
+
+    var s2sParams = null;
+
+    function ensureS2SParams() {
+        if (!s2sParams) {
+            s2sParams = generateAWGParams();
+            document.getElementById('s2s-awg-port').value = s2sParams.port;
+        }
+        return s2sParams;
+    }
+
+    function regenerateS2SParams() {
+        s2sParams = generateAWGParams();
+        document.getElementById('s2s-awg-port').value = s2sParams.port;
+    }
+
+    // ============================================================
+    // S2S subnet parser
+    // ============================================================
+    function parseSlash30(cidr) {
+        var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/30$/.exec(cidr);
+        if (!m) return null;
+        var octets = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+        for (var i = 0; i < 4; i++) if (octets[i] > 255) return null;
+        var base = (octets[0] << 24 | octets[1] << 16 | octets[2] << 8 | octets[3]) >>> 0;
+        if (base % 4 !== 0) return null;
+        function toIP(n) { return ((n>>>24)&255)+'.'+((n>>>16)&255)+'.'+((n>>>8)&255)+'.'+(n&255); }
+        return {
+            network: cidr,
+            ip1: toIP(base + 1),
+            ip2: toIP(base + 2),
+            broadcast: toIP(base + 3),
+            addr1: toIP(base + 1) + '/30',
+            addr2: toIP(base + 2) + '/30'
+        };
+    }
+
+    function isValidEndpointHost(s) {
+        if (!s || !s.trim()) return false;
+        s = s.trim();
+        if (isValidIP(s)) return true;
+        return /^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(s) && s.indexOf('..') < 0;
+    }
+
+    // ============================================================
+    // Build site-to-site commands
+    // ============================================================
+    function buildSiteToSiteCommands(endpointB, subnet, awgParams, storageA, storageB, prefix) {
+        var keyA = generateWgKeyPair();
+        var keyB = generateWgKeyPair();
+        var net = getTunnelNetwork(getTunnelNumber(prefix));
+        var sn = parseSlash30(subnet);
+        var wgPort = net.wgPort;
+
+        var result = {};
+
+        // === Side A (normal) ===
+        var la = [];
+        la.push('# ============================================================');
+        la.push('# AWG Proxy Site-to-Site -- Side A (client)');
+        la.push('# ' + new Date().toISOString().slice(0, 19).replace('T', ' '));
+        la.push('# ============================================================');
+        la.push('');
+        la.push('# 0. Check prerequisites');
+        la.push(':if ([:len [/system/package/find where name="container" disabled=no]] = 0) do={');
+        la.push('  :put "Container package is not installed or disabled. Install it and reboot."');
+        la.push('  :error "Usage: /system/device-mode/update container=yes"');
+        la.push('}');
+        la.push('');
+
+        if (storageA === '__auto') {
+            la = la.concat(buildAutoStorage(prefix));
+            la.push('');
+        }
+
+        // Uninstall script
+        la.push('# 1. Uninstall script');
+        la.push(buildS2SUninstallSource(prefix, storageA, net, false));
+        la.push('');
+
+        // Network
+        la.push('# 2. Network infrastructure');
+        la.push('/interface/veth/add name=veth-' + prefix + ' address=' + net.vethAddr + ' gateway=' + net.vethGw);
+        la.push('/ip/address/add address=' + net.hostAddr + ' interface=veth-' + prefix);
+        la.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + net.natSrc);
+        la.push('');
+
+        // WireGuard
+        la.push('# 3. WireGuard interface');
+        la.push('/interface/wireguard/add name=wg-' + prefix + ' private-key="' + keyA.privateKey + '" listen-port=' + wgPort + ' disabled=yes');
+        la.push('/interface/wireguard/peers/add interface=wg-' + prefix + ' public-key="' + keyB.publicKey + '" endpoint-address=' + net.vethAddr.replace(/\/.*/, '') + ' endpoint-port=51820 allowed-address=' + subnet + ' persistent-keepalive=' + randomInt(25, 55));
+        la.push('/ip/address/add address=' + sn.addr1 + ' interface=wg-' + prefix);
+        la.push('');
+
+        // Container env
+        la.push('# 4. Container environment variables');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value=":51820"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + endpointB + ':' + awgParams.port + '"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_JC value="' + awgParams.jc + '"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_JMIN value="' + awgParams.jmin + '"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_JMAX value="' + awgParams.jmax + '"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_S1 value="' + awgParams.s1 + '"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_S2 value="' + awgParams.s2 + '"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_H1 value="' + awgParams.h1 + '"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_H2 value="' + awgParams.h2 + '"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_H3 value="' + awgParams.h3 + '"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_H4 value="' + awgParams.h4 + '"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_SERVER_PUB value="' + keyB.publicKey + '"');
+        la.push('/container/envs/add list=' + prefix + '-env key=AWG_CLIENT_PUB value="' + keyA.publicKey + '"');
+        la.push('');
+
+        // Download + start
+        la.push('# 5. Download, create and start container');
+        la = la.concat(buildContainerDownload(prefix, storageA));
+        la.push('');
+        la.push('/interface/wireguard/enable wg-' + prefix);
+        la.push(':put "Side A installation complete!"');
+        la.push(':put "Ping test: ' + sn.ip2 + ' (Side B WG address)"');
+        la.push('/ping ' + sn.ip2 + ' count=5');
+        la.push('');
+
+        // === Side B (reverse) ===
+        var lb = [];
+        lb.push('# ============================================================');
+        lb.push('# AWG Proxy Site-to-Site -- Side B (server)');
+        lb.push('# ' + new Date().toISOString().slice(0, 19).replace('T', ' '));
+        lb.push('# ============================================================');
+        lb.push('');
+        lb.push('# 0. Check prerequisites');
+        lb.push(':if ([:len [/system/package/find where name="container" disabled=no]] = 0) do={');
+        lb.push('  :put "Container package is not installed or disabled. Install it and reboot."');
+        lb.push('  :error "Usage: /system/device-mode/update container=yes"');
+        lb.push('}');
+        lb.push('');
+
+        if (storageB === '__auto') {
+            lb = lb.concat(buildAutoStorage(prefix));
+            lb.push('');
+        }
+
+        // Uninstall
+        lb.push('# 1. Uninstall script');
+        lb.push(buildS2SUninstallSource(prefix, storageB, net, true));
+        lb.push('');
+
+        // Network
+        lb.push('# 2. Network infrastructure');
+        lb.push('/interface/veth/add name=veth-' + prefix + ' address=' + net.vethAddr + ' gateway=' + net.vethGw);
+        lb.push('/ip/address/add address=' + net.hostAddr + ' interface=veth-' + prefix);
+        lb.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + net.natSrc);
+        lb.push('');
+
+        // dst-nat for AWG port
+        lb.push('# 3. Firewall: dst-nat for AWG port');
+        lb.push('/ip/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgParams.port + ' to-addresses=' + net.vethAddr.replace(/\/.*/, '') + ' to-ports=' + awgParams.port + ' comment=' + prefix + '-dstnat');
+        lb.push('');
+
+        // WireGuard
+        lb.push('# 4. WireGuard interface');
+        lb.push('/interface/wireguard/add name=wg-' + prefix + ' private-key="' + keyB.privateKey + '" listen-port=' + wgPort + ' disabled=yes');
+        lb.push('/interface/wireguard/peers/add interface=wg-' + prefix + ' public-key="' + keyA.publicKey + '" allowed-address=' + subnet);
+        lb.push('/ip/address/add address=' + sn.addr2 + ' interface=wg-' + prefix);
+        lb.push('');
+
+        // Container env
+        lb.push('# 5. Container environment variables');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value=":' + awgParams.port + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + net.vethGw + ':' + wgPort + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_MODE value="reverse"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_JC value="' + awgParams.jc + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_JMIN value="' + awgParams.jmin + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_JMAX value="' + awgParams.jmax + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_S1 value="' + awgParams.s1 + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_S2 value="' + awgParams.s2 + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_H1 value="' + awgParams.h1 + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_H2 value="' + awgParams.h2 + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_H3 value="' + awgParams.h3 + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_H4 value="' + awgParams.h4 + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_SERVER_PUB value="' + keyB.publicKey + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_CLIENT_PUB value="' + keyA.publicKey + '"');
+        lb.push('');
+
+        // Download + start
+        lb.push('# 6. Download, create and start container');
+        lb = lb.concat(buildContainerDownload(prefix, storageB));
+        lb.push('');
+        lb.push('/interface/wireguard/enable wg-' + prefix);
+        lb.push(':put "Side B installation complete!"');
+        lb.push(':put "Ping test: ' + sn.ip1 + ' (Side A WG address)"');
+        lb.push('/ping ' + sn.ip1 + ' count=5');
+        lb.push('');
+
+        result.sideA = la.join('\n');
+        result.sideB = lb.join('\n');
+        result.uninstallA = '# To uninstall Side A:\n/system/script/run ' + prefix + '-uninstall';
+        result.uninstallB = '# To uninstall Side B:\n/system/script/run ' + prefix + '-uninstall';
+        result.keyA = keyA;
+        result.keyB = keyB;
+        return result;
+    }
+
+    function buildS2SUninstallSource(prefix, storageDisk, net, hasNat) {
+        var isAuto = storageDisk === '__auto';
+        var src = [];
+        src.push('/system/script/add name=' + prefix + '-uninstall comment=' + prefix + ' source={');
+        src.push('  :put "Uninstalling AWG Proxy Site-to-Site..."');
+        src.push('  :log info "Uninstalling AWG Proxy Site-to-Site..."');
+        if (isAuto) {
+            src.push('  :local storageDisk "disk1"');
+            src.push('  :do { :set storageDisk [/container/envs/get [find where list="' + prefix + '-env" key="AWG_STORAGE"] value] } on-error={}');
+            src.push('  :local prevTmpdir ""');
+            src.push('  :if ($storageDisk != "disk1") do={');
+            src.push('    :do { :set prevTmpdir [/container/envs/get [find where list="' + prefix + '-env" key="AWG_PREV_TMPDIR"] value] } on-error={}');
+            src.push('  }');
+        } else if (storageDisk !== 'disk1') {
+            src.push('  :local prevTmpdir ""');
+            src.push('  :do { :set prevTmpdir [/container/envs/get [find where list="' + prefix + '-env" key="AWG_PREV_TMPDIR"] value] } on-error={}');
+        }
+        src.push('  /container/stop [find where interface=veth-' + prefix + ']');
+        src.push('  :delay 7s');
+        src.push('  /container/remove [find where interface=veth-' + prefix + ']');
+        src.push('  /container/envs/remove [find where list="' + prefix + '-env"]');
+        if (isAuto) {
+            src.push('  :if ($storageDisk != "disk1") do={');
+            src.push('    /container/config set tmpdir=$prevTmpdir');
+            src.push('  }');
+        } else if (storageDisk !== 'disk1') {
+            src.push('  /container/config set tmpdir=$prevTmpdir');
+        }
+        if (hasNat) {
+            src.push('  /ip/firewall/nat/remove [find where comment=' + prefix + '-dstnat]');
+        }
+        src.push('  /ip/firewall/nat/remove [find where src-address="' + net.natSrc + '"]');
+        src.push('  /ip/address/remove [find where address="' + net.hostAddr + '"]');
+        src.push('  /interface/veth/remove [find where name="veth-' + prefix + '"]');
+        src.push('  /interface/wireguard/peers/remove [find where interface="wg-' + prefix + '"]');
+        src.push('  /ip/address/remove [find where interface="wg-' + prefix + '"]');
+        src.push('  /interface/wireguard/remove [find where name="wg-' + prefix + '"]');
+        src.push('  :do { /file/remove [find where name~"' + prefix + '.+tar"] } on-error={}');
+        if (isAuto) {
+            src.push('  :do { /file/remove [find where name=($storageDisk . "/' + prefix + '")] } on-error={}');
+            src.push('  :if ($storageDisk != "disk1") do={');
+            src.push('    :do { /file/remove [find where name~($storageDisk . "/pull")] } on-error={}');
+            src.push('  }');
+        } else {
+            src.push('  :do { /file/remove [find where name="' + storageDisk + '/' + prefix + '"] } on-error={}');
+            if (storageDisk !== 'disk1') {
+                src.push('  :do { /file/remove [find where name~"' + storageDisk + '/pull"] } on-error={}');
+            }
+        }
+        src.push('  :put "Uninstall complete!"');
+        src.push('  :log info "Uninstall complete!"');
+        src.push('  /system/script/remove [find where name=' + prefix + '-uninstall]');
+        src.push('}');
+        return src.join('\n');
+    }
+
+    function buildContainerDownload(prefix, storageDisk) {
+        var isAuto = storageDisk === '__auto';
+        var isExternal = storageDisk !== 'disk1' && !isAuto;
+        var lines = [];
+
+        if (isAuto) {
+            lines.push('/container/envs/add list=' + prefix + '-env key=AWG_STORAGE value=$awgDisk');
+            lines.push(':if ($awgDisk != "disk1") do={');
+            lines.push('  :local tmpPath ($awgDisk . "/pull")');
+            lines.push('  /container/envs/add list=' + prefix + '-env key=AWG_PREV_TMPDIR value=[/container/config/get tmpdir]');
+            lines.push('  /container/config set tmpdir=$tmpPath ram-high=200M');
+            lines.push('}');
+        } else if (isExternal) {
+            lines.push(':local prevTmpdir [/container/config/get tmpdir]');
+            lines.push('/container/envs/add list=' + prefix + '-env key=AWG_PREV_TMPDIR value=$prevTmpdir');
+            lines.push('/container/config set tmpdir=' + storageDisk + '/pull ram-high=200M');
+        }
+
+        lines.push('{');
+        lines.push('  :local arch [/system/resource/get architecture-name]');
+        lines.push('  :local ver [/system/resource/get version]');
+        lines.push('  :local dotPos [:find $ver "."]');
+        lines.push('  :local rest [:pick $ver ($dotPos + 1) [:len $ver]]');
+        lines.push('  :local endPos [:find $rest "."]');
+        lines.push('  :if ([:typeof $endPos] = "nil") do={ :set endPos [:find $rest " "] }');
+        lines.push('  :local minor [:tonum [:pick $rest 0 $endPos]]');
+        lines.push('  :local suffix ""');
+        lines.push('  :if ($minor <= 20) do={ :set suffix "-7.20-Docker" }');
+        lines.push('  :local file ""');
+        lines.push('  :if ($arch = "arm64") do={ :set file ("awg-proxy-arm64" . $suffix . ".tar.gz") }');
+        lines.push('  :if ($arch = "arm") do={ :set file ("awg-proxy-arm" . $suffix . ".tar.gz") }');
+        lines.push('  :if ($arch ~ "x86") do={ :set file ("awg-proxy-amd64" . $suffix . ".tar.gz") }');
+        lines.push('  :if ($file = "") do={ :error "Unsupported architecture: $arch" }');
+        lines.push('  :local url "' + REPO.dl + '$file"');
+
+        if (isAuto) {
+            lines.push('  :local filePath $file');
+            lines.push('  :if ($awgDisk != "disk1") do={');
+            lines.push('    :set filePath ($awgDisk . "/pull/" . $file)');
+            lines.push('    :do { /file/make-directory ($awgDisk . "/pull") } on-error={}');
+            lines.push('  }');
+        } else if (isExternal) {
+            lines.push('  :local filePath ("' + storageDisk + '/pull/" . $file)');
+            lines.push('  :do { /file/make-directory ' + storageDisk + '/pull } on-error={}');
+        } else {
+            lines.push('  :local filePath $file');
+        }
+
+        lines.push('  :if ([:len [/file/find where name=$filePath]] = 0) do={');
+        lines.push('    :local freeStorage 0');
+        if (isAuto) {
+            lines.push('    :if ($awgDisk = "disk1") do={');
+            lines.push('      :set freeStorage [/system/resource/get free-hdd-space]');
+            lines.push('    } else={');
+            lines.push('      :do { :set freeStorage [/disk/get [find where mount-point=$awgDisk] free] } on-error={}');
+            lines.push('    }');
+        } else if (storageDisk === 'disk1') {
+            lines.push('    :set freeStorage [/system/resource/get free-hdd-space]');
+        } else {
+            lines.push('    :do { :set freeStorage [/disk/get [find where mount-point="' + storageDisk + '"] free] } on-error={}');
+        }
+        lines.push('    :if ($freeStorage < 5242880) do={');
+        lines.push('      :put ("WARNING: Low disk space (" . ($freeStorage / 1048576) . "MB free). Need at least 5MB.")');
+        lines.push('      :error "Insufficient disk space"');
+        lines.push('    }');
+        lines.push('    :put ("Fetching: $url -> " . $filePath)');
+        lines.push('    /tool/fetch url=$url dst-path=$filePath http-max-redirect-count=10');
+        lines.push('  } else={');
+        lines.push('    :put ("File already exists: " . $filePath)');
+        lines.push('  }');
+
+        if (isAuto) {
+            lines.push('  :local rootDir ($awgDisk . "/' + prefix + '")');
+            lines.push('  /container/add file=$filePath interface=veth-' + prefix + ' envlist=' + prefix + '-env hostname=' + prefix + ' root-dir=$rootDir logging=no start-on-boot=yes comment=' + prefix);
+        } else {
+            lines.push('  /container/add file=$filePath interface=veth-' + prefix + ' envlist=' + prefix + '-env hostname=' + prefix + ' root-dir=' + storageDisk + '/' + prefix + ' logging=no start-on-boot=yes comment=' + prefix);
+        }
+
+        lines.push('  :if ($minor > 20) do={ [:parse "/container/set [find where interface=veth-' + prefix + '] shm-size=4M"] }');
+        lines.push('  /file/remove $filePath');
+        lines.push('  /container/start [find where interface=veth-' + prefix + ']');
+        lines.push('  :do { /file/remove [find where name="console-dump.txt"] } on-error={}');
+        lines.push('  :put "Waiting for container to start..."');
+        lines.push('  :delay 5s');
+        lines.push('}');
+
+        return lines;
+    }
+
+    // ============================================================
     // Main
     // ============================================================
     function generate() {
-        var text = document.getElementById('conf-input').value;
+        var mode = getDeployMode();
         document.getElementById('errors-container').innerHTML = '';
         document.getElementById('parsed-section').style.display = 'none';
         document.getElementById('output-section').style.display = 'none';
         document.getElementById('routing-section').style.display = 'none';
         document.getElementById('uninstall-section').style.display = 'none';
+        document.getElementById('s2s-output-section').style.display = 'none';
+
+        if (mode === 'site-to-site') {
+            generateS2S();
+            return;
+        }
+
+        var text = document.getElementById('conf-input').value;
 
         if (!text.trim()) {
             showError(t('errEmpty'));
@@ -1998,18 +2721,23 @@
         document.getElementById('output').innerHTML = highlight(commands);
         document.getElementById('output-section').style.display = 'block';
 
+        var dohFwd = getSelectedDohForwarder();
+        var storageDisk = getStorageDisk();
+
         // Routing section (separate for dns-fwd/non-ru to avoid terminal buffer overflow)
         var routingSection = document.getElementById('routing-section');
         if (scenario === 'dns-fwd' || scenario === 'non-ru') {
             var routingCommands = '';
             if (scenario === 'dns-fwd') {
-                routingCommands = buildDnsRoutingScenario(prefix, selectedServices).join('\n') + '\n';
+                routingCommands = buildDnsRoutingScenario(prefix, selectedServices, dohFwd).join('\n') + '\n';
             } else {
-                routingCommands = buildNonRuScenario(prefix, exclusions).join('\n') + '\n';
+                var nonRuStorage = (mode === 'standalone') ? 'disk1' : storageDisk;
+                routingCommands = buildNonRuScenario(prefix, exclusions, dohFwd, nonRuStorage).join('\n') + '\n';
             }
             document.getElementById('routing-output').dataset.plain = routingCommands;
             document.getElementById('routing-output').innerHTML = highlight(routingCommands);
             routingSection.style.display = 'block';
+            applyCollapse('routing-output', 'expand-routing');
         } else {
             routingSection.style.display = 'none';
         }
@@ -2022,6 +2750,9 @@
         document.getElementById('uninstall-output').innerHTML = highlight(uninstall);
         document.getElementById('uninstall-section').style.display = 'block';
 
+        applyCollapse('output', 'expand-output');
+        applyCollapse('uninstall-output', 'expand-uninstall');
+
         try {
             localStorage.setItem('awg-settings', JSON.stringify({
                 mode: mode,
@@ -2032,12 +2763,59 @@
                 proxyIP: document.getElementById('proxy-ip').value,
                 scenario: scenario,
                 selectedServices: selectedServices,
-                exclusions: exclusions
+                exclusions: exclusions,
+                dohForwarder: dohFwd,
+                dohCustomUrl: document.getElementById('doh-custom-url').value
             }));
         } catch(e) {}
 
         setTimeout(function () {
             document.getElementById('output-section').scrollIntoView({behavior: 'smooth', block: 'start'});
+        }, 80);
+    }
+
+    function generateS2S() {
+        var endpointB = document.getElementById('s2s-endpoint-b').value.trim();
+        var subnet = document.getElementById('s2s-tunnel-subnet').value.trim();
+        var portStr = document.getElementById('s2s-awg-port').value.trim();
+
+        if (!isValidEndpointHost(endpointB)) { showError(t('errEndpointB')); return; }
+        if (!parseSlash30(subnet)) { showError(t('errTunnelSubnet')); return; }
+
+        var port = parseInt(portStr, 10);
+        if (isNaN(port) || port < 1024 || port > 65535) { showError(t('errAwgPort')); return; }
+
+        var awgParams = ensureS2SParams();
+        awgParams.port = port;
+
+        var storageA = document.getElementById('s2s-storage-a').value;
+        var storageB = document.getElementById('s2s-storage-b').value;
+        var prefix = 'awg-proxy';
+
+        var result = buildSiteToSiteCommands(endpointB, subnet, awgParams, storageA, storageB, prefix);
+
+        document.getElementById('s2s-out-a').dataset.plain = result.sideA;
+        document.getElementById('s2s-out-a').innerHTML = highlight(result.sideA);
+        document.getElementById('s2s-out-b').dataset.plain = result.sideB;
+        document.getElementById('s2s-out-b').innerHTML = highlight(result.sideB);
+        document.getElementById('s2s-uninst-a').dataset.plain = result.uninstallA;
+        document.getElementById('s2s-uninst-a').innerHTML = highlight(result.uninstallA);
+        document.getElementById('s2s-uninst-b').dataset.plain = result.uninstallB;
+        document.getElementById('s2s-uninst-b').innerHTML = highlight(result.uninstallB);
+        document.getElementById('s2s-output-section').style.display = 'block';
+
+        try {
+            localStorage.setItem('awg-settings', JSON.stringify({
+                mode: 'site-to-site',
+                s2sEndpointB: endpointB,
+                s2sSubnet: subnet,
+                s2sStorageA: storageA,
+                s2sStorageB: storageB
+            }));
+        } catch(e) {}
+
+        setTimeout(function() {
+            document.getElementById('s2s-output-section').scrollIntoView({behavior:'smooth',block:'start'});
         }, 80);
     }
 
@@ -2053,6 +2831,7 @@
         document.getElementById('output-section').style.display = 'none';
         document.getElementById('routing-section').style.display = 'none';
         document.getElementById('uninstall-section').style.display = 'none';
+        document.getElementById('s2s-output-section').style.display = 'none';
         document.getElementById('storage-select').value = '__auto';
         document.getElementById('storage-custom').style.display = 'none';
         document.getElementById('storage-custom').value = '';
@@ -2060,6 +2839,11 @@
         document.getElementById('prefix-custom').style.display = 'none';
         document.getElementById('prefix-custom').value = '';
         document.getElementById('proxy-ip').value = '';
+        document.getElementById('s2s-endpoint-b').value = '';
+        document.getElementById('s2s-tunnel-subnet').value = '10.0.0.0/30';
+        document.getElementById('s2s-storage-a').value = '__auto';
+        document.getElementById('s2s-storage-b').value = '__auto';
+        s2sParams = null;
         var radios = document.getElementsByName('deploy-mode');
         radios[0].checked = true;
         onModeChange();
@@ -2068,6 +2852,11 @@
         onScenarioChange();
         initServiceCheckboxes();
         initExclusionCheckboxes();
+        // Reset DoH forwarder
+        var dohRadios = document.getElementsByName('doh-fwd');
+        dohRadios[0].checked = true;
+        document.getElementById('doh-custom-url').style.display = 'none';
+        document.getElementById('doh-custom-url').value = '';
         document.getElementById('conf-input').focus();
     }
 
@@ -2114,6 +2903,48 @@
         }, 2000);
     }
 
+    // ============================================================
+    // Collapsible script blocks
+    // ============================================================
+    function toggleCollapse(preId, btnId) {
+        var pre = document.getElementById(preId);
+        var btn = document.getElementById(btnId);
+        if (pre.classList.contains('collapsed')) {
+            pre.classList.remove('collapsed');
+            btn.textContent = t('btnCollapse');
+        } else {
+            pre.classList.add('collapsed');
+            btn.textContent = t('btnExpand');
+        }
+    }
+
+    function applyCollapse(preId, btnId) {
+        var pre = document.getElementById(preId);
+        var btn = document.getElementById(btnId);
+        var lineCount = (pre.textContent || '').split('\n').length;
+        if (lineCount > 18) {
+            pre.classList.add('collapsed');
+            btn.style.display = 'block';
+            btn.textContent = t('btnExpand');
+        } else {
+            pre.classList.remove('collapsed');
+            btn.style.display = 'none';
+        }
+    }
+
+    // ============================================================
+    // DoH selector handler
+    // ============================================================
+    document.getElementById('doh-selector').addEventListener('change', function(e) {
+        var custom = document.getElementById('doh-custom-url');
+        if (e.target.value === '__custom') {
+            custom.style.display = 'block';
+            custom.focus();
+        } else {
+            custom.style.display = 'none';
+        }
+    });
+
     document.getElementById('conf-input').addEventListener('keydown', function (e) {
         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') generate();
     });
@@ -2123,9 +2954,15 @@
         try {
             var s = JSON.parse(localStorage.getItem('awg-settings'));
             if (!s) return;
-            if (s.mode === 'standalone') {
-                document.querySelector('input[name="deploy-mode"][value="standalone"]').checked = true;
-                onModeChange();
+            if (s.mode === 'standalone' || s.mode === 'site-to-site') {
+                var radio = document.querySelector('input[name="deploy-mode"][value="' + s.mode + '"]');
+                if (radio) { radio.checked = true; onModeChange(); }
+            }
+            if (s.mode === 'site-to-site') {
+                if (s.s2sEndpointB) document.getElementById('s2s-endpoint-b').value = s.s2sEndpointB;
+                if (s.s2sSubnet) document.getElementById('s2s-tunnel-subnet').value = s.s2sSubnet;
+                if (s.s2sStorageA) document.getElementById('s2s-storage-a').value = s.s2sStorageA;
+                if (s.s2sStorageB) document.getElementById('s2s-storage-b').value = s.s2sStorageB;
             }
             if (s.storage) {
                 document.getElementById('storage-select').value = s.storage;
@@ -2161,6 +2998,16 @@
                     cbs[i].checked = s.exclusions.indexOf(cbs[i].value) >= 0;
                 }
             }
+            if (s.dohForwarder) {
+                var dohRadio = document.querySelector('input[name="doh-fwd"][value="' + s.dohForwarder + '"]');
+                if (dohRadio) {
+                    dohRadio.checked = true;
+                    if (s.dohForwarder === '__custom') {
+                        document.getElementById('doh-custom-url').style.display = 'block';
+                        if (s.dohCustomUrl) document.getElementById('doh-custom-url').value = s.dohCustomUrl;
+                    }
+                }
+            }
         } catch(e) {}
     })();
 
@@ -2170,6 +3017,8 @@
 
     // Apply i18n on load
     applyI18n();
+    // Refresh scenario hint (restores info icon for dns-fwd)
+    onScenarioChange();
 </script>
 </body>
 </html>

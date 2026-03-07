@@ -13,6 +13,17 @@
 #define H4_RING_SIZE   65536
 #define GRO_BUF_SIZE   65536
 
+/* Session table for server mode */
+#define SESSION_TABLE_SIZE 4096
+#define SESSION_TABLE_MASK (SESSION_TABLE_SIZE - 1)
+
+typedef struct {
+    uint32_t sender_index;
+    struct sockaddr_in addr;
+    int valid;
+} session_entry_t;
+
+
 #ifndef UDP_GRO
 #define UDP_GRO        104
 #endif
@@ -108,7 +119,37 @@ typedef struct {
     /* Reconnect coordination */
     _Atomic int reconnect_needed;
 
+    /* Session table for server mode */
+    session_entry_t sessions[SESSION_TABLE_SIZE];
+
 } proxy_t;
+
+/* Session table operations */
+static inline void session_put(proxy_t *p, uint32_t index, struct sockaddr_in *addr) {
+    uint32_t slot = index & SESSION_TABLE_MASK;
+    for (int i = 0; i < 4; i++) {
+        uint32_t s = (slot + i) & SESSION_TABLE_MASK;
+        if (!p->sessions[s].valid || p->sessions[s].sender_index == index) {
+            p->sessions[s].sender_index = index;
+            p->sessions[s].addr = *addr;
+            p->sessions[s].valid = 1;
+            return;
+        }
+    }
+    p->sessions[slot].sender_index = index;
+    p->sessions[slot].addr = *addr;
+    p->sessions[slot].valid = 1;
+}
+
+static inline struct sockaddr_in *session_get(proxy_t *p, uint32_t index) {
+    uint32_t slot = index & SESSION_TABLE_MASK;
+    for (int i = 0; i < 4; i++) {
+        uint32_t s = (slot + i) & SESSION_TABLE_MASK;
+        if (p->sessions[s].valid && p->sessions[s].sender_index == index)
+            return &p->sessions[s].addr;
+    }
+    return NULL;
+}
 
 /* Initialize proxy. Returns 0 on success. */
 int proxy_init(proxy_t *p, awg_config_t *cfg,

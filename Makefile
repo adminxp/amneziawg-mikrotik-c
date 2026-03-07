@@ -6,7 +6,7 @@ SRCS = src/main.c src/proxy.c src/transform.c src/blake2s.c src/cps.c src/fastra
 CFLAGS = -O2 -Wall -Wextra -Werror -std=c11 -D_GNU_SOURCE -ffunction-sections -fdata-sections -flto -DVERSION=\"$(VERSION)\"
 LDFLAGS = -static -Wl,--gc-sections -flto -s -lpthread
 
-.PHONY: build clean test test-blake2s test-cps test-transform test-base64 \
+.PHONY: build clean test test-blake2s test-cps test-transform test-base64 test-session \
 	docker-arm64 docker-arm docker-armv5 docker-amd64 docker-all \
 	docker-arm64-7.20-docker docker-arm-7.20-docker docker-armv5-7.20-docker docker-amd64-7.20-docker docker-all-7.20-docker
 
@@ -17,7 +17,7 @@ build:
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/$(IMAGE_NAME) $(SRCS)
 
-test: test-blake2s test-cps test-transform test-base64
+test: test-blake2s test-cps test-transform test-base64 test-session
 	@echo "All tests passed"
 
 test-blake2s: src/test_blake2s.c $(TEST_SRCS)
@@ -35,6 +35,10 @@ test-transform: src/test_transform.c $(TEST_SRCS)
 test-base64: src/test_base64.c $(TEST_SRCS)
 	$(CC) $(TEST_CFLAGS) -o /tmp/test_base64 $^
 	/tmp/test_base64
+
+test-session: src/test_session.c $(TEST_SRCS)
+	$(CC) $(TEST_CFLAGS) -o /tmp/test_session $^
+	/tmp/test_session
 
 clean:
 	rm -f $(BUILD_DIR)/$(IMAGE_NAME) $(BUILD_DIR)/$(IMAGE_NAME)-*

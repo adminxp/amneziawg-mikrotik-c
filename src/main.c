@@ -182,6 +182,14 @@ int main(void) {
     if ((v = getenv("AWG_NO_GRO")) && v[0])
         cfg->no_gro = parse_int_str(v);
 
+    /* AWG_MODE: normal (default), reverse, server */
+    cfg->mode = AWG_MODE_NORMAL;
+    v = getenv("AWG_MODE");
+    if (v && v[0]) {
+        if (v[0] == 'r') cfg->mode = AWG_MODE_REVERSE;
+        else if (v[0] == 's') cfg->mode = AWG_MODE_SERVER;
+    }
+
     /* Determine protocol mode */
     const char *mode = "v1";
     if (cfg->s3 > 0 || cfg->s4 > 0 ||
@@ -194,8 +202,11 @@ int main(void) {
 
     /* Startup log */
     {
-        const char *parts[] = { "awg-proxy ", VERSION, " linux/c mode=", mode };
-        log_infon(parts, 4);
+        const char *awg_mode_str = cfg->mode == AWG_MODE_REVERSE ? "reverse" :
+                                   cfg->mode == AWG_MODE_SERVER  ? "server" : "normal";
+        const char *parts[] = { "awg-proxy ", VERSION, " linux/c proto=", mode,
+                                " awg_mode=", awg_mode_str };
+        log_infon(parts, 6);
     }
     {
         char spb[12];

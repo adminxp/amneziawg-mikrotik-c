@@ -301,17 +301,26 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
     fill_h4_ring(p);
 
     /* Init batch I/O structures — invariant fields set once */
-    int prefix = cfg->s4;
+    int c2s_headroom = (cfg->mode == AWG_MODE_NORMAL) ? cfg->s4 : 0;
+    int s2c_headroom = (cfg->mode == AWG_MODE_NORMAL) ? 0 : cfg->s4;
     for (int i = 0; i < BATCH_SIZE; i++) {
-        /* recv_c2s: listen socket, capture addr only on first msg */
-        p->recv_c2s.iovecs[i].iov_base = p->recv_c2s.bufs[i] + prefix;
+        /* recv_c2s: listen socket */
+        p->recv_c2s.iovecs[i].iov_base = p->recv_c2s.bufs[i] + c2s_headroom;
         p->recv_c2s.iovecs[i].iov_len = BUF_SIZE;
         p->recv_c2s.msgs[i].msg_hdr.msg_iov = &p->recv_c2s.iovecs[i];
         p->recv_c2s.msgs[i].msg_hdr.msg_iovlen = 1;
     }
-    /* Capture client addr only from first packet in batch */
-    p->recv_c2s.msgs[0].msg_hdr.msg_name = &p->recv_c2s.addrs[0];
-    p->recv_c2s.msgs[0].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
+    /* In reverse/server mode, capture addr from every packet for routing */
+    if (cfg->mode != AWG_MODE_NORMAL) {
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            p->recv_c2s.msgs[i].msg_hdr.msg_name = &p->recv_c2s.addrs[i];
+            p->recv_c2s.msgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
+        }
+    } else {
+        /* Normal: capture client addr only from first packet in batch */
+        p->recv_c2s.msgs[0].msg_hdr.msg_name = &p->recv_c2s.addrs[0];
+        p->recv_c2s.msgs[0].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
+    }
 
     for (int i = 0; i < BATCH_SIZE; i++) {
         /* send_s2c: to listen socket with client addr */
@@ -327,16 +336,20 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
 
     /* recv_s2c: remote socket, connected — no addr needed */
     for (int i = 0; i < BATCH_SIZE; i++) {
-        p->recv_s2c.iovecs[i].iov_base = p->recv_s2c.bufs[i];
-        p->recv_s2c.iovecs[i].iov_len = BUF_SIZE + 256;
+        p->recv_s2c.iovecs[i].iov_base = p->recv_s2c.bufs[i] + s2c_headroom;
+        p->recv_s2c.iovecs[i].iov_len = BUF_SIZE + 256 - s2c_headroom;
         p->recv_s2c.msgs[i].msg_hdr.msg_iov = &p->recv_s2c.iovecs[i];
         p->recv_s2c.msgs[i].msg_hdr.msg_iovlen = 1;
     }
 
     /* Pre-fill S4 headroom with random data */
-    if (prefix > 0) {
+    if (c2s_headroom > 0) {
         for (int i = 0; i < BATCH_SIZE; i++)
-            fastrand_fill(&p->rng, p->recv_c2s.bufs[i], prefix);
+            fastrand_fill(&p->rng, p->recv_c2s.bufs[i], c2s_headroom);
+    }
+    if (s2c_headroom > 0) {
+        for (int i = 0; i < BATCH_SIZE; i++)
+            fastrand_fill(&p->rng, p->recv_s2c.bufs[i], s2c_headroom);
     }
 
     /* Init GRO state */
@@ -352,6 +365,33 @@ static int send_packet(int fd, const void *data, int len) {
     if (r < 0)
         log_debug2("send_packet failed: ", strerror(errno));
     return r;
+}
+
+static int send_packet_to(int fd, const void *data, int len, struct sockaddr_in *addr) {
+    int r = (int)sendto(fd, data, len, MSG_DONTWAIT | MSG_NOSIGNAL,
+                        (struct sockaddr *)addr, sizeof(*addr));
+    if (r < 0)
+        log_debug2("send_packet_to failed: ", strerror(errno));
+    return r;
+}
+
+static void send_junk_and_cps_to(proxy_t *p, int fd, struct sockaddr_in *addr) {
+    awg_config_t *cfg = p->cfg;
+
+    int ncps = cps_generate_all(cfg->cps, &p->cps_counter,
+                                 p->cps_bufs, p->cps_lens);
+    for (int i = 0; i < ncps; i++)
+        send_packet_to(fd, p->cps_bufs[i], p->cps_lens[i], addr);
+
+    if (cfg->jc > 0 && cfg->jmax > 0) {
+        fastrand_fill(&p->rng, p->junk_buf, cfg->jc * cfg->jmax);
+        int njunk = generate_junk(cfg, p->junk_buf, p->junk_sizes);
+        int off = 0;
+        for (int i = 0; i < njunk; i++) {
+            send_packet_to(fd, p->junk_buf + off, p->junk_sizes[i], addr);
+            off += p->junk_sizes[i];
+        }
+    }
 }
 
 static void send_junk_and_cps(proxy_t *p, int fd) {
@@ -400,8 +440,10 @@ static void send_batch_gso(proxy_t *p, int fd, struct mmsghdr *msgs,
 
 /* ---- c2s thread ---- */
 
+/* ---- c2s: normal mode ---- */
+
 __attribute__((hot))
-static void *c2s_thread(void *arg) {
+static void *c2s_thread_normal(void *arg) {
     proxy_t *p = (proxy_t *)arg;
     awg_config_t *cfg = p->cfg;
     set_thread_affinity(cfg->cpu_c2s, "c2s");
@@ -421,7 +463,6 @@ static void *c2s_thread(void *arg) {
                              MSG_WAITFORONE, NULL);
         if (nrecv <= 0) {
             if (atomic_load(&p->stopped)) break;
-            if (errno == EINTR) continue;
             continue;
         }
         prev_nrecv = nrecv;
@@ -450,10 +491,9 @@ static void *c2s_thread(void *arg) {
                             char pb2[12];
                             log_info2("src port: auto, reconnecting port=",
                                       u32_to_str(pb2, cp));
-                            /* Signal reconnect needed; s2c thread will handle */
                             atomic_store(&p->reconnect_needed, 1);
                             shutdown(old_fd, SHUT_RDWR);
-                            continue; /* skip batch — WG retries in ~5s */
+                            continue;
                         }
                     }
                 }
@@ -524,13 +564,142 @@ static void *c2s_thread(void *arg) {
     return NULL;
 }
 
-/* ---- s2c thread ---- */
+/* ---- c2s: reverse/server mode (AWG→WG inbound) ---- */
 
 __attribute__((hot))
-static inline int process_s2c_pkt(proxy_t *p, uint8_t *pkt, int n,
-                                   struct iovec *send_iovecs,
-                                   struct sockaddr_in *send_addrs,
-                                   int *nsend) {
+static void *c2s_thread_reverse(void *arg) {
+    proxy_t *p = (proxy_t *)arg;
+    awg_config_t *cfg = p->cfg;
+    int server_mode = (cfg->mode == AWG_MODE_SERVER);
+    set_thread_affinity(cfg->cpu_c2s, "c2s");
+    int s4 = cfg->s4;
+    int prev_nrecv = BATCH_SIZE;
+
+    while (!atomic_load(&p->stopped)) {
+        int remote_fd = atomic_load(&p->remote_fd);
+
+        for (int i = 0; i < prev_nrecv; i++) {
+            p->recv_c2s.iovecs[i].iov_len = BUF_SIZE;
+            p->recv_c2s.msgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
+        }
+
+        int nrecv = recvmmsg(p->listen_fd, p->recv_c2s.msgs, BATCH_SIZE,
+                             MSG_WAITFORONE, NULL);
+        if (nrecv <= 0) {
+            if (atomic_load(&p->stopped)) break;
+            continue;
+        }
+        prev_nrecv = nrecv;
+
+        atomic_store(&p->last_active, 1);
+
+        /* In reverse (1:1) mode, track single client */
+        if (!server_mode && p->recv_c2s.addrs[0].sin_family == AF_INET) {
+            if (!atomic_load(&p->has_client) ||
+                p->client_addr.sin_addr.s_addr != p->recv_c2s.addrs[0].sin_addr.s_addr ||
+                p->client_addr.sin_port != p->recv_c2s.addrs[0].sin_port) {
+                p->client_addr = p->recv_c2s.addrs[0];
+                atomic_store(&p->has_client, 1);
+                char abuf[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &p->client_addr.sin_addr, abuf, sizeof(abuf));
+                char pbuf[12];
+                const char *parts[] = { "client: ", abuf, ":", u32_to_str(pbuf, ntohs(p->client_addr.sin_port)) };
+                log_infon(parts, 4);
+            }
+        }
+
+        remote_fd = atomic_load(&p->remote_fd);
+        if (remote_fd < 0) continue;
+
+        /* Transform inbound (AWG→WG) and forward to WG server */
+        int nsend = 0;
+
+        for (int i = 0; i < nrecv; i++) {
+            int n = (int)p->recv_c2s.msgs[i].msg_len;
+            if (n <= 0) continue;
+
+            uint8_t *pkt = p->recv_c2s.bufs[i];
+
+            /* Transport fast-path: strip S4 prefix, restore type */
+            if (n >= s4 + WG_TRANSPORT_MIN) {
+                if (!cfg->transport_size_ambiguous ||
+                    (n != cfg->init_total && n != cfg->resp_total && n != cfg->cookie_total)) {
+                    uint32_t h;
+                    memcpy(&h, pkt + s4, 4);
+                    if (hrange_contains(&cfg->h4, h)) {
+                        uint32_t wt = WG_TRANSPORT_DATA;
+                        memcpy(pkt + s4, &wt, 4);
+
+                        /* Server mode: extract receiver_index for routing (but on c2s
+                         * transport is from client, no need to record — server replies
+                         * use receiver_index which maps to sender_index from init) */
+
+                        p->send_c2s.iovecs[nsend].iov_base = pkt + s4;
+                        p->send_c2s.iovecs[nsend].iov_len = n - s4;
+                        nsend++;
+                        continue;
+                    }
+                }
+            }
+
+            /* Handshake slow path: flush batch first */
+            if (nsend > 0) {
+                send_batch_gso(p, remote_fd, p->send_c2s.msgs,
+                               p->send_c2s.iovecs, nsend, NULL);
+                nsend = 0;
+            }
+
+            int out_len;
+            uint8_t *out = transform_inbound(pkt, n, cfg, &out_len);
+            if (!out) continue; /* junk packet, drop */
+
+            /* Server mode: record sender_index from init/response for routing */
+            if (server_mode && p->recv_c2s.addrs[i].sin_family == AF_INET) {
+                uint32_t msg_type;
+                memcpy(&msg_type, out, 4);
+                if (msg_type == WG_HANDSHAKE_INIT && out_len == WG_INIT_SIZE) {
+                    uint32_t sender_idx;
+                    memcpy(&sender_idx, out + 4, 4);
+                    session_put(p, sender_idx, &p->recv_c2s.addrs[i]);
+                    log_debug("c2s: server: recorded init sender_index");
+                } else if (msg_type == WG_HANDSHAKE_RESPONSE && out_len == WG_RESP_SIZE) {
+                    uint32_t sender_idx;
+                    memcpy(&sender_idx, out + 4, 4);
+                    session_put(p, sender_idx, &p->recv_c2s.addrs[i]);
+                    log_debug("c2s: server: recorded response sender_index");
+                }
+            }
+
+            p->send_c2s.iovecs[nsend].iov_base = out;
+            p->send_c2s.iovecs[nsend].iov_len = out_len;
+            nsend++;
+        }
+
+        if (nsend > 0) {
+            send_batch_gso(p, remote_fd, p->send_c2s.msgs,
+                           p->send_c2s.iovecs, nsend, NULL);
+        }
+    }
+
+    return NULL;
+}
+
+static void *c2s_thread(void *arg) {
+    proxy_t *p = (proxy_t *)arg;
+    if (p->cfg->mode != AWG_MODE_NORMAL)
+        return c2s_thread_reverse(arg);
+    return c2s_thread_normal(arg);
+}
+
+/* ---- s2c thread ---- */
+
+/* ---- s2c packet processing: normal mode (AWG→WG inbound) ---- */
+
+__attribute__((hot))
+static inline int process_s2c_pkt_normal(proxy_t *p, uint8_t *pkt, int n,
+                                          struct iovec *send_iovecs,
+                                          struct sockaddr_in *send_addrs,
+                                          int *nsend) {
     awg_config_t *cfg = p->cfg;
     int s4 = cfg->s4;
 
@@ -562,6 +731,92 @@ static inline int process_s2c_pkt(proxy_t *p, uint8_t *pkt, int n,
     send_iovecs[idx].iov_base = out;
     send_iovecs[idx].iov_len = out_len;
     send_addrs[idx] = p->client_addr;
+    (*nsend)++;
+    return 1;
+}
+
+/* ---- s2c packet processing: reverse/server mode (WG→AWG outbound) ---- */
+
+__attribute__((hot))
+static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pkt,
+                                           int n, int prefix,
+                                           struct iovec *send_iovecs,
+                                           struct sockaddr_in *send_addrs,
+                                           int *nsend) {
+    awg_config_t *cfg = p->cfg;
+    int server_mode = (cfg->mode == AWG_MODE_SERVER);
+
+    /* Determine destination address */
+    struct sockaddr_in *dest_addr = NULL;
+    if (server_mode) {
+        /* Look up by receiver_index based on packet type */
+        if (n < 4) return 0;
+        uint32_t msg_type;
+        memcpy(&msg_type, pkt, 4);
+
+        if (msg_type == WG_TRANSPORT_DATA && n >= WG_TRANSPORT_MIN) {
+            /* receiver_index at bytes 4-7 */
+            uint32_t recv_idx;
+            memcpy(&recv_idx, pkt + 4, 4);
+            dest_addr = session_get(p, recv_idx);
+        } else if (msg_type == WG_HANDSHAKE_RESPONSE && n == WG_RESP_SIZE) {
+            /* receiver_index at bytes 8-11 */
+            uint32_t recv_idx;
+            memcpy(&recv_idx, pkt + 8, 4);
+            dest_addr = session_get(p, recv_idx);
+        } else if (msg_type == WG_COOKIE_REPLY && n == WG_COOKIE_SIZE) {
+            /* receiver_index at bytes 4-7 */
+            uint32_t recv_idx;
+            memcpy(&recv_idx, pkt + 4, 4);
+            dest_addr = session_get(p, recv_idx);
+        }
+        if (!dest_addr) {
+            log_debug("s2c: server: no session for receiver_index, dropping");
+            return 0;
+        }
+    } else {
+        /* reverse 1:1: use single client_addr */
+        if (!atomic_load(&p->has_client)) return 0;
+        dest_addr = &p->client_addr;
+    }
+
+    /* Transport fast-path */
+    if (n >= WG_TRANSPORT_MIN) {
+        uint32_t h;
+        memcpy(&h, pkt, 4);
+        if (h == WG_TRANSPORT_DATA) {
+            if (!cfg->h4_noop) {
+                uint32_t h4 = pick_h4(p);
+                memcpy(pkt, &h4, 4);
+            }
+            int total = prefix > 0 ? prefix + n : n;
+            uint8_t *out = prefix > 0 ? base : pkt;
+            int idx = *nsend;
+            send_iovecs[idx].iov_base = out;
+            send_iovecs[idx].iov_len = total;
+            send_addrs[idx] = *dest_addr;
+            (*nsend)++;
+            return 1;
+        }
+    }
+
+    /* Handshake slow path */
+    int out_len, sendJunk;
+    uint8_t *out = transform_outbound(base, prefix, n, cfg,
+                                       fastrand_u64(&p->rng),
+                                       &out_len, &sendJunk);
+
+    if (sendJunk) {
+        log_debug("s2c: reverse: handshake init, sending junk");
+        send_junk_and_cps_to(p, p->listen_fd, dest_addr);
+        send_packet_to(p->listen_fd, out, out_len, dest_addr);
+        return 1;
+    }
+
+    int idx = *nsend;
+    send_iovecs[idx].iov_base = out;
+    send_iovecs[idx].iov_len = out_len;
+    send_addrs[idx] = *dest_addr;
     (*nsend)++;
     return 1;
 }
@@ -604,6 +859,10 @@ static void *s2c_thread(void *arg) {
     if (p->cfg->no_gro)
         log_info("s2c: UDP GRO disabled (AWG_NO_GRO)");
 
+    int reverse = (p->cfg->mode != AWG_MODE_NORMAL);
+    int s2c_headroom = reverse ? p->cfg->s4 : 0;
+    int s2c_buflen = BUF_SIZE + 256 - s2c_headroom;
+
     while (!atomic_load(&p->stopped)) {
         remote_fd = atomic_load(&p->remote_fd);
 
@@ -635,8 +894,8 @@ static void *s2c_thread(void *arg) {
         /* === Receive === */
         int nsend = 0;
 
-        if (p->gro_enabled) {
-            /* GRO path: one recvmsg returning coalesced buffer */
+        if (p->gro_enabled && !reverse) {
+            /* GRO path: normal mode only (reverse uses outbound which needs headroom) */
             int seg_size;
             int n = recv_gro(p, remote_fd, &seg_size);
             if (n <= 0) {
@@ -664,18 +923,18 @@ static void *s2c_thread(void *arg) {
                     int end = off + seg_size;
                     if (end > n) end = n;
                     int pkt_len = end - off;
-                    process_s2c_pkt(p, p->gro_buf + off, pkt_len,
-                                    p->send_s2c.iovecs, p->send_s2c.addrs, &nsend);
+                    process_s2c_pkt_normal(p, p->gro_buf + off, pkt_len,
+                                           p->send_s2c.iovecs, p->send_s2c.addrs, &nsend);
                 }
             } else {
                 /* Single packet */
-                process_s2c_pkt(p, p->gro_buf, n,
-                                p->send_s2c.iovecs, p->send_s2c.addrs, &nsend);
+                process_s2c_pkt_normal(p, p->gro_buf, n,
+                                       p->send_s2c.iovecs, p->send_s2c.addrs, &nsend);
             }
         } else {
-            /* Non-GRO path: recvmmsg with MSG_WAITFORONE */
+            /* Non-GRO path (or reverse mode): recvmmsg with MSG_WAITFORONE */
             for (int i = 0; i < prev_nrecv; i++)
-                p->recv_s2c.iovecs[i].iov_len = BUF_SIZE + 256;
+                p->recv_s2c.iovecs[i].iov_len = s2c_buflen;
 
             int nrecv = recvmmsg(remote_fd, p->recv_s2c.msgs, BATCH_SIZE,
                                  MSG_WAITFORONE, NULL);
@@ -694,13 +953,20 @@ static void *s2c_thread(void *arg) {
             atomic_store(&p->last_active, 1);
             reconnect_backoff = 1;
 
-            if (!atomic_load(&p->has_client)) continue;
+            if (!reverse && !atomic_load(&p->has_client)) continue;
 
             for (int i = 0; i < nrecv; i++) {
                 int n = (int)p->recv_s2c.msgs[i].msg_len;
                 if (n <= 0) continue;
-                process_s2c_pkt(p, p->recv_s2c.bufs[i], n,
-                                p->send_s2c.iovecs, p->send_s2c.addrs, &nsend);
+                if (reverse) {
+                    process_s2c_pkt_reverse(p, p->recv_s2c.bufs[i],
+                                            p->recv_s2c.bufs[i] + s2c_headroom, n,
+                                            s2c_headroom,
+                                            p->send_s2c.iovecs, p->send_s2c.addrs, &nsend);
+                } else {
+                    process_s2c_pkt_normal(p, p->recv_s2c.bufs[i], n,
+                                           p->send_s2c.iovecs, p->send_s2c.addrs, &nsend);
+                }
             }
         }
 

@@ -28,12 +28,32 @@ Lightweight Docker container that allows MikroTik routers to connect to AmneziaW
 
 ## How It Works
 
+### Normal Mode (default)
+
 ```
 MikroTik WG client ──UDP──> [awg-proxy] ──UDP──> AmneziaWG server
    (encryption)          (transformation)          (obfuscation)
 ```
 
 The proxy replaces packet headers, adds padding and junk packets so the AmneziaWG server accepts the traffic. Keys and data are not modified.
+
+### Reverse Mode (site-to-site)
+
+```
+MikroTik1 WG ↔ [proxy1 normal] ──AWG──> [proxy2 reverse] ↔ MikroTik2 WG
+```
+
+Reverse proxy: accepts AWG traffic from a normal proxy, transforms it back to standard WireGuard, and forwards to a local WG server. Allows connecting two MikroTik routers via AWG without running a separate AWG server.
+
+### Server Mode (hub, 1:N)
+
+```
+proxy1a (normal) ──AWG──┐
+proxy1b (normal) ──AWG──┤──> [reverse-hub] ──WG──> WG server
+proxy1c (normal) ──AWG──┘
+```
+
+Multi-client reverse proxy: accepts AWG connections from multiple normal proxies and routes responses from the WG server to the correct client via a built-in session table. Each peer uses ~16 bytes in the hash table.
 
 Compatible with AWG v1 and v2 -- the version is detected automatically based on the environment variables.
 
@@ -174,6 +194,7 @@ The obfuscation parameters (`Jc`, `Jmin`, `Jmax`, `S1`, `S2`, `H1`--`H4`) are in
 | `AWG_S3` | No | `0` | Cookie reply padding (v2) |
 | `AWG_S4` | No | `0` | Transport data padding (v2) |
 | `AWG_I1`--`AWG_I5` | No | -- | CPS templates (v1.5/v2) |
+| `AWG_MODE` | No | `normal` | Operating mode: `normal`, `reverse`, `server` |
 | `AWG_SRC_PORT` | No | auto | Outgoing port to server |
 | `AWG_TIMEOUT` | No | `180` | Inactivity timeout (sec) |
 | `AWG_LOG_LEVEL` | No | `info` | Log level |
@@ -263,6 +284,22 @@ AWG_S4=16   # +16 bytes to each transport data packet
 ```
 AWG_I1=b:48656c6c6f,r:10,t:4,c:4
 ```
+
+#### Optional -- Operating Mode
+
+**`AWG_MODE`** -- proxy operating mode. Determines the direction of packet transformation.
+
+- `normal` (default) -- standard proxy: accepts WireGuard from the router, transforms to AWG, and sends to the AWG server.
+- `reverse` -- reverse proxy (1:1 site-to-site): accepts AWG from another normal proxy, transforms back to WireGuard, and sends to a local WG server. Used in pair with a normal proxy on the other side.
+- `server` -- reverse proxy hub (1:N): like reverse, but supports connections from multiple normal proxies simultaneously. Response routing from the WG server to the correct client is done via a session table using `sender_index`/`receiver_index` from WireGuard packets.
+
+```
+AWG_MODE=normal    # default
+AWG_MODE=reverse   # reverse proxy, 1:1
+AWG_MODE=server    # reverse proxy hub, 1:N
+```
+
+In `reverse` and `server` modes, `AWG_REMOTE` points to the WireGuard server (not the AWG server), while `AWG_LISTEN` accepts AWG traffic from normal proxies. Obfuscation parameters (H1--H4, S1--S4, JC, etc.) must match the normal proxy on the other side.
 
 #### Optional -- Network and Diagnostics
 

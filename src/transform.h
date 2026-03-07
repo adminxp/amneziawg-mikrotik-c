@@ -86,7 +86,13 @@ typedef struct {
     int cpu_s2c;        /* CPU affinity for s2c thread (-1 = auto) */
     int busy_poll;      /* SO_BUSY_POLL timeout in μs (0 = off) */
     int no_gro;         /* disable UDP GRO (AWG_NO_GRO=1) */
+
+    int mode;           /* 0=normal, 1=reverse, 2=server */
 } awg_config_t;
+
+#define AWG_MODE_NORMAL  0
+#define AWG_MODE_REVERSE 1
+#define AWG_MODE_SERVER  2
 
 /* Compute MAC1 keys and fast-path flags. Call after setting all config fields. */
 void config_compute(awg_config_t *cfg);
