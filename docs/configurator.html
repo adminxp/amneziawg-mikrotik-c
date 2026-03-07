@@ -1391,6 +1391,8 @@
         var fwdName = fwd.name;
         lines.push('# FWD entries');
         lines = lines.concat(buildFwdEntries(prefix, selectedServices, SERVICES, fwdName));
+        lines.push('# Policy routing');
+        lines = lines.concat(buildPolicyRouting(prefix, prefix + '-fwd-table', prefix + '-fwd'));
         lines.push('# Mangle rules');
         var listNames = [];
         for (var i = 0; i < selectedServices.length; i++) {
@@ -1401,8 +1403,6 @@
         lines.push('  /ip/firewall/mangle/add chain=prerouting action=mark-connection new-connection-mark=' + prefix + '-fwd-conn dst-address-list=$l in-interface-list=LAN passthrough=yes comment=' + prefix + '-fwd');
         lines.push('}');
         lines.push('/ip/firewall/mangle/add chain=prerouting action=mark-routing new-routing-mark=' + prefix + '-fwd-table connection-mark=' + prefix + '-fwd-conn in-interface-list=LAN passthrough=no comment=' + prefix + '-fwd');
-        lines.push('# Policy routing');
-        lines = lines.concat(buildPolicyRouting(prefix, prefix + '-fwd-table', prefix + '-fwd'));
         lines.push('# Disable fasttrack for policy routing');
         lines.push(':foreach rule in=[/ip/firewall/filter/find where action=fasttrack-connection] do={');
         lines.push('  :local origComment [/ip/firewall/filter/get $rule comment]');
@@ -1498,11 +1498,11 @@
             lines.push('}');
         }
 
+        lines.push('# Policy routing');
+        lines = lines.concat(buildPolicyRouting(prefix, prefix + '-non-ru-table', prefix + '-non-ru'));
         lines.push('# Mark everything else for tunnel');
         lines.push('/ip/firewall/mangle/add chain=prerouting action=mark-connection new-connection-mark=' + prefix + '-non-ru-conn in-interface-list=LAN passthrough=yes comment=' + prefix + '-non-ru');
         lines.push('/ip/firewall/mangle/add chain=prerouting action=mark-routing new-routing-mark=' + prefix + '-non-ru-table connection-mark=' + prefix + '-non-ru-conn in-interface-list=LAN passthrough=no comment=' + prefix + '-non-ru');
-        lines.push('# Policy routing');
-        lines = lines.concat(buildPolicyRouting(prefix, prefix + '-non-ru-table', prefix + '-non-ru'));
         lines.push('# Disable fasttrack for policy routing');
         lines.push(':foreach rule in=[/ip/firewall/filter/find where action=fasttrack-connection] do={');
         lines.push('  :local origComment [/ip/firewall/filter/get $rule comment]');
