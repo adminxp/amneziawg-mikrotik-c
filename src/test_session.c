@@ -157,9 +157,9 @@ static void test_reverse_inbound_init_mac1(void) {
     memcpy(&msg_type, out, 4);
     ASSERT_EQ(msg_type, WG_HANDSHAKE_INIT);
 
-    /* Verify MAC1 was recomputed with client key */
+    /* Verify MAC1 was recomputed with server key (responder = WG server) */
     uint8_t expected_mac1[16];
-    blake2s_128mac(cfg.mac1key_client, out, 116, expected_mac1);
+    blake2s_128mac(cfg.mac1key_server, out, 116, expected_mac1);
     ASSERT_MEM_EQ(out + 116, expected_mac1, 16);
 }
 
@@ -219,7 +219,7 @@ static void test_server_inbound_init_mac1(void) {
     ASSERT_EQ(out_len, WG_INIT_SIZE);
 
     uint8_t expected_mac1[16];
-    blake2s_128mac(cfg.mac1key_client, out, 116, expected_mac1);
+    blake2s_128mac(cfg.mac1key_server, out, 116, expected_mac1);
     ASSERT_MEM_EQ(out + 116, expected_mac1, 16);
 }
 

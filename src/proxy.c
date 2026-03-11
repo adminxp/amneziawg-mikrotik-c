@@ -489,15 +489,10 @@ static void *c2s_thread_normal(void *arg) {
                     int cp = ntohs(p->recv_c2s.addrs[0].sin_port);
                     if (p->local_port != cp) {
                         p->local_port = cp;
-                        int old_fd = atomic_load(&p->remote_fd);
-                        if (old_fd >= 0) {
-                            char pb2[12];
-                            log_info2("src port: auto, reconnecting port=",
-                                      u32_to_str(pb2, cp));
-                            atomic_store(&p->reconnect_needed, 1);
-                            shutdown(old_fd, SHUT_RDWR);
-                            continue;
-                        }
+                        char pb2[12];
+                        log_info2("src port: auto, reconnecting port=",
+                                  u32_to_str(pb2, cp));
+                        atomic_store(&p->reconnect_needed, 1);
                     }
                 }
             }
@@ -843,7 +838,8 @@ static int do_reconnect(proxy_t *p) {
 
     atomic_store(&p->remote_fd, fd);
     atomic_store(&p->last_active, 1);
-    atomic_store(&p->has_client, 0);
+    if (p->cfg->mode == AWG_MODE_NORMAL)
+        atomic_store(&p->has_client, 0);
     atomic_store(&p->reconnect_needed, 0);
 
     log_info2("reconnected to ", p->remote_host);
