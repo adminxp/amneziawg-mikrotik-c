@@ -1325,8 +1325,8 @@
 
     function buildPolicyRouting(prefix, tableName, commentTag) {
         return [
-            '/routing/table/add name=' + tableName + ' fib comment=' + commentTag,
-            '/ip/route/add dst-address=0.0.0.0/0 gateway=wg-' + prefix + ' routing-table=' + tableName + ' comment=' + commentTag
+            ':do { /routing/table/add name=' + tableName + ' fib comment=' + commentTag + ' } on-error={}',
+            ':do { /ip/route/add dst-address=0.0.0.0/0 gateway=wg-' + prefix + ' routing-table=' + tableName + ' comment=' + commentTag + ' } on-error={}'
         ];
     }
 
@@ -1458,9 +1458,9 @@
         lines.push('/system/scheduler/add name=' + prefix + '-update-ru interval=1d start-time=04:05:00 on-event="/system/script/run ' + prefix + '-update-ru" policy=read,write,test,ftp comment=' + prefix + '-ru');
         lines.push('/system/script/run ' + prefix + '-update-ru');
 
-        // Mangle + routing wrapped in a single block
-        lines.push('{');
+        // Mangle + routing; wrap in {...} block only when exclusions present (DNS forwarder needs grouping)
         if (exclusionKeys.length > 0) {
+            lines.push('{');
             if (fwd.isDoH) {
                 lines.push('# DoH forwarder');
                 lines.push(':do { /ip/dns/forwarders/add doh-servers=' + fwd.doh + ' name=' + fwd.name + ' comment=' + prefix + '-dns-fwd } on-error={}');
@@ -1508,7 +1508,9 @@
         lines.push('  :local origComment [/ip/firewall/filter/get $rule comment]');
         lines.push('  /ip/firewall/filter/set $rule disabled=yes comment=("disabled-by-' + prefix + '|" . $origComment)');
         lines.push('}');
-        lines.push('}');
+        if (exclusionKeys.length > 0) {
+            lines.push('}');
+        }
 
         return lines;
     }
