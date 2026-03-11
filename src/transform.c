@@ -5,7 +5,7 @@
 
 /* Static buffer for handshake packets when headroom is insufficient.
  * Handshakes are rare (1-2 per connection), so static is fine. Max: S_max + 148 */
-static uint8_t hs_buf[1500];
+static __thread uint8_t hs_buf[1500];
 
 void config_compute(awg_config_t *cfg) {
     static const uint8_t z[32] = {0};

@@ -203,7 +203,7 @@ static int recv_gro(proxy_t *p, int fd, int *seg_size) {
  * Returns number of packets sent, or negative errno on error. */
 static int send_gso(int fd, struct iovec *iovecs, int count,
                     struct sockaddr_in *addr) {
-    if (count <= 1) return 0;
+    if (count <= 1 || !addr) return 0;
 
     /* Find longest prefix of same-size packets */
     int seg_size = (int)iovecs[0].iov_len;
@@ -431,10 +431,13 @@ static void send_batch_gso(proxy_t *p, int fd, struct mmsghdr *msgs,
             sent = n;
         }
     }
-    if (sent < nsend) {
+    while (sent < nsend) {
         int r = sendmmsg(fd, msgs + sent, nsend - sent, MSG_DONTWAIT | MSG_NOSIGNAL);
-        if (r < 0)
-            log_debug2("sendmmsg fallback failed: ", strerror(errno));
+        if (r <= 0) {
+            log_debug2("sendmmsg failed: ", strerror(errno));
+            break;
+        }
+        sent += r;
     }
 }
 
@@ -769,9 +772,14 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
             uint32_t recv_idx;
             memcpy(&recv_idx, pkt + 4, 4);
             dest_addr = session_get(p, recv_idx);
+        } else if (msg_type == WG_HANDSHAKE_INIT && n == WG_INIT_SIZE) {
+            /* Server-initiated rekey: no receiver_index, try sole client */
+            dest_addr = session_find_sole_client(p);
+            if (dest_addr)
+                log_debug("s2c: server: init routed to sole client");
         }
         if (!dest_addr) {
-            log_debug("s2c: server: no session for receiver_index, dropping");
+            log_debug("s2c: server: no session for packet, dropping");
             return 0;
         }
     } else {
@@ -972,8 +980,10 @@ static void *s2c_thread(void *arg) {
 
         /* === Send === */
         if (nsend > 0) {
+            struct sockaddr_in *gso_addr = (p->cfg->mode == AWG_MODE_SERVER)
+                ? NULL : &p->send_s2c.addrs[0];
             send_batch_gso(p, p->listen_fd, p->send_s2c.msgs,
-                           p->send_s2c.iovecs, nsend, &p->send_s2c.addrs[0]);
+                           p->send_s2c.iovecs, nsend, gso_addr);
         }
     }
 

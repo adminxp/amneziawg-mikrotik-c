@@ -20,7 +20,7 @@
 typedef struct {
     uint32_t sender_index;
     struct sockaddr_in addr;
-    int valid;
+    _Atomic int valid;
 } session_entry_t;
 
 
@@ -129,26 +129,44 @@ static inline void session_put(proxy_t *p, uint32_t index, struct sockaddr_in *a
     uint32_t slot = index & SESSION_TABLE_MASK;
     for (int i = 0; i < 4; i++) {
         uint32_t s = (slot + i) & SESSION_TABLE_MASK;
-        if (!p->sessions[s].valid || p->sessions[s].sender_index == index) {
+        if (!atomic_load_explicit(&p->sessions[s].valid, memory_order_acquire) ||
+            p->sessions[s].sender_index == index) {
             p->sessions[s].sender_index = index;
             p->sessions[s].addr = *addr;
-            p->sessions[s].valid = 1;
+            atomic_store_explicit(&p->sessions[s].valid, 1, memory_order_release);
             return;
         }
     }
     p->sessions[slot].sender_index = index;
     p->sessions[slot].addr = *addr;
-    p->sessions[slot].valid = 1;
+    atomic_store_explicit(&p->sessions[slot].valid, 1, memory_order_release);
 }
 
 static inline struct sockaddr_in *session_get(proxy_t *p, uint32_t index) {
     uint32_t slot = index & SESSION_TABLE_MASK;
     for (int i = 0; i < 4; i++) {
         uint32_t s = (slot + i) & SESSION_TABLE_MASK;
-        if (p->sessions[s].valid && p->sessions[s].sender_index == index)
+        if (atomic_load_explicit(&p->sessions[s].valid, memory_order_acquire) &&
+            p->sessions[s].sender_index == index)
             return &p->sessions[s].addr;
     }
     return NULL;
+}
+
+/* Find client address when only one unique client exists in session table */
+static inline struct sockaddr_in *session_find_sole_client(proxy_t *p) {
+    struct sockaddr_in *found = NULL;
+    for (int i = 0; i < SESSION_TABLE_SIZE; i++) {
+        if (!atomic_load_explicit(&p->sessions[i].valid, memory_order_acquire))
+            continue;
+        if (!found) {
+            found = &p->sessions[i].addr;
+        } else if (found->sin_addr.s_addr != p->sessions[i].addr.sin_addr.s_addr ||
+                   found->sin_port != p->sessions[i].addr.sin_port) {
+            return NULL; /* multiple clients */
+        }
+    }
+    return found;
 }
 
 /* Initialize proxy. Returns 0 on success. */
