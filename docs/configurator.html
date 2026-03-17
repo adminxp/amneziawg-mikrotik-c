@@ -504,6 +504,19 @@
         </div>
         <div id="fasttrack-warn" class="alert alert-warning" style="margin-top:8px" data-i18n="warnFasttrack">Fasttrack rules will be disabled for routing to work correctly. Uninstall script restores them.</div>
         <div id="non-ru-warn" class="alert alert-error" style="display:none;margin-top:8px" data-i18n="scenarioNonRuWarn"></div>
+        <div id="doh-panel" style="margin-bottom:10px">
+            <label data-i18n="dohForwarderLabel">DNS-forwarder (DoH)</label>
+            <div class="radio-group" id="doh-selector">
+                <label><input type="radio" name="doh-fwd" value="GoogleDNS" checked> Google</label>
+                <label><input type="radio" name="doh-fwd" value="CloudFlare"> CloudFlare</label>
+                <label><input type="radio" name="doh-fwd" value="Comss"> Comss</label>
+                <label><input type="radio" name="doh-fwd" value="Quad9"> Quad9</label>
+                <label><input type="radio" name="doh-fwd" value="Yandex"> Yandex</label>
+                <label><input type="radio" name="doh-fwd" value="__custom"> <span data-i18n="dohCustom">Custom...</span></label>
+            </div>
+            <input type="text" id="doh-custom-url" placeholder="https://your-dns/dns-query or IP" style="display:none;margin-top:6px;width:100%">
+            <div class="hint" data-i18n="dohHint">All services will use this DNS-over-HTTPS (DoH) provider for domain resolution.</div>
+        </div>
         <div id="services-panel" class="scenario-panel">
             <div class="scenario-panel-header">
                 <label style="margin-bottom:0" data-i18n="servicesLabel">Services to route through tunnel</label>
@@ -511,19 +524,6 @@
                     <button class="btn btn-secondary btn-sm" onclick="toggleAllServices(true)" data-i18n="btnSelectAll">Select all</button>
                     <button class="btn btn-secondary btn-sm" onclick="toggleAllServices(false)" data-i18n="btnDeselectAll">Deselect all</button>
                 </div>
-            </div>
-            <div style="margin-bottom:10px">
-                <label data-i18n="dohForwarderLabel">DNS-forwarder (DoH)</label>
-                <div class="radio-group" id="doh-selector">
-                    <label><input type="radio" name="doh-fwd" value="GoogleDNS" checked> Google</label>
-                    <label><input type="radio" name="doh-fwd" value="CloudFlare"> CloudFlare</label>
-                    <label><input type="radio" name="doh-fwd" value="Comss"> Comss</label>
-                    <label><input type="radio" name="doh-fwd" value="Quad9"> Quad9</label>
-                    <label><input type="radio" name="doh-fwd" value="Yandex"> Yandex</label>
-                    <label><input type="radio" name="doh-fwd" value="__custom"> <span data-i18n="dohCustom">Custom...</span></label>
-                </div>
-                <input type="text" id="doh-custom-url" placeholder="https://your-dns/dns-query or IP" style="display:none;margin-top:6px;width:100%">
-                <div class="hint" data-i18n="dohHint">All services will use this DNS-over-HTTPS (DoH) provider for domain resolution.</div>
             </div>
             <div id="services-grid" class="checkbox-grid"></div>
         </div>
@@ -1244,6 +1244,7 @@
 
     function onScenarioChange() {
         var s = getScenario();
+        document.getElementById('doh-panel').style.display = (s === 'dns-fwd' || s === 'non-ru') ? 'block' : 'none';
         document.getElementById('services-panel').style.display = s === 'dns-fwd' ? 'block' : 'none';
         document.getElementById('exclusions-panel').style.display = s === 'non-ru' ? 'block' : 'none';
         document.getElementById('fasttrack-warn').style.display = (s === 'dns-fwd' || s === 'non-ru') ? 'block' : 'none';
@@ -1457,23 +1458,23 @@
         lines.push('}');
         lines.push('/system/scheduler/add name=' + prefix + '-update-ru interval=1d start-time=04:05:00 on-event="/system/script/run ' + prefix + '-update-ru" policy=read,write,test,ftp comment=' + prefix + '-ru');
 
-        // Mangle + routing; wrap in {...} block only when exclusions present (DNS forwarder needs grouping)
-        if (exclusionKeys.length > 0) {
-            lines.push('{');
-            if (fwd.isDoH) {
-                lines.push('# DoH forwarder');
-                lines.push(':do { /ip/dns/forwarders/add doh-servers=' + fwd.doh + ' name=' + fwd.name + ' comment=' + prefix + '-dns-fwd } on-error={}');
-                var statics = getDnsStaticsForForwarder(fwd.name);
-                if (statics.length > 0) {
-                    lines.push('# DNS static entries for DoH resolver IPs');
-                    for (var i = 0; i < statics.length; i++) {
-                        lines.push('/ip/dns/static/add address=' + statics[i].addr + ' comment="' + prefix + '-dns-fwd" name=' + statics[i].name + ' type=A');
-                    }
+        // DNS forwarder + statics (always needed for DoH bootstrap in non-RU scenario)
+        lines.push('{');
+        if (fwd.isDoH) {
+            lines.push('# DoH forwarder');
+            lines.push(':do { /ip/dns/forwarders/add doh-servers=' + fwd.doh + ' name=' + fwd.name + ' comment=' + prefix + '-dns-fwd } on-error={}');
+            var statics = getDnsStaticsForForwarder(fwd.name);
+            if (statics.length > 0) {
+                lines.push('# DNS static entries for DoH resolver IPs');
+                for (var i = 0; i < statics.length; i++) {
+                    lines.push('/ip/dns/static/add address=' + statics[i].addr + ' comment="' + prefix + '-dns-fwd" name=' + statics[i].name + ' type=A');
                 }
-            } else {
-                lines.push('# Custom DNS static entry');
-                lines.push('/ip/dns/static/add address=' + fwd.addr + ' comment="' + prefix + '-dns-fwd" name=' + fwd.name + ' type=A');
             }
+        } else {
+            lines.push('# Custom DNS static entry');
+            lines.push('/ip/dns/static/add address=' + fwd.addr + ' comment="' + prefix + '-dns-fwd" name=' + fwd.name + ' type=A');
+        }
+        if (exclusionKeys.length > 0) {
             lines.push('# FWD entries for exclusions');
             lines = lines.concat(buildFwdEntries(prefix, exclusionKeys, EXCLUSIONS, fwd.name));
         }
@@ -1507,9 +1508,7 @@
         lines.push('  :local origComment [/ip/firewall/filter/get $rule comment]');
         lines.push('  /ip/firewall/filter/set $rule disabled=yes comment=("disabled-by-' + prefix + '|" . $origComment)');
         lines.push('}');
-        if (exclusionKeys.length > 0) {
-            lines.push('}');
-        }
+        lines.push('}');
 
         lines.push('# Download RU address list (may take a while)');
         lines.push('/system/script/run ' + prefix + '-update-ru');
