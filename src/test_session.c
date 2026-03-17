@@ -163,8 +163,8 @@ static void test_reverse_inbound_init_mac1(void) {
     ASSERT_MEM_EQ(out + 116, expected_mac1, 16);
 }
 
-/* 8. Normal mode does NOT recompute MAC1 for inbound init */
-static void test_normal_inbound_init_no_mac1(void) {
+/* 8. Normal mode DOES recompute MAC1 for inbound init (client key) */
+static void test_normal_inbound_init_mac1(void) {
     awg_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.s1 = 20; cfg.s2 = 20;
@@ -182,14 +182,16 @@ static void test_normal_inbound_init_no_mac1(void) {
     memcpy(buf + 20, &h1, 4);
     for (int i = 4; i < WG_INIT_SIZE; i++)
         buf[20 + i] = (uint8_t)i;
-    uint8_t orig_mac1[16];
-    memcpy(orig_mac1, buf + 20 + 116, 16);
 
     int out_len;
     uint8_t *out = transform_inbound(buf, 20 + WG_INIT_SIZE, &cfg, &out_len);
     ASSERT(out != NULL);
     ASSERT_EQ(out_len, WG_INIT_SIZE);
-    ASSERT_MEM_EQ(out + 116, orig_mac1, 16);
+
+    /* Verify MAC1 was recomputed with client key (recipient = WG client) */
+    uint8_t expected_mac1[16];
+    blake2s_128mac(cfg.mac1key_client, out, 116, expected_mac1);
+    ASSERT_MEM_EQ(out + 116, expected_mac1, 16);
 }
 
 /* 9. Server mode also recomputes MAC1 for inbound init */
@@ -232,7 +234,7 @@ int main(void) {
     RUN_TEST(session_collision);
     RUN_TEST(session_eviction);
     RUN_TEST(reverse_inbound_init_mac1);
-    RUN_TEST(normal_inbound_init_no_mac1);
+    RUN_TEST(normal_inbound_init_mac1);
     RUN_TEST(server_inbound_init_mac1);
     TEST_MAIN_END();
 }

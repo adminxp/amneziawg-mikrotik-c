@@ -27,6 +27,14 @@ void config_compute(awg_config_t *cfg) {
         (cfg->init_total >= tmin) ||
         (cfg->resp_total >= tmin) ||
         (cfg->cookie_total >= tmin);
+
+    if (cfg->mode == AWG_MODE_NORMAL) {
+        cfg->mac1key_out = cfg->has_server_pub ? cfg->mac1key_server : NULL;
+        cfg->mac1key_in  = cfg->has_client_pub ? cfg->mac1key_client : NULL;
+    } else {
+        cfg->mac1key_out = cfg->has_client_pub ? cfg->mac1key_client : NULL;
+        cfg->mac1key_in  = cfg->has_server_pub ? cfg->mac1key_server : NULL;
+    }
 }
 
 static inline uint32_t read32_le(const uint8_t *p) {
@@ -54,8 +62,8 @@ uint8_t *transform_outbound(uint8_t *buf, int dataoff, int n,
 
     if (msgType == WG_HANDSHAKE_INIT && n == WG_INIT_SIZE) {
         write32_le(data, hrange_pick(&cfg->h1, rand_val));
-        if (cfg->has_server_pub)
-            recompute_mac1(data, cfg->mac1key_server);
+        if (cfg->mac1key_out)
+            recompute_mac1(data, cfg->mac1key_out);
         *sendJunk = (cfg->jc > 0);
         if (cfg->s1 > 0) {
             if (dataoff >= cfg->s1) {
@@ -78,6 +86,8 @@ uint8_t *transform_outbound(uint8_t *buf, int dataoff, int n,
 
     if (msgType == WG_HANDSHAKE_RESPONSE && n == WG_RESP_SIZE) {
         write32_le(data, hrange_pick(&cfg->h2, rand_val));
+        if (cfg->mac1key_out)
+            recompute_mac1_response(data, cfg->mac1key_out);
         if (cfg->s2 > 0) {
             if (dataoff >= cfg->s2) {
                 uint8_t *out = data - cfg->s2;
@@ -156,8 +166,8 @@ uint8_t *transform_inbound(uint8_t *buf, int n, const awg_config_t *cfg, int *ou
         uint32_t h = read32_le(buf + cfg->s1);
         if (hrange_contains(&cfg->h1, h)) {
             write32_le(buf + cfg->s1, WG_HANDSHAKE_INIT);
-            if (cfg->mode != AWG_MODE_NORMAL && cfg->has_server_pub)
-                recompute_mac1(buf + cfg->s1, cfg->mac1key_server);
+            if (cfg->mac1key_in)
+                recompute_mac1(buf + cfg->s1, cfg->mac1key_in);
             *out_len = n - cfg->s1;
             return buf + cfg->s1;
         }
@@ -167,8 +177,8 @@ uint8_t *transform_inbound(uint8_t *buf, int n, const awg_config_t *cfg, int *ou
         uint32_t h = read32_le(buf + cfg->s2);
         if (hrange_contains(&cfg->h2, h)) {
             write32_le(buf + cfg->s2, WG_HANDSHAKE_RESPONSE);
-            if (cfg->has_client_pub)
-                recompute_mac1_response(buf + cfg->s2, cfg->mac1key_client);
+            if (cfg->mac1key_in)
+                recompute_mac1_response(buf + cfg->s2, cfg->mac1key_in);
             *out_len = n - cfg->s2;
             return buf + cfg->s2;
         }

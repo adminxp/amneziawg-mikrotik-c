@@ -135,6 +135,14 @@ int main(void) {
         }
     }
 
+    /* AWG_MODE: normal (default), reverse, server */
+    cfg->mode = AWG_MODE_NORMAL;
+    v = getenv("AWG_MODE");
+    if (v && v[0]) {
+        if (v[0] == 'r') cfg->mode = AWG_MODE_REVERSE;
+        else if (v[0] == 's') cfg->mode = AWG_MODE_SERVER;
+    }
+
     /* Compute derived fields */
     config_compute(cfg);
 
@@ -181,14 +189,6 @@ int main(void) {
     cfg->no_gro = 0;
     if ((v = getenv("AWG_NO_GRO")) && v[0])
         cfg->no_gro = parse_int_str(v);
-
-    /* AWG_MODE: normal (default), reverse, server */
-    cfg->mode = AWG_MODE_NORMAL;
-    v = getenv("AWG_MODE");
-    if (v && v[0]) {
-        if (v[0] == 'r') cfg->mode = AWG_MODE_REVERSE;
-        else if (v[0] == 's') cfg->mode = AWG_MODE_SERVER;
-    }
 
     /* Determine protocol mode */
     const char *mode = "v1";

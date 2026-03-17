@@ -717,6 +717,317 @@ static void test_v2_false_positive(void) {
     }
 }
 
+/* --- MAC1 tests --- */
+
+/* Helper: verify MAC1 is correct for handshake init (148 bytes) */
+static int verify_mac1_init(const uint8_t *pkt, const uint8_t mac1key[32]) {
+    uint8_t expected[16];
+    blake2s_128mac(mac1key, pkt, 116, expected);
+    return memcmp(pkt + 116, expected, 16) == 0;
+}
+
+/* Helper: verify MAC1 is correct for handshake response (92 bytes) */
+static int verify_mac1_response(const uint8_t *pkt, const uint8_t mac1key[32]) {
+    uint8_t expected[16];
+    blake2s_128mac(mac1key, pkt, 60, expected);
+    return memcmp(pkt + 60, expected, 16) == 0;
+}
+
+/* Config with real pubkeys for MAC1 testing.
+ * Fills cfg in-place to keep mac1key_out/mac1key_in pointers valid. */
+static void make_mac1_config(awg_config_t *cfg, int mode) {
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->jc = 3; cfg->jmin = 30; cfg->jmax = 500;
+    cfg->s1 = 20; cfg->s2 = 20;
+    cfg->h1 = (hrange_t){1234567890, 1234567890};
+    cfg->h2 = (hrange_t){1234567891, 1234567891};
+    cfg->h3 = (hrange_t){1234567892, 1234567892};
+    cfg->h4 = (hrange_t){1234567893, 1234567893};
+    /* Distinct test keys */
+    for (int i = 0; i < 32; i++) cfg->server_pub[i] = (uint8_t)(i + 1);
+    for (int i = 0; i < 32; i++) cfg->client_pub[i] = (uint8_t)(i + 0x80);
+    cfg->mode = mode;
+    config_compute(cfg);
+}
+
+/* Bug #1 (critical): outbound response must recompute MAC1 */
+static void test_mac1_outbound_response_normal(void) {
+    awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_NORMAL);
+    uint8_t buf[256 + WG_RESP_SIZE];
+    int dataoff = 256;
+    memset(buf, 0xAA, sizeof(buf));
+    uint8_t *data = buf + dataoff;
+    write32_le(data, WG_HANDSHAKE_RESPONSE);
+    fill_seq(data + 4, WG_RESP_SIZE - 4);
+
+    int out_len, sendJunk;
+    uint8_t *out = transform_outbound(buf, dataoff, WG_RESP_SIZE, &cfg, 42, &out_len, &sendJunk);
+    /* MAC1 must be valid for server key (recipient = AWG server in normal mode) */
+    uint8_t *pkt = out + cfg.s2;
+    ASSERT(verify_mac1_response(pkt, cfg.mac1key_server));
+}
+
+/* Bug #2: outbound init in server mode must use client key */
+static void test_mac1_outbound_init_server(void) {
+    awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_SERVER);
+    uint8_t buf[256 + WG_INIT_SIZE];
+    int dataoff = 256;
+    memset(buf, 0xAA, sizeof(buf));
+    uint8_t *data = buf + dataoff;
+    write32_le(data, WG_HANDSHAKE_INIT);
+    fill_seq(data + 4, WG_INIT_SIZE - 4);
+
+    int out_len, sendJunk;
+    uint8_t *out = transform_outbound(buf, dataoff, WG_INIT_SIZE, &cfg, 42, &out_len, &sendJunk);
+    uint8_t *pkt = out + cfg.s1;
+    /* In server mode, outbound goes to AWG client → client key */
+    ASSERT(verify_mac1_init(pkt, cfg.mac1key_client));
+    /* Must NOT match server key */
+    ASSERT(!verify_mac1_init(pkt, cfg.mac1key_server));
+}
+
+/* Bug #3: inbound init in normal mode must recompute MAC1 */
+static void test_mac1_inbound_init_normal(void) {
+    awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_NORMAL);
+    int total = cfg.s1 + WG_INIT_SIZE;
+    uint8_t buf[256];
+    memset(buf, 0xAA, sizeof(buf));
+    write32_le(buf + cfg.s1, cfg.h1.min);
+    fill_seq(buf + cfg.s1 + 4, WG_INIT_SIZE - 4);
+
+    int out_len;
+    uint8_t *out = transform_inbound(buf, total, &cfg, &out_len);
+    ASSERT(out != NULL);
+    ASSERT_EQ(out_len, WG_INIT_SIZE);
+    /* In normal mode, inbound init goes to WG client → client key */
+    ASSERT(verify_mac1_init(out, cfg.mac1key_client));
+}
+
+/* Bug #4: inbound response in server mode must use server key */
+static void test_mac1_inbound_response_server(void) {
+    awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_SERVER);
+    int total = cfg.s2 + WG_RESP_SIZE;
+    uint8_t buf[256];
+    memset(buf, 0xAA, sizeof(buf));
+    write32_le(buf + cfg.s2, cfg.h2.min);
+    fill_seq(buf + cfg.s2 + 4, WG_RESP_SIZE - 4);
+
+    int out_len;
+    uint8_t *out = transform_inbound(buf, total, &cfg, &out_len);
+    ASSERT(out != NULL);
+    ASSERT_EQ(out_len, WG_RESP_SIZE);
+    /* In server mode, inbound response goes to WG server → server key */
+    ASSERT(verify_mac1_response(out, cfg.mac1key_server));
+    /* Must NOT match client key */
+    ASSERT(!verify_mac1_response(out, cfg.mac1key_client));
+}
+
+/* Outbound init normal: uses server key */
+static void test_mac1_outbound_init_normal(void) {
+    awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_NORMAL);
+    uint8_t buf[256 + WG_INIT_SIZE];
+    int dataoff = 256;
+    memset(buf, 0xAA, sizeof(buf));
+    uint8_t *data = buf + dataoff;
+    write32_le(data, WG_HANDSHAKE_INIT);
+    fill_seq(data + 4, WG_INIT_SIZE - 4);
+
+    int out_len, sendJunk;
+    uint8_t *out = transform_outbound(buf, dataoff, WG_INIT_SIZE, &cfg, 42, &out_len, &sendJunk);
+    uint8_t *pkt = out + cfg.s1;
+    ASSERT(verify_mac1_init(pkt, cfg.mac1key_server));
+    ASSERT(!verify_mac1_init(pkt, cfg.mac1key_client));
+}
+
+/* Outbound response in server mode: uses client key */
+static void test_mac1_outbound_response_server(void) {
+    awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_SERVER);
+    uint8_t buf[256 + WG_RESP_SIZE];
+    int dataoff = 256;
+    memset(buf, 0xAA, sizeof(buf));
+    uint8_t *data = buf + dataoff;
+    write32_le(data, WG_HANDSHAKE_RESPONSE);
+    fill_seq(data + 4, WG_RESP_SIZE - 4);
+
+    int out_len, sendJunk;
+    uint8_t *out = transform_outbound(buf, dataoff, WG_RESP_SIZE, &cfg, 42, &out_len, &sendJunk);
+    uint8_t *pkt = out + cfg.s2;
+    ASSERT(verify_mac1_response(pkt, cfg.mac1key_client));
+    ASSERT(!verify_mac1_response(pkt, cfg.mac1key_server));
+}
+
+/* Inbound init in server mode: uses server key */
+static void test_mac1_inbound_init_server(void) {
+    awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_SERVER);
+    int total = cfg.s1 + WG_INIT_SIZE;
+    uint8_t buf[256];
+    memset(buf, 0xAA, sizeof(buf));
+    write32_le(buf + cfg.s1, cfg.h1.min);
+    fill_seq(buf + cfg.s1 + 4, WG_INIT_SIZE - 4);
+
+    int out_len;
+    uint8_t *out = transform_inbound(buf, total, &cfg, &out_len);
+    ASSERT(out != NULL);
+    ASSERT(verify_mac1_init(out, cfg.mac1key_server));
+    ASSERT(!verify_mac1_init(out, cfg.mac1key_client));
+}
+
+/* Inbound response in normal mode: uses client key */
+static void test_mac1_inbound_response_normal(void) {
+    awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_NORMAL);
+    int total = cfg.s2 + WG_RESP_SIZE;
+    uint8_t buf[256];
+    memset(buf, 0xAA, sizeof(buf));
+    write32_le(buf + cfg.s2, cfg.h2.min);
+    fill_seq(buf + cfg.s2 + 4, WG_RESP_SIZE - 4);
+
+    int out_len;
+    uint8_t *out = transform_inbound(buf, total, &cfg, &out_len);
+    ASSERT(out != NULL);
+    ASSERT(verify_mac1_response(out, cfg.mac1key_client));
+    ASSERT(!verify_mac1_response(out, cfg.mac1key_server));
+}
+
+/* mac1key_out/in are NULL when pubkey is zero */
+static void test_mac1key_null_when_no_pub(void) {
+    awg_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.h1 = (hrange_t){100, 100};
+    cfg.h2 = (hrange_t){200, 200};
+    cfg.h3 = (hrange_t){300, 300};
+    cfg.h4 = (hrange_t){400, 400};
+    /* Both keys zero */
+    cfg.mode = AWG_MODE_NORMAL;
+    config_compute(&cfg);
+    ASSERT(cfg.mac1key_out == NULL);
+    ASSERT(cfg.mac1key_in == NULL);
+
+    /* Only server_pub set */
+    for (int i = 0; i < 32; i++) cfg.server_pub[i] = (uint8_t)(i + 1);
+    cfg.mode = AWG_MODE_NORMAL;
+    config_compute(&cfg);
+    ASSERT(cfg.mac1key_out != NULL); /* server key for outbound */
+    ASSERT(cfg.mac1key_in == NULL);  /* no client key */
+
+    /* Server mode with only server_pub */
+    cfg.mode = AWG_MODE_SERVER;
+    config_compute(&cfg);
+    ASSERT(cfg.mac1key_out == NULL);  /* no client key for outbound */
+    ASSERT(cfg.mac1key_in != NULL);   /* server key for inbound */
+}
+
+/* MAC1 roundtrip: outbound→inbound, both directions, both modes */
+static void test_mac1_roundtrip_normal(void) {
+    awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_NORMAL);
+    /* Init roundtrip */
+    {
+        uint8_t buf[256 + WG_INIT_SIZE];
+        int dataoff = 256;
+        memset(buf, 0, sizeof(buf));
+        uint8_t *data = buf + dataoff;
+        write32_le(data, WG_HANDSHAKE_INIT);
+        fill_seq(data + 4, WG_INIT_SIZE - 4);
+        /* Compute original MAC1 with WG type (simulating WG stack) */
+        recompute_mac1(data, cfg.mac1key_client);
+
+        int out_len, sendJunk;
+        uint8_t *out = transform_outbound(buf, dataoff, WG_INIT_SIZE, &cfg, 42, &out_len, &sendJunk);
+        /* After outbound: MAC1 valid for server key */
+        ASSERT(verify_mac1_init(out + cfg.s1, cfg.mac1key_server));
+
+        int in_len;
+        uint8_t *result = transform_inbound(out, out_len, &cfg, &in_len);
+        ASSERT(result != NULL);
+        ASSERT_EQ(in_len, WG_INIT_SIZE);
+        /* After inbound: MAC1 valid for client key (back to WG) */
+        ASSERT(verify_mac1_init(result, cfg.mac1key_client));
+    }
+    /* Response roundtrip */
+    {
+        uint8_t buf[256 + WG_RESP_SIZE];
+        int dataoff = 256;
+        memset(buf, 0, sizeof(buf));
+        uint8_t *data = buf + dataoff;
+        write32_le(data, WG_HANDSHAKE_RESPONSE);
+        fill_seq(data + 4, WG_RESP_SIZE - 4);
+        recompute_mac1_response(data, cfg.mac1key_server);
+
+        int out_len, sendJunk;
+        uint8_t *out = transform_outbound(buf, dataoff, WG_RESP_SIZE, &cfg, 42, &out_len, &sendJunk);
+        ASSERT(verify_mac1_response(out + cfg.s2, cfg.mac1key_server));
+
+        int in_len;
+        uint8_t *result = transform_inbound(out, out_len, &cfg, &in_len);
+        ASSERT(result != NULL);
+        ASSERT(verify_mac1_response(result, cfg.mac1key_client));
+    }
+}
+
+static void test_mac1_roundtrip_server(void) {
+    awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_SERVER);
+    /* Init roundtrip in server mode */
+    {
+        uint8_t buf[256 + WG_INIT_SIZE];
+        int dataoff = 256;
+        memset(buf, 0, sizeof(buf));
+        uint8_t *data = buf + dataoff;
+        write32_le(data, WG_HANDSHAKE_INIT);
+        fill_seq(data + 4, WG_INIT_SIZE - 4);
+        recompute_mac1(data, cfg.mac1key_server);
+
+        int out_len, sendJunk;
+        uint8_t *out = transform_outbound(buf, dataoff, WG_INIT_SIZE, &cfg, 42, &out_len, &sendJunk);
+        /* Server mode outbound → client key */
+        ASSERT(verify_mac1_init(out + cfg.s1, cfg.mac1key_client));
+
+        int in_len;
+        uint8_t *result = transform_inbound(out, out_len, &cfg, &in_len);
+        ASSERT(result != NULL);
+        /* Server mode inbound → server key */
+        ASSERT(verify_mac1_init(result, cfg.mac1key_server));
+    }
+    /* Response roundtrip in server mode */
+    {
+        uint8_t buf[256 + WG_RESP_SIZE];
+        int dataoff = 256;
+        memset(buf, 0, sizeof(buf));
+        uint8_t *data = buf + dataoff;
+        write32_le(data, WG_HANDSHAKE_RESPONSE);
+        fill_seq(data + 4, WG_RESP_SIZE - 4);
+        recompute_mac1_response(data, cfg.mac1key_client);
+
+        int out_len, sendJunk;
+        uint8_t *out = transform_outbound(buf, dataoff, WG_RESP_SIZE, &cfg, 42, &out_len, &sendJunk);
+        ASSERT(verify_mac1_response(out + cfg.s2, cfg.mac1key_client));
+
+        int in_len;
+        uint8_t *result = transform_inbound(out, out_len, &cfg, &in_len);
+        ASSERT(result != NULL);
+        ASSERT(verify_mac1_response(result, cfg.mac1key_server));
+    }
+}
+
+/* Reverse mode: same key mapping as server */
+static void test_mac1_reverse_mode(void) {
+    awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_REVERSE);
+    /* mac1key_out should be client key, mac1key_in should be server key */
+    ASSERT(cfg.mac1key_out == cfg.mac1key_client);
+    ASSERT(cfg.mac1key_in == cfg.mac1key_server);
+
+    /* Outbound init uses client key */
+    uint8_t buf[256 + WG_INIT_SIZE];
+    int dataoff = 256;
+    memset(buf, 0xAA, sizeof(buf));
+    uint8_t *data = buf + dataoff;
+    write32_le(data, WG_HANDSHAKE_INIT);
+    fill_seq(data + 4, WG_INIT_SIZE - 4);
+
+    int out_len, sendJunk;
+    uint8_t *out = transform_outbound(buf, dataoff, WG_INIT_SIZE, &cfg, 42, &out_len, &sendJunk);
+    uint8_t *pkt = out + cfg.s1;
+    ASSERT(verify_mac1_init(pkt, cfg.mac1key_client));
+}
+
 int main(void) {
     fprintf(stderr, "=== transform tests ===\n");
     RUN_TEST(outbound_handshake_init);
@@ -748,5 +1059,18 @@ int main(void) {
     RUN_TEST(roundtrip_v2);
     RUN_TEST(v1_backward);
     RUN_TEST(v2_false_positive);
+    /* MAC1 tests */
+    RUN_TEST(mac1_outbound_init_normal);
+    RUN_TEST(mac1_outbound_response_normal);
+    RUN_TEST(mac1_outbound_init_server);
+    RUN_TEST(mac1_outbound_response_server);
+    RUN_TEST(mac1_inbound_init_normal);
+    RUN_TEST(mac1_inbound_response_normal);
+    RUN_TEST(mac1_inbound_init_server);
+    RUN_TEST(mac1_inbound_response_server);
+    RUN_TEST(mac1key_null_when_no_pub);
+    RUN_TEST(mac1_roundtrip_normal);
+    RUN_TEST(mac1_roundtrip_server);
+    RUN_TEST(mac1_reverse_mode);
     TEST_MAIN_END();
 }

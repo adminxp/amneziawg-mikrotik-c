@@ -75,6 +75,8 @@ typedef struct {
     int cookie_total;   /* S3 + 64 */
     int has_server_pub; /* server_pub != zero */
     int has_client_pub; /* client_pub != zero */
+    const uint8_t *mac1key_out; /* MAC1 key for outbound (WG→AWG) recompute */
+    const uint8_t *mac1key_in;  /* MAC1 key for inbound (AWG→WG) recompute */
     int transport_size_ambiguous; /* handshake size can overlap transport */
 
     int timeout;        /* seconds, default 180 */
