@@ -31,7 +31,7 @@ static void fill_h4_ring(proxy_t *p) {
 
 static inline uint32_t pick_h4(proxy_t *p) {
     uint32_t v = p->h4_ring[p->h4_idx];
-    p->h4_idx++;
+    p->h4_idx = (p->h4_idx + 1) & (H4_RING_SIZE - 1);
     if (p->h4_idx == 0)
         fill_h4_ring(p);
     return v;
@@ -253,7 +253,7 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
     memset(p, 0, sizeof(*p));
     p->cfg = cfg;
     p->listen_fd = -1;
-    atomic_store(&p->remote_fd, -1);
+    atomic_store_explicit(&p->remote_fd, -1, memory_order_relaxed);
     p->signal_fd = -1;
     p->timer_fd = -1;
     p->gso_ok = 1;
@@ -453,9 +453,7 @@ static void *c2s_thread_normal(void *arg) {
     int prefix = cfg->s4;
     int prev_nrecv = BATCH_SIZE;
 
-    while (!atomic_load(&p->stopped)) {
-        int remote_fd = atomic_load(&p->remote_fd);
-
+    while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
         /* Reset iov_len only for previously used elements */
         for (int i = 0; i < prev_nrecv; i++) {
             p->recv_c2s.iovecs[i].iov_len = BUF_SIZE;
@@ -465,20 +463,20 @@ static void *c2s_thread_normal(void *arg) {
         int nrecv = recvmmsg(p->listen_fd, p->recv_c2s.msgs, BATCH_SIZE,
                              MSG_WAITFORONE, NULL);
         if (nrecv <= 0) {
-            if (atomic_load(&p->stopped)) break;
+            if (atomic_load_explicit(&p->stopped, memory_order_relaxed)) break;
             continue;
         }
         prev_nrecv = nrecv;
 
-        atomic_store(&p->last_active, 1);
+        atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
 
         /* Check client address from first packet */
         if (p->recv_c2s.addrs[0].sin_family == AF_INET) {
-            if (!atomic_load(&p->has_client) ||
+            if (!atomic_load_explicit(&p->has_client, memory_order_acquire) ||
                 p->client_addr.sin_addr.s_addr != p->recv_c2s.addrs[0].sin_addr.s_addr ||
                 p->client_addr.sin_port != p->recv_c2s.addrs[0].sin_port) {
                 p->client_addr = p->recv_c2s.addrs[0];
-                atomic_store(&p->has_client, 1);
+                atomic_store_explicit(&p->has_client, 1, memory_order_release);
                 char abuf[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &p->client_addr.sin_addr, abuf, sizeof(abuf));
                 char pbuf[12];
@@ -492,13 +490,13 @@ static void *c2s_thread_normal(void *arg) {
                         char pb2[12];
                         log_info2("src port: auto, reconnecting port=",
                                   u32_to_str(pb2, cp));
-                        atomic_store(&p->reconnect_needed, 1);
+                        atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
                     }
                 }
             }
         }
 
-        remote_fd = atomic_load(&p->remote_fd);
+        int remote_fd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
         if (remote_fd < 0) continue;
 
         /* Build sendmmsg batch */
@@ -573,9 +571,7 @@ static void *c2s_thread_reverse(void *arg) {
     int s4 = cfg->s4;
     int prev_nrecv = BATCH_SIZE;
 
-    while (!atomic_load(&p->stopped)) {
-        int remote_fd = atomic_load(&p->remote_fd);
-
+    while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
         for (int i = 0; i < prev_nrecv; i++) {
             p->recv_c2s.iovecs[i].iov_len = BUF_SIZE;
             p->recv_c2s.msgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
@@ -584,20 +580,20 @@ static void *c2s_thread_reverse(void *arg) {
         int nrecv = recvmmsg(p->listen_fd, p->recv_c2s.msgs, BATCH_SIZE,
                              MSG_WAITFORONE, NULL);
         if (nrecv <= 0) {
-            if (atomic_load(&p->stopped)) break;
+            if (atomic_load_explicit(&p->stopped, memory_order_relaxed)) break;
             continue;
         }
         prev_nrecv = nrecv;
 
-        atomic_store(&p->last_active, 1);
+        atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
 
         /* In reverse (1:1) mode, track single client */
         if (!server_mode && p->recv_c2s.addrs[0].sin_family == AF_INET) {
-            if (!atomic_load(&p->has_client) ||
+            if (!atomic_load_explicit(&p->has_client, memory_order_acquire) ||
                 p->client_addr.sin_addr.s_addr != p->recv_c2s.addrs[0].sin_addr.s_addr ||
                 p->client_addr.sin_port != p->recv_c2s.addrs[0].sin_port) {
                 p->client_addr = p->recv_c2s.addrs[0];
-                atomic_store(&p->has_client, 1);
+                atomic_store_explicit(&p->has_client, 1, memory_order_release);
                 char abuf[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &p->client_addr.sin_addr, abuf, sizeof(abuf));
                 char pbuf[12];
@@ -606,7 +602,7 @@ static void *c2s_thread_reverse(void *arg) {
             }
         }
 
-        remote_fd = atomic_load(&p->remote_fd);
+        int remote_fd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
         if (remote_fd < 0) continue;
 
         /* Transform inbound (AWG→WG) and forward to WG server */
@@ -779,7 +775,7 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
         }
     } else {
         /* reverse 1:1: use single client_addr */
-        if (!atomic_load(&p->has_client)) return 0;
+        if (!atomic_load_explicit(&p->has_client, memory_order_acquire)) return 0;
         dest_addr = &p->client_addr;
     }
 
@@ -825,10 +821,10 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
 }
 
 static int do_reconnect(proxy_t *p) {
-    int old_fd = atomic_load(&p->remote_fd);
+    int old_fd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
     if (old_fd >= 0) {
         close(old_fd);
-        atomic_store(&p->remote_fd, -1);
+        atomic_store_explicit(&p->remote_fd, -1, memory_order_release);
     }
 
     log_info2("reconnecting to ", p->remote_host);
@@ -836,11 +832,11 @@ static int do_reconnect(proxy_t *p) {
     int fd = dial_remote(p, 1);
     if (fd < 0) return -1;
 
-    atomic_store(&p->remote_fd, fd);
-    atomic_store(&p->last_active, 1);
+    atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
     if (p->cfg->mode == AWG_MODE_NORMAL)
-        atomic_store(&p->has_client, 0);
-    atomic_store(&p->reconnect_needed, 0);
+        atomic_store_explicit(&p->has_client, 0, memory_order_release);
+    atomic_store_explicit(&p->reconnect_needed, 0, memory_order_relaxed);
+    atomic_store_explicit(&p->remote_fd, fd, memory_order_release);
 
     log_info2("reconnected to ", p->remote_host);
     return fd;
@@ -854,7 +850,7 @@ static void *s2c_thread(void *arg) {
     int prev_nrecv = BATCH_SIZE;
 
     /* Try to enable GRO on initial remote fd */
-    int remote_fd = atomic_load(&p->remote_fd);
+    int remote_fd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
     if (remote_fd >= 0 && !p->cfg->no_gro) {
         p->gro_enabled = enable_gro(remote_fd);
         if (p->gro_enabled)
@@ -866,15 +862,16 @@ static void *s2c_thread(void *arg) {
     int reverse = (p->cfg->mode != AWG_MODE_NORMAL);
     int s2c_headroom = reverse ? p->cfg->s4 : 0;
     int s2c_buflen = BUF_SIZE + 256 - s2c_headroom;
+    int gro_no_coalesce = 0;
 
-    while (!atomic_load(&p->stopped)) {
-        remote_fd = atomic_load(&p->remote_fd);
+    while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
+        remote_fd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
 
         /* Reconnect if needed */
-        if (remote_fd < 0 || atomic_load(&p->reconnect_needed)) {
+        if (remote_fd < 0 || atomic_load_explicit(&p->reconnect_needed, memory_order_relaxed)) {
             struct timespec slp = { .tv_sec = reconnect_backoff };
             nanosleep(&slp, NULL);
-            if (atomic_load(&p->stopped)) break;
+            if (atomic_load_explicit(&p->stopped, memory_order_relaxed)) break;
 
             int new_fd = do_reconnect(p);
             if (new_fd < 0) {
@@ -905,20 +902,21 @@ static void *s2c_thread(void *arg) {
             if (n <= 0) {
                 int saved_errno = errno;
                 if (n == 0 || (saved_errno != EAGAIN && saved_errno != EWOULDBLOCK && saved_errno != EINTR)) {
-                    if (!atomic_load(&p->stopped)) {
+                    if (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
                         log_info3("remote read error (", strerror(saved_errno), "), will reconnect");
-                        atomic_store(&p->reconnect_needed, 1);
+                        atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
                     }
                 }
                 continue;
             }
 
-            atomic_store(&p->last_active, 1);
+            atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
             reconnect_backoff = 1;
 
-            if (!atomic_load(&p->has_client)) continue;
+            if (!atomic_load_explicit(&p->has_client, memory_order_acquire)) continue;
 
             if (seg_size > 0 && n > seg_size) {
+                gro_no_coalesce = 0;
                 char nb[12], sb[12];
                 log_debug3("s2c: GRO recv bytes=", u32_to_str(nb, n), u32_to_str(sb, seg_size));
 
@@ -931,7 +929,11 @@ static void *s2c_thread(void *arg) {
                                            p->send_s2c.iovecs, p->send_s2c.addrs, &nsend);
                 }
             } else {
-                /* Single packet */
+                /* Single packet — GRO not coalescing */
+                if (++gro_no_coalesce >= 8) {
+                    p->gro_enabled = 0;
+                    log_info("GRO not coalescing, falling back to recvmmsg");
+                }
                 process_s2c_pkt_normal(p, p->gro_buf, n,
                                        p->send_s2c.iovecs, p->send_s2c.addrs, &nsend);
             }
@@ -945,19 +947,19 @@ static void *s2c_thread(void *arg) {
             if (nrecv <= 0) {
                 int saved_errno = errno;
                 if (nrecv == 0 || (saved_errno != EAGAIN && saved_errno != EWOULDBLOCK && saved_errno != EINTR)) {
-                    if (!atomic_load(&p->stopped)) {
+                    if (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
                         log_info3("remote read error (", strerror(saved_errno), "), will reconnect");
-                        atomic_store(&p->reconnect_needed, 1);
+                        atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
                     }
                 }
                 continue;
             }
             prev_nrecv = nrecv;
 
-            atomic_store(&p->last_active, 1);
+            atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
             reconnect_backoff = 1;
 
-            if (!reverse && !atomic_load(&p->has_client)) continue;
+            if (!reverse && !atomic_load_explicit(&p->has_client, memory_order_acquire)) continue;
 
             for (int i = 0; i < nrecv; i++) {
                 int n = (int)p->recv_s2c.msgs[i].msg_len;
@@ -1028,9 +1030,9 @@ int proxy_run(proxy_t *p) {
         close(p->listen_fd);
         return -1;
     }
-    atomic_store(&p->remote_fd, rfd);
+    atomic_store_explicit(&p->remote_fd, rfd, memory_order_release);
     log_socket_buffers(rfd, cfg, "remote");
-    atomic_store(&p->last_active, 1);
+    atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
 
     /* Signal handling */
     sigset_t mask;
@@ -1071,7 +1073,7 @@ int proxy_run(proxy_t *p) {
     int epfd = epoll_create1(EPOLL_CLOEXEC);
     if (epfd < 0) {
         log_error("epoll_create failed");
-        atomic_store(&p->stopped, 1);
+        atomic_store_explicit(&p->stopped, 1, memory_order_relaxed);
         goto join;
     }
 
@@ -1084,7 +1086,7 @@ int proxy_run(proxy_t *p) {
 
     struct epoll_event events[2];
 
-    while (!atomic_load(&p->stopped)) {
+    while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
         int nev = epoll_wait(epfd, events, 2, 1000);
         if (nev < 0) {
             if (errno == EINTR) continue;
@@ -1098,22 +1100,22 @@ int proxy_run(proxy_t *p) {
                 struct signalfd_siginfo si;
                 read(p->signal_fd, &si, sizeof(si));
                 log_info("shutting down");
-                atomic_store(&p->stopped, 1);
+                atomic_store_explicit(&p->stopped, 1, memory_order_relaxed);
                 break;
             }
 
             if (fd == p->timer_fd) {
                 uint64_t expirations;
                 read(p->timer_fd, &expirations, sizeof(expirations));
-                if (atomic_exchange(&p->last_active, 0)) {
+                if (atomic_exchange_explicit(&p->last_active, 0, memory_order_relaxed)) {
                     inactive_count = 0;
                 } else {
                     inactive_count++;
                     if (inactive_count >= checks_needed) {
                         log_info("remote timeout, triggering reconnect");
-                        int rfd2 = atomic_load(&p->remote_fd);
+                        int rfd2 = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
                         if (rfd2 >= 0) {
-                            atomic_store(&p->reconnect_needed, 1);
+                            atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
                             shutdown(rfd2, SHUT_RDWR);
                         }
                         inactive_count = 0;
@@ -1127,10 +1129,10 @@ int proxy_run(proxy_t *p) {
 
 join:
     /* Stop threads by shutting down sockets */
-    atomic_store(&p->stopped, 1);
+    atomic_store_explicit(&p->stopped, 1, memory_order_relaxed);
     if (p->listen_fd >= 0)
         shutdown(p->listen_fd, SHUT_RDWR);
-    rfd = atomic_load(&p->remote_fd);
+    rfd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
     if (rfd >= 0)
         shutdown(rfd, SHUT_RDWR);
 
@@ -1138,7 +1140,7 @@ join:
     pthread_join(t_s2c, NULL);
 
     /* Cleanup */
-    rfd = atomic_load(&p->remote_fd);
+    rfd = atomic_load_explicit(&p->remote_fd, memory_order_relaxed);
     if (rfd >= 0) close(rfd);
     if (p->listen_fd >= 0) close(p->listen_fd);
     if (p->signal_fd >= 0) close(p->signal_fd);

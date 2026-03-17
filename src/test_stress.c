@@ -340,7 +340,7 @@ static void test_normal_burst(void) {
     async_recv_start(&srv_recv, &srv_thread, server_fd);
 
     /* Burst: send transport packets.
-     * Pace sends in batches of 64 (half proxy BATCH_SIZE=128) with
+     * Pace sends in batches of 16 (half proxy BATCH_SIZE=32) with
      * micro-pause to avoid kernel UDP buffer overflow on loopback. */
     uint8_t transport[200];
     for (int i = 0; i < BURST_COUNT; i++) {

@@ -9,8 +9,8 @@
 #include <netinet/in.h>
 
 #define BUF_SIZE       1500
-#define BATCH_SIZE     128
-#define H4_RING_SIZE   65536
+#define BATCH_SIZE     32
+#define H4_RING_SIZE   4096
 #define GRO_BUF_SIZE   65536
 
 /* Session table for server mode */
@@ -35,41 +35,22 @@ typedef struct {
 #endif
 
 typedef struct {
-    awg_config_t *cfg;
+    /* === Hot fields: 1st cache line (64B) === */
+    awg_config_t *cfg;              /* 8B */
+    int listen_fd;                  /* 4B */
+    _Atomic int remote_fd;          /* 4B */
+    _Atomic int stopped;            /* 4B */
+    _Atomic int has_client;         /* 4B */
+    _Atomic int last_active;        /* 4B */
+    _Atomic int reconnect_needed;   /* 4B */
+    struct sockaddr_in client_addr; /* 16B */
+    int gso_ok;                     /* 4B */
+    int gro_enabled;                /* 4B */
+    uint16_t h4_idx;                /* 2B */
+    uint16_t _pad0;                 /* 2B */
+    fastrand_t rng;                 /* 8B */
 
-    /* Addresses */
-    struct sockaddr_in listen_addr;
-    struct sockaddr_in remote_addr;
-    char remote_host[256];   /* original hostname for re-resolve */
-    uint16_t remote_port;
-
-    /* Client address (last seen) — written by c2s thread, read by s2c thread */
-    struct sockaddr_in client_addr;
-    _Atomic int has_client;
-
-    /* Sockets */
-    int listen_fd;
-    _Atomic int remote_fd;
-
-    /* State — shared between threads */
-    _Atomic int stopped;
-    _Atomic int last_active;          /* activity flag */
-    int auto_src_port;
-    int local_port;           /* desired src port, 0 = kernel assigns */
-
-    /* CPS counter */
-    uint32_t cps_counter;
-
-    /* Pre-allocated junk buffers */
-    uint8_t *junk_buf;        /* jc * jmax bytes */
-    int *junk_sizes;          /* jc entries */
-
-    /* PRNG */
-    fastrand_t rng;
-
-    /* H4 ring buffer */
-    uint32_t h4_ring[H4_RING_SIZE];
-    uint16_t h4_idx;
+    /* === Warm: batch I/O === */
 
     /* Batch I/O buffers — c2s direction */
     struct {
@@ -92,34 +73,37 @@ typedef struct {
     } recv_s2c;
 
     struct {
-        uint8_t bufs[BATCH_SIZE][BUF_SIZE + 256];
         struct mmsghdr msgs[BATCH_SIZE];
         struct iovec iovecs[BATCH_SIZE];
         struct sockaddr_in addrs[BATCH_SIZE];
     } send_s2c;
 
-    /* GRO state — s2c direction */
-    int gro_enabled;
+    /* === Cold: init/reconnect === */
+    struct sockaddr_in listen_addr;
+    struct sockaddr_in remote_addr;
+    char remote_host[256];
+    uint16_t remote_port;
+    int auto_src_port;
+    int local_port;
+
+    uint32_t cps_counter;
+    uint8_t *junk_buf;
+    int *junk_sizes;
+
+    int signal_fd;
+    int timer_fd;
+
+    uint8_t cps_bufs[5][1500];
+    int cps_lens[5];
+
+    /* GRO state */
     uint8_t gro_buf[GRO_BUF_SIZE];
     struct iovec gro_iov;
     struct msghdr gro_hdr;
     uint8_t gro_cmsg[32];
 
-    /* GSO state */
-    int gso_ok;
-
-    /* Signal/timer fds */
-    int signal_fd;
-    int timer_fd;
-
-    /* CPS packet buffers */
-    uint8_t cps_bufs[5][1500];
-    int cps_lens[5];
-
-    /* Reconnect coordination */
-    _Atomic int reconnect_needed;
-
-    /* Session table for server mode */
+    /* === Large cold arrays === */
+    uint32_t h4_ring[H4_RING_SIZE];
     session_entry_t sessions[SESSION_TABLE_SIZE];
 
 } proxy_t;
