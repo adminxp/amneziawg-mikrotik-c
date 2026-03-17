@@ -1456,7 +1456,6 @@
         lines.push('  :log info ("RU list: " . $oldRu . " -> " . $newRu . " entries")');
         lines.push('}');
         lines.push('/system/scheduler/add name=' + prefix + '-update-ru interval=1d start-time=04:05:00 on-event="/system/script/run ' + prefix + '-update-ru" policy=read,write,test,ftp comment=' + prefix + '-ru');
-        lines.push('/system/script/run ' + prefix + '-update-ru');
 
         // Mangle + routing; wrap in {...} block only when exclusions present (DNS forwarder needs grouping)
         if (exclusionKeys.length > 0) {
@@ -1511,6 +1510,9 @@
         if (exclusionKeys.length > 0) {
             lines.push('}');
         }
+
+        lines.push('# Download RU address list (may take a while)');
+        lines.push('/system/script/run ' + prefix + '-update-ru');
 
         return lines;
     }
