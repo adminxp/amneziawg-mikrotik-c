@@ -463,6 +463,58 @@
                 transform: none;
             }
         }
+
+        input[type="radio"], input[type="checkbox"] {
+            accent-color: var(--accent);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #111111;
+                --surface: #1e1e1e;
+                --border: #333333;
+                --border-focus: #f97316;
+                --text: #e8e8e8;
+                --text-muted: #888888;
+                --accent: #f97316;
+                --accent-hover: #ea580c;
+                --success: #22c55e;
+                --success-bg: #14532d;
+                --error: #f87171;
+                --error-bg: #2d1515;
+                --tag-ok: #14532d;
+                --tag-ok-text: #86efac;
+                --tag-miss: #450a0a;
+                --tag-miss-text: #fca5a5;
+            }
+
+            #lang-toggle:hover { background: #2a2a2a; }
+
+            textarea {
+                background: #242424;
+            }
+            textarea:focus {
+                background: #1a1a1a;
+                box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.15);
+            }
+            textarea::placeholder { color: #555; }
+
+            select, input[type="text"] { background: #242424; }
+            select:focus, input[type="text"]:focus {
+                background: #1a1a1a;
+                box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.15);
+            }
+
+            .btn-secondary { background: #2a2a2a; }
+            .btn-secondary:hover { background: #333; }
+
+            .scenario-panel { background: #242424; }
+            .checkbox-grid label:hover { background: #2a2a2a; }
+
+            .alert-warning { background: #2a1a00; border-color: #92400e; color: #fcd34d; }
+
+            pre.collapsed::after { background: linear-gradient(transparent, #0f172a); }
+        }
     </style>
 </head>
 <body>
@@ -481,10 +533,7 @@
     <div class="card">
         <div class="card-title" data-i18n="confTitle">AmneziaWG Configuration File</div>
         <p style="font-size:0.82rem;color:var(--text-muted);margin-bottom:12px;line-height:1.5" data-i18n="privacy">All configuration and data is processed locally in your browser. Nothing is transmitted anywhere. Your private keys are safe.</p>
-        <label for="conf-input" data-i18n="confLabel">.conf file contents</label>
-        <textarea id="conf-input"
-                  placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = 10.1.1.1/32&#10;DNS = 1.1.1.1&#10;Jc = 2&#10;Jmin = 1&#10;Jmax = 500&#10;S1 = 123&#10;S2 = 12&#10;H1 = 12345&#10;...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = 1.2.3.4:12345&#10;AllowedIPs = 0.0.0.0/0"></textarea>
-        <div style="margin-top:14px">
+        <div style="margin-bottom:14px">
             <label data-i18n="modeLabel">Deployment mode</label>
             <div class="radio-group">
                 <label><input type="radio" name="deploy-mode" value="container" checked onchange="onModeChange()"> <span data-i18n="modeContainer">MikroTik + Container (Docker)</span></label>
@@ -493,6 +542,9 @@
             </div>
             <div id="mode-hint" class="hint" data-i18n="modeContainerHint">WireGuard client on MikroTik + awg-proxy runs inside a Docker container directly on the router</div>
         </div>
+        <label for="conf-input" data-i18n="confLabel">.conf file contents</label>
+        <textarea id="conf-input"
+                  placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = 10.1.1.1/32&#10;DNS = 1.1.1.1&#10;Jc = 2&#10;Jmin = 1&#10;Jmax = 500&#10;S1 = 123&#10;S2 = 12&#10;H1 = 12345&#10;...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = 1.2.3.4:12345&#10;AllowedIPs = 0.0.0.0/0"></textarea>
         <div id="scenario-row" style="margin-top:14px">
             <label data-i18n="scenarioLabel">Routing scenario</label>
             <div class="radio-group">
@@ -568,7 +620,7 @@
             <div class="s2s-fields">
                 <div>
                     <label for="s2s-endpoint-b" data-i18n="s2sEndpointB">Server endpoint (Side B IP or domain)</label>
-                    <input type="text" id="s2s-endpoint-b" placeholder="e.g. 198.51.100.1">
+                    <input type="text" id="s2s-endpoint-b" placeholder="e.g. 198.51.100.1 or vpn.example.com">
                 </div>
                 <div>
                     <label for="s2s-awg-port" data-i18n="s2sAwgPort">AWG port on server (Side B)</label>
@@ -577,6 +629,20 @@
                 <div>
                     <label for="s2s-tunnel-subnet" data-i18n="s2sTunnelSubnet">Tunnel subnet</label>
                     <input type="text" id="s2s-tunnel-subnet" value="10.0.0.0/30">
+                </div>
+                <div>
+                    <label for="s2s-dns" data-i18n="s2sDns">DNS server (required for domain endpoint)</label>
+                    <input type="text" id="s2s-dns" placeholder="e.g. 192.168.88.1">
+                </div>
+            </div>
+            <div class="s2s-fields">
+                <div>
+                    <label for="s2s-lan-a" data-i18n="s2sLanA">Side A LAN subnet (optional)</label>
+                    <input type="text" id="s2s-lan-a" placeholder="e.g. 192.168.1.0/24">
+                </div>
+                <div>
+                    <label for="s2s-lan-b" data-i18n="s2sLanB">Side B LAN subnet (optional)</label>
+                    <input type="text" id="s2s-lan-b" placeholder="e.g. 192.168.2.0/24">
                 </div>
             </div>
             <div class="s2s-fields">
@@ -677,10 +743,7 @@
     // ============================================================
     // i18n
     // ============================================================
-    var currentLang = (function() {
-        try { var s = localStorage.getItem('awg-lang'); if (s === 'ru' || s === 'en') return s; } catch(e) {}
-        return (navigator.language && navigator.language.slice(0,2) === 'en') ? 'en' : 'ru';
-    })();
+    var currentLang = 'ru';
 
     var REPO = (function() {
         var h = location.hostname, p = location.pathname.split('/')[1] || '';
@@ -765,14 +828,19 @@
             s2sEndpointB: 'Server endpoint (Side B IP or domain)',
             s2sTunnelSubnet: 'Tunnel subnet',
             s2sAwgPort: 'AWG port on server (Side B)',
+            s2sLanA: 'Side A LAN subnet (optional)',
+            s2sLanB: 'Side B LAN subnet (optional)',
             s2sStorageA: 'Side A storage',
             s2sStorageB: 'Side B storage',
+            s2sDns: 'DNS server (required for domain endpoint)',
             s2sRegenerate: 'Regenerate AWG params',
             s2sOutputA: 'Side A (MikroTik 1) \u2014 client',
             s2sOutputB: 'Side B (MikroTik 2) \u2014 server',
             s2sUninstallA: 'Uninstall Side A (client)',
             s2sUninstallB: 'Uninstall Side B (server)',
             errEndpointB: 'Server endpoint is required (Side B IP address or domain).',
+            errDnsRequired: 'DNS server is required when endpoint is a hostname (not an IP address).',
+            errLanSubnet: 'Invalid LAN subnet format. Use CIDR notation, e.g. 192.168.1.0/24.',
             errTunnelSubnet: 'Invalid tunnel subnet. Use /30 CIDR (e.g. 10.0.0.0/30).',
             errAwgPort: 'AWG port must be 1024\u201365535.',
             scenarioNonRuWarn: 'WARNING: All foreign traffic will go through VPN. Make sure your server can handle the load. Most VPS have limited bandwidth. A typical household with video services easily consumes 10+ TB/month. ALL torrent traffic will also go through the tunnel (that is A LOT of data). Game traffic may also be routed through it. Choose this option only if you are 100% sure.',
@@ -849,14 +917,19 @@
             s2sEndpointB: 'Endpoint \u0441\u0435\u0440\u0432\u0435\u0440\u0430 (\u0441\u0442\u043e\u0440\u043e\u043d\u0430 B, IP \u0438\u043b\u0438 \u0434\u043e\u043c\u0435\u043d)',
             s2sTunnelSubnet: '\u041f\u043e\u0434\u0441\u0435\u0442\u044c \u0442\u0443\u043d\u043d\u0435\u043b\u044f',
             s2sAwgPort: 'AWG-\u043f\u043e\u0440\u0442 \u043d\u0430 \u0441\u0435\u0440\u0432\u0435\u0440\u0435 (\u0441\u0442\u043e\u0440\u043e\u043d\u0430 B)',
+            s2sLanA: 'LAN-\u043f\u043e\u0434\u0441\u0435\u0442\u044c \u0441\u0442\u043e\u0440\u043e\u043d\u044b A (\u043d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e)',
+            s2sLanB: 'LAN-\u043f\u043e\u0434\u0441\u0435\u0442\u044c \u0441\u0442\u043e\u0440\u043e\u043d\u044b B (\u043d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e)',
             s2sStorageA: '\u0425\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435 \u0441\u0442\u043e\u0440\u043e\u043d\u044b A',
             s2sStorageB: '\u0425\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435 \u0441\u0442\u043e\u0440\u043e\u043d\u044b B',
+            s2sDns: 'DNS-\u0441\u0435\u0440\u0432\u0435\u0440 (\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u0435\u043d \u0434\u043b\u044f \u0434\u043e\u043c\u0435\u043d\u0430)',
             s2sRegenerate: '\u041f\u0435\u0440\u0435\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c AWG-\u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b',
             s2sOutputA: '\u0421\u0442\u043e\u0440\u043e\u043d\u0430 A (MikroTik 1) \u2014 \u043a\u043b\u0438\u0435\u043d\u0442',
             s2sOutputB: '\u0421\u0442\u043e\u0440\u043e\u043d\u0430 B (MikroTik 2) \u2014 \u0441\u0435\u0440\u0432\u0435\u0440',
             s2sUninstallA: '\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435 \u0441\u0442\u043e\u0440\u043e\u043d\u044b A (\u043a\u043b\u0438\u0435\u043d\u0442)',
             s2sUninstallB: '\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435 \u0441\u0442\u043e\u0440\u043e\u043d\u044b B (\u0441\u0435\u0440\u0432\u0435\u0440)',
             errEndpointB: '\u0423\u043a\u0430\u0436\u0438\u0442\u0435 endpoint \u0441\u0442\u043e\u0440\u043e\u043d\u044b B (IP-\u0430\u0434\u0440\u0435\u0441 \u0438\u043b\u0438 \u0434\u043e\u043c\u0435\u043d).',
+            errDnsRequired: '\u0414\u043b\u044f hostname \u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e \u0443\u043a\u0430\u0436\u0438\u0442\u0435 DNS-\u0441\u0435\u0440\u0432\u0435\u0440 (endpoint \u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u0434\u043e\u043c\u0435\u043d\u043e\u043c, \u0430 \u043d\u0435 IP-\u0430\u0434\u0440\u0435\u0441\u043e\u043c).',
+            errLanSubnet: '\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u0444\u043e\u0440\u043c\u0430\u0442 LAN-\u043f\u043e\u0434\u0441\u0435\u0442\u0438. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 CIDR, \u043d\u0430\u043f\u0440. 192.168.1.0/24.',
             errTunnelSubnet: '\u041d\u0435\u0432\u0435\u0440\u043d\u0430\u044f \u043f\u043e\u0434\u0441\u0435\u0442\u044c. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 /30 CIDR (\u043d\u0430\u043f\u0440. 10.0.0.0/30).',
             errAwgPort: 'AWG-\u043f\u043e\u0440\u0442 \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c 1024\u201365535.',
             scenarioNonRuWarn: '\u0412\u041d\u0418\u041c\u0410\u041d\u0418\u0415: \u0412\u0435\u0441\u044c \u0437\u0430\u0440\u0443\u0431\u0435\u0436\u043d\u044b\u0439 \u0442\u0440\u0430\u0444\u0438\u043a \u043f\u043e\u0439\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 VPN. \u0423\u0431\u0435\u0434\u0438\u0442\u0435\u0441\u044c, \u0447\u0442\u043e \u0432\u0430\u0448 \u0441\u0435\u0440\u0432\u0435\u0440 \u0432\u044b\u0434\u0435\u0440\u0436\u0438\u0442 \u043d\u0430\u0433\u0440\u0443\u0437\u043a\u0443. \u0411\u043e\u043b\u044c\u0448\u0438\u043d\u0441\u0442\u0432\u043e VPS \u0438\u043c\u0435\u044e\u0442 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u043d\u044b\u0439 \u0442\u0440\u0430\u0444\u0438\u043a. \u0422\u0438\u043f\u0438\u0447\u043d\u043e\u0435 \u0434\u043e\u043c\u043e\u0445\u043e\u0437\u044f\u0439\u0441\u0442\u0432\u043e \u0441 \u0432\u0438\u0434\u0435\u043e\u0441\u0435\u0440\u0432\u0438\u0441\u0430\u043c\u0438 \u043b\u0435\u0433\u043a\u043e \u043f\u043e\u0442\u0440\u0435\u0431\u043b\u044f\u0435\u0442 10+ \u0422\u0411/\u043c\u0435\u0441. \u0412\u0415\u0421\u042c \u0442\u043e\u0440\u0440\u0435\u043d\u0442-\u0442\u0440\u0430\u0444\u0438\u043a \u0442\u043e\u0436\u0435 \u043f\u043e\u0439\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 \u0442\u0443\u043d\u043d\u0435\u043b\u044c (\u0430 \u044d\u0442\u043e \u041e\u0427\u0415\u041d\u042c \u043c\u043d\u043e\u0433\u043e \u0434\u0430\u043d\u043d\u044b\u0445). \u0418\u0433\u0440\u043e\u0432\u043e\u0439 \u0442\u0440\u0430\u0444\u0438\u043a \u0442\u043e\u0436\u0435 \u043c\u043e\u0436\u0435\u0442 \u043b\u0435\u0433\u043a\u043e \u0437\u0430\u0432\u0435\u0440\u043d\u0443\u0442\u044c\u0441\u044f \u0442\u0443\u0434\u0430. \u0412\u044b\u0431\u0438\u0440\u0430\u0439\u0442\u0435 \u044d\u0442\u043e\u0442 \u0432\u0430\u0440\u0438\u0430\u043d\u0442, \u0442\u043e\u043b\u044c\u043a\u043e \u0435\u0441\u043b\u0438 \u043d\u0430 100% \u0443\u0432\u0435\u0440\u0435\u043d\u044b.',
@@ -873,7 +946,6 @@
 
     function setLang(lang) {
         currentLang = lang;
-        try { localStorage.setItem('awg-lang', lang); } catch(e) {}
         applyI18n();
         onScenarioChange();
     }
@@ -1413,7 +1485,7 @@
         return lines;
     }
 
-    function buildNonRuScenario(prefix, exclusionKeys, forwarderName, storageDisk) {
+    function buildNonRuScenario(prefix, exclusionKeys, forwarderName, storageDisk, serverHost) {
         var fwd = getDohForwarderInfo(forwarderName);
         var lines = [];
         lines.push('');
@@ -1498,10 +1570,15 @@
             lines.push('}');
         }
 
+        if (serverHost) {
+            lines.push('# Accept AWG server (direct, prevent routing loop)');
+            lines.push('/ip/firewall/address-list/add address=' + serverHost + ' list=' + prefix + '-vpn-server comment=' + prefix + '-non-ru');
+            lines.push('/ip/firewall/mangle/add chain=prerouting action=accept dst-address-list=' + prefix + '-vpn-server in-interface-list=LAN comment=' + prefix + '-non-ru');
+        }
         lines.push('# Policy routing');
         lines = lines.concat(buildPolicyRouting(prefix, prefix + '-non-ru-table', prefix + '-non-ru'));
         lines.push('# Mark everything else for tunnel');
-        lines.push('/ip/firewall/mangle/add chain=prerouting action=mark-connection new-connection-mark=' + prefix + '-non-ru-conn in-interface-list=LAN passthrough=yes comment=' + prefix + '-non-ru');
+        lines.push('/ip/firewall/mangle/add chain=prerouting action=mark-connection new-connection-mark=' + prefix + '-non-ru-conn connection-mark=no-mark in-interface-list=LAN passthrough=yes comment=' + prefix + '-non-ru');
         lines.push('/ip/firewall/mangle/add chain=prerouting action=mark-routing new-routing-mark=' + prefix + '-non-ru-table connection-mark=' + prefix + '-non-ru-conn in-interface-list=LAN passthrough=no comment=' + prefix + '-non-ru');
         lines.push('# Disable fasttrack for policy routing');
         lines.push(':foreach rule in=[/ip/firewall/filter/find where action=fasttrack-connection] do={');
@@ -1583,6 +1660,7 @@
             src.push('  :do { /ip/firewall/mangle/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /routing/table/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where list=RU and comment=RIPE-RU] } on-error={}');
+            src.push('  :do { /ip/firewall/address-list/remove [find where list="' + prefix + '-vpn-server"] } on-error={}');
             src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
             src = src.concat(buildFasttrackRestore(prefix));
@@ -1660,6 +1738,7 @@
             src.push('  :do { /ip/firewall/mangle/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /routing/table/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where list=RU and comment=RIPE-RU] } on-error={}');
+            src.push('  :do { /ip/firewall/address-list/remove [find where list="' + prefix + '-vpn-server"] } on-error={}');
             src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
             src = src.concat(buildFasttrackRestore(prefix));
@@ -2118,6 +2197,7 @@
         document.querySelector('label[for="conf-input"]').style.display = isS2S ? 'none' : 'block';
         document.getElementById('scenario-row').style.display = isS2S ? 'none' : 'block';
         if (isS2S) {
+            document.getElementById('doh-panel').style.display = 'none';
             document.getElementById('services-panel').style.display = 'none';
             document.getElementById('exclusions-panel').style.display = 'none';
             document.getElementById('fasttrack-warn').style.display = 'none';
@@ -2125,8 +2205,7 @@
         } else {
             onScenarioChange();
         }
-        // Hide prefix row for s2s (always uses awg-proxy)
-        document.getElementById('prefix-select').parentElement.style.display = isS2S ? 'none' : 'block';
+        document.getElementById('prefix-select').parentElement.style.display = 'block';
         var hintKey = isS2S ? 'modeSiteToSiteHint' : (mode === 'container' ? 'modeContainerHint' : 'modeStandaloneHint');
         document.getElementById('mode-hint').setAttribute('data-i18n', hintKey);
         document.getElementById('mode-hint').textContent = t(hintKey);
@@ -2176,22 +2255,26 @@
         return sel;
     }
 
-    function getTunnelNumber(prefix) {
-        if (prefix === 'awg-proxy') return 1;
-        if (prefix === 'awg-proxy-2') return 2;
-        if (prefix === 'awg-proxy-3') return 3;
-        if (prefix === 'awg-proxy-4') return 4;
-        return 1;
-    }
-
-    function getTunnelNetwork(n) {
-        var base = 4 * (n - 1);
+    // Deterministically derives a unique /30 veth subnet and WireGuard listen port
+    // from the tunnel name (prefix), so multiple tunnels on the same MikroTik
+    // don't collide. Uses a simple djb2-style hash spread across different bit
+    // ranges: bits 0-3 → 2nd octet (172.16-31.x.x), bits 4-11 → 3rd octet,
+    // bits 12-17 → 4th octet base (0-252, aligned to /30), bits 18+ → WG port.
+    function getTunnelNetwork(prefix) {
+        var h = 0;
+        for (var i = 0; i < prefix.length; i++)
+            h = ((h * 31) + prefix.charCodeAt(i)) & 0xFFFFFFFF;
+        h = h >>> 0;
+        var oct2 = 16 + (h & 0xF);
+        var oct3 = (h >>> 4) & 0xFF;
+        var oct4base = ((h >>> 12) & 0x3F) * 4;
+        var wgPort = 12000 + ((h >>> 18) % 20000);
         return {
-            vethAddr: '172.18.0.' + (base + 2) + '/30',
-            hostAddr: '172.18.0.' + (base + 1) + '/30',
-            vethGw: '172.18.0.' + (base + 1),
-            natSrc: '172.18.0.' + base + '/30',
-            wgPort: 12428 + n
+            vethAddr: '172.' + oct2 + '.' + oct3 + '.' + (oct4base + 2) + '/30',
+            hostAddr: '172.' + oct2 + '.' + oct3 + '.' + (oct4base + 1) + '/30',
+            vethGw:   '172.' + oct2 + '.' + oct3 + '.' + (oct4base + 1),
+            natSrc:   '172.' + oct2 + '.' + oct3 + '.' + oct4base + '/30',
+            wgPort:   wgPort
         };
     }
 
@@ -2293,7 +2376,8 @@
             h2: randomUint32(),
             h3: randomUint32(),
             h4: randomUint32(),
-            port: randomInt(10000, 60000)
+            port: randomInt(10000, 60000),
+            wgListenPort: randomInt(10000, 60000)
         };
     }
 
@@ -2343,12 +2427,12 @@
     // ============================================================
     // Build site-to-site commands
     // ============================================================
-    function buildSiteToSiteCommands(endpointB, subnet, awgParams, storageA, storageB, prefix) {
+    function buildSiteToSiteCommands(endpointB, subnet, awgParams, storageA, storageB, prefix, dnsServer, lanA, lanB) {
         var keyA = generateWgKeyPair();
         var keyB = generateWgKeyPair();
-        var net = getTunnelNetwork(getTunnelNumber(prefix));
+        var net = getTunnelNetwork(prefix);
         var sn = parseSlash30(subnet);
-        var wgPort = net.wgPort;
+        var wgPort = awgParams.wgListenPort;
 
         var result = {};
 
@@ -2386,8 +2470,10 @@
         // WireGuard
         la.push('# 3. WireGuard interface');
         la.push('/interface/wireguard/add name=wg-' + prefix + ' private-key="' + keyA.privateKey + '" listen-port=' + wgPort + ' disabled=yes');
-        la.push('/interface/wireguard/peers/add interface=wg-' + prefix + ' public-key="' + keyB.publicKey + '" endpoint-address=' + net.vethAddr.replace(/\/.*/, '') + ' endpoint-port=51820 allowed-address=' + subnet + ' persistent-keepalive=' + randomInt(25, 55));
+        la.push('/interface/wireguard/peers/add interface=wg-' + prefix + ' public-key="' + keyB.publicKey + '" endpoint-address=' + net.vethAddr.replace(/\/.*/, '') + ' endpoint-port=51820 allowed-address=' + subnet + (lanB ? ',' + lanB : '') + ' persistent-keepalive=' + randomInt(25, 55));
         la.push('/ip/address/add address=' + sn.addr1 + ' interface=wg-' + prefix);
+        la.push('/ip/firewall/filter/add chain=input action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-wg-mgmt');
+        if (lanB) la.push('/ip/route/add dst-address=' + lanB + ' gateway=wg-' + prefix + ' comment=' + prefix + '-s2s-lan');
         la.push('');
 
         // Container env
@@ -2405,16 +2491,17 @@
         la.push('/container/envs/add list=' + prefix + '-env key=AWG_H4 value="' + awgParams.h4 + '"');
         la.push('/container/envs/add list=' + prefix + '-env key=AWG_SERVER_PUB value="' + keyB.publicKey + '"');
         la.push('/container/envs/add list=' + prefix + '-env key=AWG_CLIENT_PUB value="' + keyA.publicKey + '"');
+        if (dnsServer) la.push('/container/envs/add list=' + prefix + '-env key=AWG_DNS value="' + dnsServer + '"');
         la.push('');
 
         // Download + start
         la.push('# 5. Download, create and start container');
-        la = la.concat(buildContainerDownload(prefix, storageA));
-        la.push('');
-        la.push('/interface/wireguard/enable wg-' + prefix);
-        la.push(':put "Side A installation complete!"');
-        la.push(':put "Ping test: ' + sn.ip2 + ' (Side B WG address)"');
-        la.push('/ping ' + sn.ip2 + ' count=5');
+        la = la.concat(buildContainerDownload(prefix, storageA, [
+            '/interface/wireguard/enable wg-' + prefix,
+            ':put "Side A installation complete!"',
+            ':put "Ping test: ' + sn.ip2 + ' (Side B WG address)"',
+            '/ping ' + sn.ip2 + ' count=5',
+        ]));
         la.push('');
 
         // === Side B (reverse) ===
@@ -2448,16 +2535,19 @@
         lb.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + net.natSrc);
         lb.push('');
 
-        // dst-nat for AWG port
-        lb.push('# 3. Firewall: dst-nat for AWG port');
-        lb.push('/ip/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgParams.port + ' to-addresses=' + net.vethAddr.replace(/\/.*/, '') + ' to-ports=' + awgParams.port + ' comment=' + prefix + '-dstnat');
+        // dst-nat + forward accept for AWG port
+        lb.push('# 3. Firewall: allow and forward AWG port');
+        lb.push('/ip/firewall/filter/add chain=forward action=accept protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN place-before=0 comment=' + prefix + '-awg-in');
+        lb.push('/ip/firewall/filter/add chain=input action=accept protocol=udp src-address=' + net.vethAddr.replace(/\/.*/, '') + ' dst-port=' + wgPort + ' place-before=0 comment=' + prefix + '-wg-in');
+        lb.push('/ip/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN to-addresses=' + net.vethAddr.replace(/\/.*/, '') + ' to-ports=' + awgParams.port + ' comment=' + prefix + '-dstnat');
         lb.push('');
 
         // WireGuard
         lb.push('# 4. WireGuard interface');
         lb.push('/interface/wireguard/add name=wg-' + prefix + ' private-key="' + keyB.privateKey + '" listen-port=' + wgPort + ' disabled=yes');
-        lb.push('/interface/wireguard/peers/add interface=wg-' + prefix + ' public-key="' + keyA.publicKey + '" allowed-address=' + subnet);
+        lb.push('/interface/wireguard/peers/add interface=wg-' + prefix + ' public-key="' + keyA.publicKey + '" allowed-address=' + subnet + (lanA ? ',' + lanA : ''));
         lb.push('/ip/address/add address=' + sn.addr2 + ' interface=wg-' + prefix);
+        if (lanA) lb.push('/ip/route/add dst-address=' + lanA + ' gateway=wg-' + prefix + ' comment=' + prefix + '-s2s-lan');
         lb.push('');
 
         // Container env
@@ -2480,12 +2570,12 @@
 
         // Download + start
         lb.push('# 6. Download, create and start container');
-        lb = lb.concat(buildContainerDownload(prefix, storageB));
-        lb.push('');
-        lb.push('/interface/wireguard/enable wg-' + prefix);
-        lb.push(':put "Side B installation complete!"');
-        lb.push(':put "Ping test: ' + sn.ip1 + ' (Side A WG address)"');
-        lb.push('/ping ' + sn.ip1 + ' count=5');
+        lb = lb.concat(buildContainerDownload(prefix, storageB, [
+            '/interface/wireguard/enable wg-' + prefix,
+            ':put "Side B installation complete!"',
+            ':put "Ping test: ' + sn.ip1 + ' (Side A WG address)"',
+            '/ping ' + sn.ip1 + ' count=5',
+        ]));
         lb.push('');
 
         result.sideA = la.join('\n');
@@ -2526,8 +2616,11 @@
             src.push('  /container/config set tmpdir=$prevTmpdir');
         }
         if (hasNat) {
+            src.push('  :do { /ip/firewall/filter/remove [find where comment=' + prefix + '-awg-in] } on-error={}');
+            src.push('  :do { /ip/firewall/filter/remove [find where comment=' + prefix + '-wg-in] } on-error={}');
             src.push('  /ip/firewall/nat/remove [find where comment=' + prefix + '-dstnat]');
         }
+        src.push('  :do { /ip/firewall/filter/remove [find where comment=' + prefix + '-wg-mgmt] } on-error={}');
         src.push('  /ip/firewall/nat/remove [find where src-address="' + net.natSrc + '"]');
         src.push('  /ip/address/remove [find where address="' + net.hostAddr + '"]');
         src.push('  /interface/veth/remove [find where name="veth-' + prefix + '"]');
@@ -2553,7 +2646,7 @@
         return src.join('\n');
     }
 
-    function buildContainerDownload(prefix, storageDisk) {
+    function buildContainerDownload(prefix, storageDisk, completionLines) {
         var isAuto = storageDisk === '__auto';
         var isExternal = storageDisk !== 'disk1' && !isAuto;
         var lines = [];
@@ -2637,6 +2730,11 @@
         lines.push('  :do { /file/remove [find where name="console-dump.txt"] } on-error={}');
         lines.push('  :put "Waiting for container to start..."');
         lines.push('  :delay 5s');
+        if (completionLines) {
+            for (var i = 0; i < completionLines.length; i++) {
+                lines.push('  ' + completionLines[i]);
+            }
+        }
         lines.push('}');
 
         return lines;
@@ -2705,8 +2803,7 @@
         }
 
         var mode = getDeployMode();
-        var tunnelN = getTunnelNumber(prefix);
-        var net = getTunnelNetwork(tunnelN);
+        var net = getTunnelNetwork(prefix);
         var commands;
 
         if (mode === 'standalone') {
@@ -2735,7 +2832,8 @@
                 routingCommands = buildDnsRoutingScenario(prefix, selectedServices, dohFwd).join('\n') + '\n';
             } else {
                 var nonRuStorage = (mode === 'standalone') ? 'disk1' : storageDisk;
-                routingCommands = buildNonRuScenario(prefix, exclusions, dohFwd, nonRuStorage).join('\n') + '\n';
+                var serverHost = parsed.peer && parsed.peer.Endpoint ? parsed.peer.Endpoint.replace(/:[\d]+$/, '') : '';
+                routingCommands = buildNonRuScenario(prefix, exclusions, dohFwd, nonRuStorage, serverHost).join('\n') + '\n';
             }
             document.getElementById('routing-output').dataset.plain = routingCommands;
             document.getElementById('routing-output').innerHTML = highlight(routingCommands);
@@ -2755,22 +2853,6 @@
 
         applyCollapse('output', 'expand-output');
         applyCollapse('uninstall-output', 'expand-uninstall');
-
-        try {
-            localStorage.setItem('awg-settings', JSON.stringify({
-                mode: mode,
-                storage: document.getElementById('storage-select').value,
-                storageCustom: document.getElementById('storage-custom').value,
-                prefix: document.getElementById('prefix-select').value,
-                prefixCustom: document.getElementById('prefix-custom').value,
-                proxyIP: document.getElementById('proxy-ip').value,
-                scenario: scenario,
-                selectedServices: selectedServices,
-                exclusions: exclusions,
-                dohForwarder: dohFwd,
-                dohCustomUrl: document.getElementById('doh-custom-url').value
-            }));
-        } catch(e) {}
 
         setTimeout(function () {
             document.getElementById('output-section').scrollIntoView({behavior: 'smooth', block: 'start'});
@@ -2793,9 +2875,16 @@
 
         var storageA = document.getElementById('s2s-storage-a').value;
         var storageB = document.getElementById('s2s-storage-b').value;
-        var prefix = 'awg-proxy';
+        var dnsServer = document.getElementById('s2s-dns').value.trim();
+        var lanA = document.getElementById('s2s-lan-a').value.trim();
+        var lanB = document.getElementById('s2s-lan-b').value.trim();
 
-        var result = buildSiteToSiteCommands(endpointB, subnet, awgParams, storageA, storageB, prefix);
+        if (!isValidIP(endpointB) && !dnsServer) { showError(t('errDnsRequired')); return; }
+        if (lanA && !isValidIPCIDR(lanA)) { showError(t('errLanSubnet')); return; }
+        if (lanB && !isValidIPCIDR(lanB)) { showError(t('errLanSubnet')); return; }
+        var prefix = getPrefixName();
+
+        var result = buildSiteToSiteCommands(endpointB, subnet, awgParams, storageA, storageB, prefix, dnsServer, lanA, lanB);
 
         document.getElementById('s2s-out-a').dataset.plain = result.sideA;
         document.getElementById('s2s-out-a').innerHTML = highlight(result.sideA);
@@ -2806,16 +2895,6 @@
         document.getElementById('s2s-uninst-b').dataset.plain = result.uninstallB;
         document.getElementById('s2s-uninst-b').innerHTML = highlight(result.uninstallB);
         document.getElementById('s2s-output-section').style.display = 'block';
-
-        try {
-            localStorage.setItem('awg-settings', JSON.stringify({
-                mode: 'site-to-site',
-                s2sEndpointB: endpointB,
-                s2sSubnet: subnet,
-                s2sStorageA: storageA,
-                s2sStorageB: storageB
-            }));
-        } catch(e) {}
 
         setTimeout(function() {
             document.getElementById('s2s-output-section').scrollIntoView({behavior:'smooth',block:'start'});
@@ -2846,6 +2925,9 @@
         document.getElementById('s2s-tunnel-subnet').value = '10.0.0.0/30';
         document.getElementById('s2s-storage-a').value = '__auto';
         document.getElementById('s2s-storage-b').value = '__auto';
+        document.getElementById('s2s-dns').value = '';
+        document.getElementById('s2s-lan-a').value = '';
+        document.getElementById('s2s-lan-b').value = '';
         s2sParams = null;
         var radios = document.getElementsByName('deploy-mode');
         radios[0].checked = true;
@@ -2953,67 +3035,6 @@
     });
 
     // Restore saved settings
-    (function() {
-        try {
-            var s = JSON.parse(localStorage.getItem('awg-settings'));
-            if (!s) return;
-            if (s.mode === 'standalone' || s.mode === 'site-to-site') {
-                var radio = document.querySelector('input[name="deploy-mode"][value="' + s.mode + '"]');
-                if (radio) { radio.checked = true; onModeChange(); }
-            }
-            if (s.mode === 'site-to-site') {
-                if (s.s2sEndpointB) document.getElementById('s2s-endpoint-b').value = s.s2sEndpointB;
-                if (s.s2sSubnet) document.getElementById('s2s-tunnel-subnet').value = s.s2sSubnet;
-                if (s.s2sStorageA) document.getElementById('s2s-storage-a').value = s.s2sStorageA;
-                if (s.s2sStorageB) document.getElementById('s2s-storage-b').value = s.s2sStorageB;
-            }
-            if (s.storage) {
-                document.getElementById('storage-select').value = s.storage;
-                if (s.storage === '__custom' && s.storageCustom) {
-                    document.getElementById('storage-custom').style.display = 'block';
-                    document.getElementById('storage-custom').value = s.storageCustom;
-                }
-            }
-            if (s.prefix) {
-                document.getElementById('prefix-select').value = s.prefix;
-                if (s.prefix === '__custom' && s.prefixCustom) {
-                    document.getElementById('prefix-custom').style.display = 'block';
-                    document.getElementById('prefix-custom').value = s.prefixCustom;
-                }
-            }
-            if (s.proxyIP) document.getElementById('proxy-ip').value = s.proxyIP;
-            if (s.scenario) {
-                var scenarioRadio = document.querySelector('input[name="scenario"][value="' + s.scenario + '"]');
-                if (scenarioRadio) {
-                    scenarioRadio.checked = true;
-                    onScenarioChange();
-                }
-            }
-            if (s.selectedServices && s.selectedServices.length > 0) {
-                var cbs = document.querySelectorAll('input[name="svc"]');
-                for (var i = 0; i < cbs.length; i++) {
-                    cbs[i].checked = s.selectedServices.indexOf(cbs[i].value) >= 0;
-                }
-            }
-            if (s.exclusions && s.exclusions.length > 0) {
-                var cbs = document.querySelectorAll('input[name="excl"]');
-                for (var i = 0; i < cbs.length; i++) {
-                    cbs[i].checked = s.exclusions.indexOf(cbs[i].value) >= 0;
-                }
-            }
-            if (s.dohForwarder) {
-                var dohRadio = document.querySelector('input[name="doh-fwd"][value="' + s.dohForwarder + '"]');
-                if (dohRadio) {
-                    dohRadio.checked = true;
-                    if (s.dohForwarder === '__custom') {
-                        document.getElementById('doh-custom-url').style.display = 'block';
-                        if (s.dohCustomUrl) document.getElementById('doh-custom-url').value = s.dohCustomUrl;
-                    }
-                }
-            }
-        } catch(e) {}
-    })();
-
     // Initialize checkboxes
     initServiceCheckboxes();
     initExclusionCheckboxes();

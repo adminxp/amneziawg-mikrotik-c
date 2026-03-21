@@ -2,6 +2,7 @@
 #include "cps.h"
 #include "log.h"
 #include "base64.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -189,6 +190,17 @@ int main(void) {
     cfg->no_gro = 0;
     if ((v = getenv("AWG_NO_GRO")) && v[0])
         cfg->no_gro = parse_int_str(v);
+
+    /* DNS resolver for hostname resolution */
+    v = getenv("AWG_DNS");
+    if (v && v[0]) {
+        FILE *f = fopen("/etc/resolv.conf", "w");
+        if (f) {
+            fprintf(f, "nameserver %s\n", v);
+            fclose(f);
+            log_info2("DNS resolver: ", v);
+        }
+    }
 
     /* Determine protocol mode */
     const char *mode = "v1";

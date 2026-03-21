@@ -19,6 +19,8 @@ Lightweight Docker container that allows MikroTik routers to connect to AmneziaW
 - [Additional Settings](#additional-settings)
 - [Uninstallation](#uninstallation)
 - [Troubleshooting](#troubleshooting)
+  - [execvpe /awg-proxy: No such file or directory](#execvpe-awg-proxy-no-such-file-or-directory)
+  - [Site-to-site: handshake did not complete](#site-to-site-handshake-did-not-complete)
   - [Storage device not found](#storage-device-not-found)
   - [Insufficient disk space](#insufficient-disk-space)
   - [not allowed by device-mode](#not-allowed-by-device-mode)
@@ -84,13 +86,15 @@ Done. The configurator works offline; no data is sent to any server.
 
 ## Manual Installation
 
-### 1. Enable Containers
+### 1. Enable Containers and Fetch
 
 Install the container package from [mikrotik.com](https://mikrotik.com/download), upload it to the router, and reboot. Then:
 
 ```routeros
-/system/device-mode/update container=yes
+/system/device-mode/update container=yes fetch=yes
 ```
+
+`fetch=yes` is required to download the image directly on the router via `/tool/fetch`. If you plan to upload the file manually via Winbox/SCP, `fetch=yes` is not required.
 
 The router will ask for confirmation (button press or reboot, depending on the model).
 
@@ -203,6 +207,7 @@ The obfuscation parameters (`Jc`, `Jmin`, `Jmax`, `S1`, `S2`, `H1`--`H4`) are in
 | `AWG_CPU_C2S` | No | `-1` | CPU for client→server thread |
 | `AWG_CPU_S2C` | No | `-1` | CPU for server→client thread |
 | `AWG_BUSY_POLL` | No | `0` | SO_BUSY_POLL timeout (μs) |
+| `AWG_DNS` | No | -- | DNS server for hostname resolution in AWG_REMOTE |
 
 The protocol version is detected automatically: **v2** if S3/S4 are set or H values are ranges, **v1.5** if CPS templates (I1-I5) are set, otherwise **v1**.
 
@@ -469,6 +474,67 @@ The script removes the container, WireGuard interface, NAT rules, routes, enviro
 
 **Container does not start** -- check the container package is installed (`/system/package/print`), device mode is enabled (`/system/device-mode/print`), and there is enough disk space (`/system/resource/print`).
 
+### execvpe /awg-proxy: No such file or directory
+
+The container starts but immediately exits with `exited with status 255: execvpe /awg-proxy: No such file or directory`. This means the binary was not extracted — the image was downloaded incorrectly or incompletely.
+
+1. Remove the container and root-dir:
+```routeros
+/container/stop [find where comment=awg-proxy]
+:delay 7s
+/container/remove [find where comment=awg-proxy]
+/file/remove disk1/awg-proxy
+:do { /file/remove [find where name~"awg-proxy.*tar"] } on-error={}
+```
+
+2. Re-download the image and verify the file size (`/file/print`) — it should be 100-300 KB, not 0.
+
+3. Re-create the container.
+
+### Site-to-site: handshake did not complete
+
+In site-to-site mode (two MikroTik routers via AWG proxy), the handshake does not complete even though both containers are running. Common causes:
+
+**1. Firewall forward chain on Side B (server)**
+
+DSTNAT traffic goes through the `forward` chain, not `input`. If the `accept` rule is appended at the end and there's a `drop` rule above it, packets never reach the container.
+
+Diagnosis:
+```routeros
+/ip/firewall/filter/print where chain=forward
+```
+
+Fix — move the rule to the top:
+```routeros
+/ip/firewall/filter/remove [find where comment=PREFIX-awg-in]
+/ip/firewall/filter/add chain=forward action=accept protocol=udp dst-port=AWG_PORT in-interface-list=WAN place-before=0 comment=PREFIX-awg-in
+```
+
+**2. Firewall input chain on Side B (server)**
+
+In reverse mode, the container initiates a NEW connection to MikroTik's WG port (unlike standard mode where MikroTik initiates and the container's response is "established"). If the veth interface is not in the LAN interface list, the input chain drops packets from the container.
+
+Fix:
+```routeros
+/ip/firewall/filter/add chain=input action=accept protocol=udp src-address=CONTAINER_IP dst-port=WG_PORT place-before=0 comment=PREFIX-wg-in
+```
+
+**3. DNS resolution of AWG_REMOTE on Side A (client)**
+
+If `AWG_REMOTE` is a hostname, the container needs working DNS. Set `AWG_DNS=8.8.8.8` or `AWG_DNS=1.1.1.1` in the container environment variables. If DNS also goes through the tunnel (circular dependency), resolve the hostname manually and use the IP:
+```routeros
+:put [:resolve vpn.example.com]
+# Then set the resolved IP in AWG_REMOTE
+```
+
+**4. Diagnostics via logs**
+
+Enable debug logging on both containers:
+```routeros
+/container/envs/add list=PREFIX-env key=AWG_LOG_LEVEL value=debug
+```
+Restart the containers and check logs — they will show DNS resolution errors, connect failures, handshake init and junk packet sending.
+
 **No handshake** -- make sure all AWG parameters (Jc, Jmin, Jmax, S1, S2, H1--H4) exactly match the server. Verify `AWG_REMOTE`, `AWG_SERVER_PUB`, and `AWG_CLIENT_PUB`. For diagnostics, set `AWG_LOG_LEVEL=debug` -- logs will show handshake init and junk packet sending. If you see `remote read error (Connection refused)` -- the server is unreachable or the port is wrong. On ARM64, try `AWG_NO_GRO=1` -- if the kernel doesn't support GRO, the proxy may hang waiting for a response.
 
 **No traffic after handshake** -- check the NAT rule (`/ip/firewall/nat/print`), routing, and the peer's `endpoint-address` (should be `172.18.0.2`).
@@ -515,10 +581,21 @@ If using the configurator -- select the appropriate drive in the "Container stor
 
 ### not allowed by device-mode
 
-If you get `not allowed by device-mode` error when downloading an image or creating a container, containers are not enabled. Run:
+The `not allowed by device-mode` error occurs in two cases:
+
+- When creating a container -- container support is not enabled (`container=no`)
+- When downloading an image via `/tool/fetch` -- fetch is not enabled (`fetch=no`)
+
+Check the current state:
 
 ```routeros
-/system/device-mode/update container=yes
+/system/device-mode/print
+```
+
+Then enable the required features:
+
+```routeros
+/system/device-mode/update container=yes fetch=yes
 ```
 
 The router will ask for confirmation -- press the Reset or Mode button on the device (depends on model) within a few minutes, or wait for automatic reboot. After reboot, retry the installation.

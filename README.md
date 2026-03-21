@@ -19,6 +19,8 @@
 - [Дополнительные настройки](#дополнительные-настройки)
 - [Удаление](#удаление)
 - [Устранение неполадок](#устранение-неполадок)
+  - [execvpe /awg-proxy: No such file or directory](#execvpe-awg-proxy-no-such-file-or-directory)
+  - [Site-to-site: handshake did not complete](#site-to-site-handshake-did-not-complete)
   - [Storage device not found](#storage-device-not-found)
   - [Insufficient disk space](#insufficient-disk-space)
   - [not allowed by device-mode](#not-allowed-by-device-mode)
@@ -88,13 +90,15 @@ proxy1c (normal) ──AWG──┘
 
 ## Ручная установка
 
-### 1. Включение контейнеров
+### 1. Включение контейнеров и fetch
 
 Установите пакет container с [mikrotik.com](https://mikrotik.com/download), загрузите на роутер и перезагрузитесь. Затем:
 
 ```routeros
-/system/device-mode/update container=yes
+/system/device-mode/update container=yes fetch=yes
 ```
+
+`fetch=yes` нужен для скачивания образа командой `/tool/fetch` прямо на роутере. Если планируете загружать файл вручную через Winbox/SCP, `fetch=yes` не обязателен.
 
 Роутер попросит подтверждение (кнопка или перезагрузка, зависит от модели).
 
@@ -207,6 +211,7 @@ proxy1c (normal) ──AWG──┘
 | `AWG_CPU_C2S` | Нет | `-1` | CPU для потока client→server |
 | `AWG_CPU_S2C` | Нет | `-1` | CPU для потока server→client |
 | `AWG_BUSY_POLL` | Нет | `0` | SO_BUSY_POLL таймаут (мкс) |
+| `AWG_DNS` | Нет | -- | DNS-сервер для резолва hostname в AWG_REMOTE |
 
 Версия протокола определяется автоматически: **v2** если заданы S3/S4 или H в виде диапазонов, **v1.5** если заданы CPS-шаблоны (I1-I5), иначе **v1**.
 
@@ -473,6 +478,67 @@ NAT для маркированного трафика:
 
 **Контейнер не запускается** -- проверьте установку пакета container (`/system/package/print`), режим устройства (`/system/device-mode/print`) и свободное место (`/system/resource/print`).
 
+### execvpe /awg-proxy: No such file or directory
+
+Контейнер запускается, но сразу завершается с ошибкой `exited with status 255: execvpe /awg-proxy: No such file or directory`. Это означает, что бинарник не распаковался — образ скачался некорректно или не полностью.
+
+1. Удалите контейнер и root-dir:
+```routeros
+/container/stop [find where comment=awg-proxy]
+:delay 7s
+/container/remove [find where comment=awg-proxy]
+/file/remove disk1/awg-proxy
+:do { /file/remove [find where name~"awg-proxy.*tar"] } on-error={}
+```
+
+2. Заново скачайте образ и проверьте размер файла (`/file/print`) — он должен быть 100-300 КБ, не 0.
+
+3. Пересоздайте контейнер.
+
+### Site-to-site: handshake did not complete
+
+В режиме site-to-site (два MikroTik через AWG proxy) handshake не завершается, хотя контейнеры работают. Типичные причины:
+
+**1. Firewall forward chain на стороне B (сервер)**
+
+DSTNAT-трафик идёт через `forward` chain, а не `input`. Если правило `accept` добавлено в конец цепочки, а выше есть `drop` — пакеты не доходят до контейнера.
+
+Диагностика:
+```routeros
+/ip/firewall/filter/print where chain=forward
+```
+
+Исправление — переместите правило в начало:
+```routeros
+/ip/firewall/filter/remove [find where comment=PREFIX-awg-in]
+/ip/firewall/filter/add chain=forward action=accept protocol=udp dst-port=AWG_PORT in-interface-list=WAN place-before=0 comment=PREFIX-awg-in
+```
+
+**2. Firewall input chain на стороне B (сервер)**
+
+В reverse-режиме контейнер инициирует NEW-соединение к WG-порту MikroTik (в отличие от стандартного режима, где MikroTik инициирует → ответ контейнера = established). Если veth-интерфейс не в LAN interface-list, input chain дропает пакеты от контейнера.
+
+Исправление:
+```routeros
+/ip/firewall/filter/add chain=input action=accept protocol=udp src-address=CONTAINER_IP dst-port=WG_PORT place-before=0 comment=PREFIX-wg-in
+```
+
+**3. DNS-резолв AWG_REMOTE на стороне A (клиент)**
+
+Если `AWG_REMOTE` указан как hostname, контейнеру нужен работающий DNS. Установите `AWG_DNS=8.8.8.8` или `AWG_DNS=1.1.1.1` в переменных окружения контейнера. Если DNS тоже идёт через туннель (замкнутый круг) — разрешите hostname вручную и укажите IP:
+```routeros
+:put [:resolve vpn.example.com]
+# Затем пропишите полученный IP в AWG_REMOTE
+```
+
+**4. Диагностика через логи**
+
+Включите debug-логирование на обоих контейнерах:
+```routeros
+/container/envs/add list=PREFIX-env key=AWG_LOG_LEVEL value=debug
+```
+Перезапустите контейнеры и проверьте логи — они покажут ошибки DNS-резолва, connect, отправку handshake и junk-пакетов.
+
 **Нет рукопожатия** -- убедитесь, что все параметры AWG (Jc, Jmin, Jmax, S1, S2, H1--H4) точно совпадают с сервером. Проверьте `AWG_REMOTE`, `AWG_SERVER_PUB` и `AWG_CLIENT_PUB`. Для диагностики установите `AWG_LOG_LEVEL=debug` -- в логах будет видно отправку handshake init и junk-пакетов. Если в логах `remote read error (Connection refused)` -- сервер недоступен или неправильный порт. На ARM64 попробуйте `AWG_NO_GRO=1` -- если ядро не поддерживает GRO, прокси может зависнуть в ожидании ответа.
 
 **Нет трафика после рукопожатия** -- проверьте правило NAT (`/ip/firewall/nat/print`), маршрутизацию и `endpoint-address` пира (должен быть `172.18.0.2`).
@@ -519,10 +585,21 @@ NAT для маркированного трафика:
 
 ### not allowed by device-mode
 
-Если при загрузке образа или создании контейнера появляется ошибка `not allowed by device-mode`, значит контейнеры не активированы. Выполните:
+Ошибка `not allowed by device-mode` возникает в двух случаях:
+
+- При создании контейнера -- не включена поддержка контейнеров (`container=no`)
+- При скачивании образа через `/tool/fetch` -- не включён fetch (`fetch=no`)
+
+Проверьте текущее состояние:
 
 ```routeros
-/system/device-mode/update container=yes
+/system/device-mode/print
+```
+
+Затем включите нужные возможности:
+
+```routeros
+/system/device-mode/update container=yes fetch=yes
 ```
 
 Роутер попросит подтверждение -- нажмите кнопку Reset или Mode на корпусе (зависит от модели) в течение нескольких минут, либо дождитесь автоматической перезагрузки. После перезагрузки повторите установку.
