@@ -696,7 +696,7 @@
                     <input type="text" id="srv-tunnel-subnet" value="10.10.10.0/24">
                 </div>
                 <div>
-                    <label for="srv-dns" data-i18n="srvDns">DNS server (required if server has a domain name)</label>
+                    <label for="srv-dns" data-i18n="srvDns">DNS server (required if endpoint is a domain, not IP)</label>
                     <input type="text" id="srv-dns" placeholder="e.g. 192.168.88.1">
                 </div>
             </div>
@@ -949,7 +949,7 @@
             srvEndpoint: 'Server public IP or domain',
             srvAwgPort: 'Server AWG port (public)',
             srvTunnelSubnet: 'Tunnel subnet (/24)',
-            srvDns: 'DNS server (required if server has a domain name)',
+            srvDns: 'DNS server (required if endpoint is a domain, not IP)',
             srvStorageServer: 'Server storage',
             srvStorageClient: 'Client storage',
             srvLanServerOpt: 'Server LAN subnet (optional)',
@@ -1067,7 +1067,7 @@
             srvEndpoint: '\u041f\u0443\u0431\u043b\u0438\u0447\u043d\u044b\u0439 IP \u0438\u043b\u0438 \u0434\u043e\u043c\u0435\u043d \u0441\u0435\u0440\u0432\u0435\u0440\u0430',
             srvAwgPort: 'AWG-\u043f\u043e\u0440\u0442 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 (\u043f\u0443\u0431\u043b\u0438\u0447\u043d\u044b\u0439)',
             srvTunnelSubnet: '\u041f\u043e\u0434\u0441\u0435\u0442\u044c \u0442\u0443\u043d\u043d\u0435\u043b\u044f (/24)',
-            srvDns: 'DNS-\u0441\u0435\u0440\u0432\u0435\u0440 (\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u0435\u043d, \u0435\u0441\u043b\u0438 \u0441\u0435\u0440\u0432\u0435\u0440 \u0441 \u0434\u043e\u043c\u0435\u043d\u043e\u043c)',
+            srvDns: 'DNS-\u0441\u0435\u0440\u0432\u0435\u0440 (\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u0435\u043d, \u0435\u0441\u043b\u0438 \u0432 endpoint \u0443\u043a\u0430\u0437\u0430\u043d \u0434\u043e\u043c\u0435\u043d, \u0430 \u043d\u0435 IP)',
             srvStorageServer: '\u0425\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435 \u0441\u0435\u0440\u0432\u0435\u0440\u0430',
             srvStorageClient: '\u0425\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435 \u043a\u043b\u0438\u0435\u043d\u0442\u0430',
             srvLanServerOpt: 'LAN-\u043f\u043e\u0434\u0441\u0435\u0442\u044c \u0441\u0435\u0440\u0432\u0435\u0440\u0430 (\u043d\u0435\u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u043e)',
