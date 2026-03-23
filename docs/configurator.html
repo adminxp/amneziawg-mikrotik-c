@@ -514,6 +514,90 @@
             .alert-warning { background: #2a1a00; border-color: #92400e; color: #fcd34d; }
 
             pre.collapsed::after { background: linear-gradient(transparent, #0f172a); }
+            .infographic-wrap { background: #1e1e1e; border-color: #444; }
+            .infographic-wrap { background: #1e1e1e; border-color: #444; }
+            #ig-tip { background: #1a1a1a; border-color: #555; color: #e5e7eb; }
+            #ig-tip::after { border-bottom-color: #1a1a1a; }
+            #ig-tip::before { border-bottom-color: #555; }
+            #ig-tip.above::after { border-bottom-color: transparent; border-top-color: #1a1a1a; }
+            #ig-tip.above::before { border-bottom-color: transparent; border-top-color: #555; }
+            #ig-tip code { background: #2a2a2a; border-color: #444; }
+        }
+
+        .infographic-wrap {
+            margin-top: 12px;
+            padding: 16px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: var(--surface);
+            overflow-x: auto;
+        }
+        .infographic-wrap svg { display: block; margin: 0 auto; }
+        .infographic-wrap .ig-block { cursor: pointer; }
+        .infographic-wrap .ig-block:hover rect { filter: brightness(1.08); }
+        #ig-tip {
+            position: fixed;
+            max-width: 400px;
+            padding: 12px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text);
+            font-size: 0.82rem;
+            line-height: 1.7;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+            pointer-events: none;
+            z-index: 10000;
+            display: none;
+        }
+        #ig-tip.visible { display: block; }
+        #ig-tip::after {
+            content: '';
+            position: absolute;
+            top: -7px; left: var(--arrow-left, 50%);
+            transform: translateX(-50%);
+            border-left: 7px solid transparent;
+            border-right: 7px solid transparent;
+            border-bottom: 7px solid var(--surface);
+        }
+        #ig-tip::before {
+            content: '';
+            position: absolute;
+            top: -8px; left: var(--arrow-left, 50%);
+            transform: translateX(-50%);
+            border-left: 8px solid transparent;
+            border-right: 8px solid transparent;
+            border-bottom: 8px solid var(--border);
+        }
+        #ig-tip.above::after {
+            top: auto; bottom: -7px;
+            border-bottom: none;
+            border-top: 7px solid var(--surface);
+        }
+        #ig-tip.above::before {
+            top: auto; bottom: -8px;
+            border-bottom: none;
+            border-top: 8px solid var(--border);
+        }
+        .ig-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+            text-align: center;
+            color: var(--text);
+        }
+        #ig-tip .ig-tip-title {
+            font-weight: 700;
+            font-size: 0.9rem;
+            margin-bottom: 6px;
+        }
+        #ig-tip code {
+            font-family: var(--mono);
+            font-size: 0.78rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 1px 5px;
         }
     </style>
 </head>
@@ -668,6 +752,7 @@
                     </select>
                 </div>
             </div>
+            <div id="s2s-awg-params" class="fields-grid" style="margin-top:10px"></div>
             <button class="btn btn-secondary" onclick="regenerateS2SParams()" data-i18n="s2sRegenerate">Regenerate AWG params</button>
         </div>
         <div id="srv-panel" style="display:none;margin-top:14px">
@@ -730,6 +815,7 @@
                     </select>
                 </div>
             </div>
+            <div id="srv-awg-params" class="fields-grid" style="margin-top:10px"></div>
             <div style="margin-top:10px">
                 <label for="srv-client-num" data-i18n="srvClientNum">Client number</label>
                 <input type="number" id="srv-client-num" value="1" min="1" max="253" style="width:80px">
@@ -738,8 +824,8 @@
         </div>
         <div class="actions">
             <button class="btn btn-primary" id="btn-generate" onclick="generate()" data-i18n="btnGenerate">Generate commands</button>
-            <button class="btn btn-secondary" onclick="clearAll()" data-i18n="btnClear">Clear</button>
         </div>
+        <div id="infographic-container"></div>
     </div>
 
     <div id="errors-container"></div>
@@ -982,7 +1068,51 @@
             dohForwarderLabel: 'DNS forwarder (DoH)',
             dohCustom: 'Custom...',
             dohHint: 'All services will use this DNS-over-HTTPS (DoH) provider for domain resolution.',
-            dnsBrowserHint: 'Disable Secure DNS (DoH) in your browser.\nChrome: Settings \u2192 Privacy \u2192 Security \u2192 Use secure DNS \u2192 Off\nFirefox: Settings \u2192 Privacy \u2192 DNS over HTTPS \u2192 Off\nEdge: Settings \u2192 Privacy \u2192 Security \u2192 Use secure DNS \u2192 Off\nOtherwise MikroTik will not see your DNS queries and cannot route traffic.'
+            dnsBrowserHint: 'Disable Secure DNS (DoH) in your browser.\nChrome: Settings \u2192 Privacy \u2192 Security \u2192 Use secure DNS \u2192 Off\nFirefox: Settings \u2192 Privacy \u2192 DNS over HTTPS \u2192 Off\nEdge: Settings \u2192 Privacy \u2192 Security \u2192 Use secure DNS \u2192 Off\nOtherwise MikroTik will not see your DNS queries and cannot route traffic.',
+            igTitle: 'How it works',
+            igWireguard: 'WireGuard Tunnel',
+            igContainer: 'Container (awg-proxy)',
+            igContainerOnRouter: 'Container on router',
+            igStandalone: 'External Device (awg-proxy)',
+            igDns: 'DNS (DoH)',
+            igRouting: 'Routing',
+            igFirewall: 'Firewall / NAT',
+            igMangle: 'Mangle',
+            igInternet: 'Internet',
+            igInternetWan: 'Internet (WAN)',
+            igLan: 'LAN Clients',
+            igAwgServer: 'AWG Server',
+            igRuList: 'RU Address List',
+            igScheduler: 'Scheduler',
+            igManualConfig: 'Manual Configuration',
+            igRouterA: 'MikroTik A (client)',
+            igRouterB: 'MikroTik B (server)',
+            igServerHub: 'MikroTik Server (hub)',
+            igClientN: 'MikroTik Client #N',
+            igContainerClient: 'awg-proxy (connect)',
+            igContainerServer: 'awg-proxy (listen)',
+            igClient2: 'MikroTik Client #2',
+            igTipWireguard: 'WireGuard Tunnel\n\n/interface/wireguard/add \u2014 creates a WireGuard interface with a private key and listen port\n/interface/wireguard/peers/add \u2014 adds a peer (AWG server) with its public key and endpoint pointing to the awg-proxy container\n/ip/address/add \u2014 assigns a tunnel IP address to the WireGuard interface\n\nThis is the encrypted tunnel through which traffic flows to the AWG server.',
+            igTipContainer: 'Container (awg-proxy)\n\n/interface/veth/add \u2014 creates a virtual ethernet pair connecting the router to the container\n/ip/address/add \u2014 assigns an IP address to the veth interface\n/container/envs/add \u2014 sets AWG parameters (Jc, Jmin, Jmax, S1, S2, H1\u2013H4, keys)\n/container/add \u2014 downloads and creates the awg-proxy container\n/container/start \u2014 starts the container\n\nawg-proxy converts standard WireGuard packets to AmneziaWG format (adds junk, changes headers, pads handshakes).',
+            igTipContainerOnRouter: 'Container on router\n\nThe awg-proxy container runs directly on the MikroTik router.\n\n/interface/veth/add \u2014 creates a virtual ethernet pair connecting the router to the container\n/container/envs/add \u2014 sets AWG parameters (Jc, Jmin, Jmax, S1, S2, H1\u2013H4, keys)\n/container/add + /container/start \u2014 downloads and starts the container\n\nawg-proxy converts standard WireGuard packets to AmneziaWG format.',
+            igTipStandalone: 'External Device (awg-proxy)\n\nawg-proxy runs on a separate device (Raspberry Pi, VPS, etc). The MikroTik WireGuard peer endpoint points to this device\u2019s IP address.\n\nThe device converts WireGuard traffic to AmneziaWG format before forwarding to the AWG server.',
+            igTipDns: 'DNS (DoH Forwarding)\n\n/ip/dns/static/add type=FWD \u2014 creates forwarding entries for selected service domains\n\nWhen a client resolves a domain (e.g. youtube.com), MikroTik forwards the query to a DoH provider and saves the resolved IPs in an address list.\nThis address list is provided to Mangle rules which mark matching traffic for routing through the VPN tunnel.',
+            igTipRouting: 'Policy Routing\n\n/routing/table/add \u2014 creates a separate routing table for VPN traffic\n/ip/route/add \u2014 adds a default route through the WireGuard tunnel in that table\n/routing/rule/add \u2014 binds the routing mark to the routing table\n\nTraffic marked by Mangle goes through this table and gets routed through the VPN tunnel. All other traffic uses the default routing table (direct).',
+            igTipFirewall: 'Firewall / NAT\n\n/ip/firewall/nat/add chain=srcnat masquerade src-address=172.18.0.0/30 \u2014 NATs container traffic to the internet\n/ip/firewall/nat/add chain=srcnat masquerade out-interface=wg-* \u2014 NATs traffic leaving through the WireGuard tunnel\n\nWithout these rules, return traffic would not reach its destination.',
+            igTipMangle: 'Mangle (Traffic Marking)\n\n/ip/firewall/mangle/add mark-connection \u2014 marks connections going to IPs from DNS address lists\n/ip/firewall/mangle/add mark-routing \u2014 applies a routing mark to marked connections\n/ip/firewall/mangle/add change-mss clamp-to-pmtu \u2014 fixes MSS for tunneled traffic\n\nThis is the core of selective routing: only traffic to selected services gets marked and routed through the VPN.',
+            igTipMangleNonRu: 'Mangle (Traffic Marking)\n\n/ip/firewall/mangle/add mark-routing dst-address-list=!RU \u2014 marks ALL traffic EXCEPT to Russian IPs\n/ip/firewall/mangle/add accept dst-address-list=vpn-server \u2014 excludes VPN server itself from tunneling\n/ip/firewall/mangle/add change-mss clamp-to-pmtu \u2014 fixes MSS\n\nAll non-Russian traffic goes through the VPN tunnel.',
+            igTipManualConfig: 'Manual Configuration\n\nNo automatic routing is configured. You choose how traffic enters the tunnel:\n\nRoute specific subnets:\n/ip/route/add dst-address=X.X.X.X/X gateway=wg-*\n\nRoute all traffic:\n/ip/route/add dst-address=0.0.0.0/0 gateway=wg-* distance=1\n\nPolicy routing with mangle marks\n\nUse address-lists for selective routing',
+            igTipRuList: 'RU Address List\n\nA daily-updated list of all Russian IP ranges from RIPE database.\nPrivate networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) are also added to prevent local traffic from entering the tunnel.\n\nMangle uses this list to decide what traffic stays direct.',
+            igTipScheduler: 'Scheduler\n\n/system/scheduler/add \u2014 runs the update script daily at 04:05\n/system/script/add \u2014 downloads and imports fresh RU IP ranges\n\nKeeps the RU address list current so routing decisions stay accurate.',
+            igTipFirewallS2S: 'Firewall\n\n/ip/firewall/filter/add accept \u2014 allows AWG port on WAN interface\n/ip/firewall/nat/add dstnat \u2014 forwards incoming AWG traffic to the container\n/ip/firewall/nat/add masquerade \u2014 NATs container and tunnel traffic\n\nSide B (server) needs additional rules to accept incoming connections.',
+            igTipFirewallSrv: 'Firewall\n\n/ip/firewall/filter/add accept \u2014 allows AWG port on WAN\n/ip/firewall/nat/add dstnat \u2014 redirects AWG traffic to container\n/ip/firewall/nat/add masquerade \u2014 NATs container + tunnel traffic\n/ip/route/add \u2014 routes to client LANs through WG peers\n\nServer accepts connections from all clients and routes between their networks.',
+            igTipRoutingS2S: 'Routing\n\n/ip/route/add \u2014 adds routes to the remote LAN subnet through the WireGuard tunnel\n\nAllows devices on Side A to reach devices on Side B and vice versa.',
+            igTipRoutingSrv: 'Routing (L3)\n\n/ip/route/add \u2014 adds routes to remote LAN subnets through WireGuard peers\n/ip/firewall/filter/add \u2014 allows forwarding between tunnel and LAN\n\nServer routes traffic between all connected client networks. Each client gets a route to the server LAN. For client-to-client routing, additional routes must be added manually.',
+            igTipRoutingTunnel: 'Manual Routing\n\nNo automatic routing is configured.\nAdd routes manually via /ip/route/add dst-address=X.X.X.X/X gateway=wg-awg-proxy\n\nFor advanced users who want full control over what goes through the tunnel.',
+            igTipLan: 'LAN Clients\n\nDevices on the local network. Their traffic passes through the MikroTik router, which decides whether to route it through the VPN tunnel or directly to the internet based on Mangle/routing rules.',
+            igTipInternetWan: 'Internet (WAN)\n\nDirect connection to the internet via the MikroTik WAN port.\nTraffic not marked for VPN goes here directly.',
+            igTipInternet: 'Internet\n\nDirect internet connection via WAN interface. Non-VPN traffic goes here. VPN traffic goes through the WireGuard tunnel to the AWG server.',
+            igTipAwgServer: 'AmneziaWG Server\n\nThe remote VPN server running AmneziaWG. Receives transformed packets from awg-proxy and routes them to the internet.\n\nTraffic flows: Client \u2192 MikroTik WG \u2192 awg-proxy \u2192 AWG Server \u2192 Internet'
         },
         ru: {
             title: 'AWG Proxy \u2014 \u041e\u0444\u043b\u0430\u0439\u043d-\u0433\u0435\u043d\u0435\u0440\u0430\u0442\u043e\u0440 \u043a\u043e\u043c\u0430\u043d\u0434 MikroTik',
@@ -1103,7 +1233,51 @@
             dohForwarderLabel: 'DNS-\u0444\u043e\u0440\u0432\u0430\u0440\u0434\u0435\u0440 (DoH)',
             dohCustom: '\u0421\u0432\u043e\u0439...',
             dohHint: '\u0412\u0441\u0435 \u0441\u0435\u0440\u0432\u0438\u0441\u044b \u0431\u0443\u0434\u0443\u0442 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u044c \u044d\u0442\u043e\u0433\u043e DNS-over-HTTPS (DoH) \u043f\u0440\u043e\u0432\u0430\u0439\u0434\u0435\u0440\u0430 \u0434\u043b\u044f \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043d\u0438\u044f \u0434\u043e\u043c\u0435\u043d\u043e\u0432.',
-            dnsBrowserHint: '\u041e\u0442\u043a\u043b\u044e\u0447\u0438\u0442\u0435 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u044b\u0439 DNS (DoH) \u0432 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435.\nChrome: \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u2192 \u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u044b\u0439 DNS \u2192 \u0412\u044b\u043a\u043b\nFirefox: \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u2192 \u041f\u0440\u0438\u0432\u0430\u0442\u043d\u043e\u0441\u0442\u044c \u2192 DNS \u0447\u0435\u0440\u0435\u0437 HTTPS \u2192 \u0412\u044b\u043a\u043b\nEdge: \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u2192 \u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u044b\u0439 DNS \u2192 \u0412\u044b\u043a\u043b\n\u0418\u043d\u0430\u0447\u0435 MikroTik \u043d\u0435 \u0443\u0432\u0438\u0434\u0438\u0442 \u0432\u0430\u0448\u0438 DNS-\u0437\u0430\u043f\u0440\u043e\u0441\u044b \u0438 \u043d\u0435 \u0441\u043c\u043e\u0436\u0435\u0442 \u043d\u0430\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0442\u0440\u0430\u0444\u0438\u043a.'
+            dnsBrowserHint: '\u041e\u0442\u043a\u043b\u044e\u0447\u0438\u0442\u0435 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u044b\u0439 DNS (DoH) \u0432 \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0435.\nChrome: \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u2192 \u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u044b\u0439 DNS \u2192 \u0412\u044b\u043a\u043b\nFirefox: \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u2192 \u041f\u0440\u0438\u0432\u0430\u0442\u043d\u043e\u0441\u0442\u044c \u2192 DNS \u0447\u0435\u0440\u0435\u0437 HTTPS \u2192 \u0412\u044b\u043a\u043b\nEdge: \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u2192 \u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442\u044c \u2192 \u0411\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u044b\u0439 DNS \u2192 \u0412\u044b\u043a\u043b\n\u0418\u043d\u0430\u0447\u0435 MikroTik \u043d\u0435 \u0443\u0432\u0438\u0434\u0438\u0442 \u0432\u0430\u0448\u0438 DNS-\u0437\u0430\u043f\u0440\u043e\u0441\u044b \u0438 \u043d\u0435 \u0441\u043c\u043e\u0436\u0435\u0442 \u043d\u0430\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0442\u0440\u0430\u0444\u0438\u043a.',
+            igTitle: '\u041a\u0430\u043a \u044d\u0442\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442',
+            igWireguard: '\u0422\u0443\u043d\u043d\u0435\u043b\u044c WireGuard',
+            igContainer: '\u041a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440 (awg-proxy)',
+            igContainerOnRouter: '\u041a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440 \u043d\u0430 \u0440\u043e\u0443\u0442\u0435\u0440\u0435',
+            igStandalone: '\u0412\u043d\u0435\u0448\u043d\u0435\u0435 \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u043e (awg-proxy)',
+            igDns: 'DNS (DoH)',
+            igRouting: '\u041c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f',
+            igFirewall: 'Firewall / NAT',
+            igMangle: 'Mangle',
+            igInternet: '\u0418\u043d\u0442\u0435\u0440\u043d\u0435\u0442',
+            igInternetWan: '\u0418\u043d\u0442\u0435\u0440\u043d\u0435\u0442 (WAN)',
+            igLan: 'LAN-\u043a\u043b\u0438\u0435\u043d\u0442\u044b',
+            igAwgServer: 'AWG-\u0441\u0435\u0440\u0432\u0435\u0440',
+            igRuList: '\u0421\u043f\u0438\u0441\u043e\u043a RU IP',
+            igScheduler: '\u041f\u043b\u0430\u043d\u0438\u0440\u043e\u0432\u0449\u0438\u043a',
+            igManualConfig: '\u0420\u0443\u0447\u043d\u0430\u044f \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430',
+            igRouterA: 'MikroTik A (\u043a\u043b\u0438\u0435\u043d\u0442)',
+            igRouterB: 'MikroTik B (\u0441\u0435\u0440\u0432\u0435\u0440)',
+            igServerHub: 'MikroTik-\u0441\u0435\u0440\u0432\u0435\u0440 (\u0445\u0430\u0431)',
+            igClientN: 'MikroTik-\u043a\u043b\u0438\u0435\u043d\u0442 #N',
+            igContainerClient: 'awg-proxy (\u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0430\u0435\u0442\u0441\u044f)',
+            igContainerServer: 'awg-proxy (\u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0435\u0442)',
+            igClient2: 'MikroTik-\u043a\u043b\u0438\u0435\u043d\u0442 #2',
+            igTipWireguard: '\u0422\u0443\u043d\u043d\u0435\u043b\u044c WireGuard\n\n/interface/wireguard/add \u2014 \u0441\u043e\u0437\u0434\u0430\u0451\u0442 WireGuard-\u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441 \u0441 \u043f\u0440\u0438\u0432\u0430\u0442\u043d\u044b\u043c \u043a\u043b\u044e\u0447\u043e\u043c \u0438 \u043f\u043e\u0440\u0442\u043e\u043c\n/interface/wireguard/peers/add \u2014 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442 \u043f\u0438\u0440 (AWG-\u0441\u0435\u0440\u0432\u0435\u0440) \u0441 \u043f\u0443\u0431\u043b\u0438\u0447\u043d\u044b\u043c \u043a\u043b\u044e\u0447\u043e\u043c \u0438 endpoint\u2019\u043e\u043c \u043d\u0430 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\n/ip/address/add \u2014 \u043d\u0430\u0437\u043d\u0430\u0447\u0430\u0435\u0442 \u0442\u0443\u043d\u043d\u0435\u043b\u044c\u043d\u044b\u0439 IP\n\n\u042d\u0442\u043e \u0448\u0438\u0444\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0439 \u0442\u0443\u043d\u043d\u0435\u043b\u044c, \u0447\u0435\u0440\u0435\u0437 \u043a\u043e\u0442\u043e\u0440\u044b\u0439 \u0442\u0440\u0430\u0444\u0438\u043a \u0438\u0434\u0451\u0442 \u043a AWG-\u0441\u0435\u0440\u0432\u0435\u0440\u0443.',
+            igTipContainer: '\u041a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440 (awg-proxy)\n\n/interface/veth/add \u2014 \u0441\u043e\u0437\u0434\u0430\u0451\u0442 \u0432\u0438\u0440\u0442\u0443\u0430\u043b\u044c\u043d\u0443\u044e Ethernet-\u043f\u0430\u0440\u0443 \u0434\u043b\u044f \u0441\u0432\u044f\u0437\u0438 \u0441 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u043e\u043c\n/container/envs/add \u2014 \u0437\u0430\u0434\u0430\u0451\u0442 AWG-\u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b (Jc, Jmin, Jmax, S1, S2, H1\u2013H4, \u043a\u043b\u044e\u0447\u0438)\n/container/add + /container/start \u2014 \u0441\u043a\u0430\u0447\u0438\u0432\u0430\u0435\u0442 \u0438 \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\n\nawg-proxy \u043f\u0440\u0435\u043e\u0431\u0440\u0430\u0437\u0443\u0435\u0442 \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0435 WG-\u043f\u0430\u043a\u0435\u0442\u044b \u0432 \u0444\u043e\u0440\u043c\u0430\u0442 AmneziaWG (\u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442 junk, \u043c\u0435\u043d\u044f\u0435\u0442 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0438, \u0434\u043e\u043f\u043e\u043b\u043d\u044f\u0435\u0442 handshake).',
+            igTipContainerOnRouter: '\u041a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440 \u043d\u0430 \u0440\u043e\u0443\u0442\u0435\u0440\u0435\n\n\u041a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440 awg-proxy \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442\u0441\u044f \u043f\u0440\u044f\u043c\u043e \u043d\u0430 \u0440\u043e\u0443\u0442\u0435\u0440\u0435 MikroTik.\n\n/interface/veth/add \u2014 \u0441\u043e\u0437\u0434\u0430\u0451\u0442 \u0432\u0438\u0440\u0442\u0443\u0430\u043b\u044c\u043d\u0443\u044e Ethernet-\u043f\u0430\u0440\u0443\n/container/envs/add \u2014 \u0437\u0430\u0434\u0430\u0451\u0442 AWG-\u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b (Jc, Jmin, Jmax, S1, S2, H1\u2013H4, \u043a\u043b\u044e\u0447\u0438)\n/container/add + /container/start \u2014 \u0441\u043a\u0430\u0447\u0438\u0432\u0430\u0435\u0442 \u0438 \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\n\nawg-proxy \u043f\u0440\u0435\u043e\u0431\u0440\u0430\u0437\u0443\u0435\u0442 WG-\u043f\u0430\u043a\u0435\u0442\u044b \u0432 \u0444\u043e\u0440\u043c\u0430\u0442 AmneziaWG.',
+            igTipStandalone: '\u0412\u043d\u0435\u0448\u043d\u0435\u0435 \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u043e (awg-proxy)\n\nawg-proxy \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u043d\u0430 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u043e\u043c \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0435 (Raspberry Pi, VPS \u0438 \u0442.\u0434.). WireGuard-\u043f\u0438\u0440 \u043d\u0430 MikroTik \u0443\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 endpoint \u043d\u0430 IP \u044d\u0442\u043e\u0433\u043e \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0430.\n\n\u041f\u0440\u0435\u043e\u0431\u0440\u0430\u0437\u0443\u0435\u0442 WG-\u0442\u0440\u0430\u0444\u0438\u043a \u0432 \u0444\u043e\u0440\u043c\u0430\u0442 AmneziaWG \u043f\u0435\u0440\u0435\u0434 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 AWG-\u0441\u0435\u0440\u0432\u0435\u0440.',
+            igTipDns: 'DNS (DoH-\u0444\u043e\u0440\u0432\u0430\u0440\u0434\u0438\u043d\u0433)\n\n/ip/dns/static/add type=FWD \u2014 \u0441\u043e\u0437\u0434\u0430\u0451\u0442 \u043f\u0435\u0440\u0435\u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f \u0434\u043b\u044f \u0434\u043e\u043c\u0435\u043d\u043e\u0432 \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0445 \u0441\u0435\u0440\u0432\u0438\u0441\u043e\u0432\n\n\u041a\u043e\u0433\u0434\u0430 \u043a\u043b\u0438\u0435\u043d\u0442 \u0440\u0435\u0437\u043e\u043b\u0432\u0438\u0442 \u0434\u043e\u043c\u0435\u043d (\u043d\u0430\u043f\u0440. youtube.com), MikroTik \u043f\u0435\u0440\u0435\u043d\u0430\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 DoH \u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0435\u0442 IP \u0432 address-list.\n\u042d\u0442\u0438 address-list\u2019\u044b \u043f\u0435\u0440\u0435\u0434\u0430\u044e\u0442\u0441\u044f \u0432 Mangle, \u043a\u043e\u0442\u043e\u0440\u044b\u0439 \u043c\u0430\u0440\u043a\u0438\u0440\u0443\u0435\u0442 \u0441\u043e\u043e\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0439 \u0442\u0440\u0430\u0444\u0438\u043a \u0434\u043b\u044f \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438 \u0447\u0435\u0440\u0435\u0437 VPN.',
+            igTipRouting: '\u041f\u043e\u043b\u0438\u0442\u0438\u043a\u0430 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438\n\n/routing/table/add \u2014 \u0441\u043e\u0437\u0434\u0430\u0451\u0442 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u0443\u044e \u0442\u0430\u0431\u043b\u0438\u0446\u0443 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u043e\u0432 \u0434\u043b\u044f VPN\n/ip/route/add \u2014 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442 \u043c\u0430\u0440\u0448\u0440\u0443\u0442 \u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e \u0447\u0435\u0440\u0435\u0437 WG-\u0442\u0443\u043d\u043d\u0435\u043b\u044c\n/routing/rule/add \u2014 \u043f\u0440\u0438\u0432\u044f\u0437\u044b\u0432\u0430\u0435\u0442 \u043c\u0435\u0442\u043a\u0443 \u043a \u0442\u0430\u0431\u043b\u0438\u0446\u0435\n\n\u041c\u0430\u0440\u043a\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0439 Mangle \u0442\u0440\u0430\u0444\u0438\u043a \u0438\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 \u044d\u0442\u0443 \u0442\u0430\u0431\u043b\u0438\u0446\u0443 \u0432 VPN. \u041e\u0441\u0442\u0430\u043b\u044c\u043d\u043e\u0439 \u2014 \u043d\u0430\u043f\u0440\u044f\u043c\u0443\u044e.',
+            igTipFirewall: 'Firewall / NAT\n\n/ip/firewall/nat/add chain=srcnat masquerade src-address=172.18.0.0/30 \u2014 NAT \u0442\u0440\u0430\u0444\u0438\u043a\u0430 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u0430\n/ip/firewall/nat/add chain=srcnat masquerade out-interface=wg-* \u2014 NAT \u0442\u0440\u0430\u0444\u0438\u043a\u0430 \u0447\u0435\u0440\u0435\u0437 WG-\u0442\u0443\u043d\u043d\u0435\u043b\u044c\n\n\u0411\u0435\u0437 \u044d\u0442\u0438\u0445 \u043f\u0440\u0430\u0432\u0438\u043b \u043e\u0431\u0440\u0430\u0442\u043d\u044b\u0439 \u0442\u0440\u0430\u0444\u0438\u043a \u043d\u0435 \u0434\u043e\u0439\u0434\u0451\u0442 \u0434\u043e \u043d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f.',
+            igTipMangle: 'Mangle (\u043c\u0430\u0440\u043a\u0438\u0440\u043e\u0432\u043a\u0430 \u0442\u0440\u0430\u0444\u0438\u043a\u0430)\n\n/ip/firewall/mangle/add mark-connection \u2014 \u043c\u0430\u0440\u043a\u0438\u0440\u0443\u0435\u0442 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f \u043a IP \u0438\u0437 DNS address-list\n/ip/firewall/mangle/add mark-routing \u2014 \u043f\u0440\u0438\u0441\u0432\u0430\u0438\u0432\u0430\u0435\u0442 \u043c\u0435\u0442\u043a\u0443 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438\n/ip/firewall/mangle/add change-mss clamp-to-pmtu \u2014 \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442 MSS \u0434\u043b\u044f \u0442\u0443\u043d\u043d\u0435\u043b\u044f\n\n\u042f\u0434\u0440\u043e \u0438\u0437\u0431\u0438\u0440\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0439 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438: \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u0440\u0430\u0444\u0438\u043a \u043a \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u043c \u0441\u0435\u0440\u0432\u0438\u0441\u0430\u043c \u0438\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 VPN.',
+            igTipMangleNonRu: 'Mangle (\u043c\u0430\u0440\u043a\u0438\u0440\u043e\u0432\u043a\u0430 \u0442\u0440\u0430\u0444\u0438\u043a\u0430)\n\n/ip/firewall/mangle/add mark-routing dst-address-list=!RU \u2014 \u043c\u0430\u0440\u043a\u0438\u0440\u0443\u0435\u0442 \u0412\u0415\u0421\u042c \u0442\u0440\u0430\u0444\u0438\u043a \u041a\u0420\u041e\u041c\u0415 \u0440\u043e\u0441\u0441\u0438\u0439\u0441\u043a\u0438\u0445 IP\n/ip/firewall/mangle/add accept dst-address-list=vpn-server \u2014 \u0438\u0441\u043a\u043b\u044e\u0447\u0430\u0435\u0442 \u0441\u0430\u043c VPN-\u0441\u0435\u0440\u0432\u0435\u0440\n/ip/firewall/mangle/add change-mss clamp-to-pmtu \u2014 \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442 MSS\n\n\u0412\u0435\u0441\u044c \u043d\u0435-\u0420\u0424 \u0442\u0440\u0430\u0444\u0438\u043a \u0438\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 VPN.',
+            igTipRuList: '\u0421\u043f\u0438\u0441\u043e\u043a RU IP\n\n\u0415\u0436\u0435\u0434\u043d\u0435\u0432\u043d\u043e \u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u043c\u044b\u0439 \u0441\u043f\u0438\u0441\u043e\u043a \u0440\u043e\u0441\u0441\u0438\u0439\u0441\u043a\u0438\u0445 IP-\u0434\u0438\u0430\u043f\u0430\u0437\u043e\u043d\u043e\u0432 \u0438\u0437 RIPE.\n\u041f\u0440\u0438\u0432\u0430\u0442\u043d\u044b\u0435 \u0441\u0435\u0442\u0438 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) \u0442\u043e\u0436\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u044e\u0442\u0441\u044f, \u0447\u0442\u043e\u0431\u044b \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u044b\u0439 \u0442\u0440\u0430\u0444\u0438\u043a \u043d\u0435 \u0448\u0451\u043b \u0432 \u0442\u0443\u043d\u043d\u0435\u043b\u044c.\n\nMangle \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u0442 \u044d\u0442\u043e\u0442 \u0441\u043f\u0438\u0441\u043e\u043a \u0434\u043b\u044f \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u0438\u044f, \u043a\u0430\u043a\u043e\u0439 \u0442\u0440\u0430\u0444\u0438\u043a \u0438\u0434\u0451\u0442 \u043d\u0430\u043f\u0440\u044f\u043c\u0443\u044e.',
+            igTipScheduler: '\u041f\u043b\u0430\u043d\u0438\u0440\u043e\u0432\u0449\u0438\u043a\n\n/system/scheduler/add \u2014 \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442 \u0441\u043a\u0440\u0438\u043f\u0442 \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f \u0435\u0436\u0435\u0434\u043d\u0435\u0432\u043d\u043e \u0432 04:05\n/system/script/add \u2014 \u0441\u043a\u0430\u0447\u0438\u0432\u0430\u0435\u0442 \u0438 \u0438\u043c\u043f\u043e\u0440\u0442\u0438\u0440\u0443\u0435\u0442 \u0441\u0432\u0435\u0436\u0438\u0435 RU IP\n\n\u041f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442 \u0441\u043f\u0438\u0441\u043e\u043a RU IP \u0432 \u0430\u043a\u0442\u0443\u0430\u043b\u044c\u043d\u043e\u043c \u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0438.',
+            igTipFirewallS2S: 'Firewall\n\n/ip/firewall/filter/add accept \u2014 \u0440\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442 AWG-\u043f\u043e\u0440\u0442 \u043d\u0430 WAN\n/ip/firewall/nat/add dstnat \u2014 \u043f\u0435\u0440\u0435\u043d\u0430\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442 AWG-\u0442\u0440\u0430\u0444\u0438\u043a \u0432 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\n/ip/firewall/nat/add masquerade \u2014 NAT \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u0430 + \u0442\u0443\u043d\u043d\u0435\u043b\u044f\n\n\u0421\u0442\u043e\u0440\u043e\u043d\u0430 B (\u0441\u0435\u0440\u0432\u0435\u0440) \u0442\u0440\u0435\u0431\u0443\u0435\u0442 \u0434\u043e\u043f. \u043f\u0440\u0430\u0432\u0438\u043b\u0430 \u0434\u043b\u044f \u0432\u0445\u043e\u0434\u044f\u0449\u0438\u0445 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0439.',
+            igTipFirewallSrv: 'Firewall\n\n/ip/firewall/filter/add accept \u2014 \u0440\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442 AWG-\u043f\u043e\u0440\u0442 \u043d\u0430 WAN\n/ip/firewall/nat/add dstnat \u2014 \u043f\u0435\u0440\u0435\u043d\u0430\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442 AWG-\u0442\u0440\u0430\u0444\u0438\u043a \u0432 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\n/ip/firewall/nat/add masquerade \u2014 NAT \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u0430 + \u0442\u0443\u043d\u043d\u0435\u043b\u044f\n/ip/route/add \u2014 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u044b \u043a LAN \u043a\u043b\u0438\u0435\u043d\u0442\u043e\u0432 \u0447\u0435\u0440\u0435\u0437 WG-\u043f\u0438\u0440\u044b\n\n\u0421\u0435\u0440\u0432\u0435\u0440 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0435\u0442 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f \u043e\u0442 \u0432\u0441\u0435\u0445 \u043a\u043b\u0438\u0435\u043d\u0442\u043e\u0432 \u0438 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0438\u0440\u0443\u0435\u0442 \u043c\u0435\u0436\u0434\u0443 \u0438\u0445 \u0441\u0435\u0442\u044f\u043c\u0438.',
+            igTipRoutingS2S: '\u041c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f\n\n/ip/route/add \u2014 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u044b \u043a \u0443\u0434\u0430\u043b\u0451\u043d\u043d\u043e\u0439 LAN-\u043f\u043e\u0434\u0441\u0435\u0442\u0438 \u0447\u0435\u0440\u0435\u0437 WG-\u0442\u0443\u043d\u043d\u0435\u043b\u044c\n\n\u0423\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0430 \u0441\u0442\u043e\u0440\u043e\u043d\u044b A \u043c\u043e\u0433\u0443\u0442 \u0434\u043e\u0441\u0442\u0443\u043f\u0430\u0442\u044c\u0441\u044f \u0434\u043e \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432 \u0441\u0442\u043e\u0440\u043e\u043d\u044b B \u0438 \u043d\u0430\u043e\u0431\u043e\u0440\u043e\u0442.',
+            igTipRoutingTunnel: '\u0420\u0443\u0447\u043d\u0430\u044f \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f\n\n\u0410\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0430\u044f \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d\u0430.\n\u0414\u043e\u0431\u0430\u0432\u044c\u0442\u0435 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u044b \u0432\u0440\u0443\u0447\u043d\u0443\u044e: /ip/route/add dst-address=X.X.X.X/X gateway=wg-awg-proxy\n\n\u0414\u043b\u044f \u043e\u043f\u044b\u0442\u043d\u044b\u0445 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0435\u0439, \u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u0445\u043e\u0442\u044f\u0442 \u043f\u043e\u043b\u043d\u044b\u0439 \u043a\u043e\u043d\u0442\u0440\u043e\u043b\u044c.',
+            igTipManualConfig: '\u0420\u0443\u0447\u043d\u0430\u044f \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430\n\n\u0410\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0430\u044f \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d\u0430. \u0412\u044b \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u0442\u0435, \u043a\u0430\u043a \u0442\u0440\u0430\u0444\u0438\u043a \u043f\u043e\u043f\u0430\u0434\u0430\u0435\u0442 \u0432 \u0442\u0443\u043d\u043d\u0435\u043b\u044c:\n\n\u041c\u0430\u0440\u0448\u0440\u0443\u0442 \u0434\u043b\u044f \u043a\u043e\u043d\u043a\u0440\u0435\u0442\u043d\u044b\u0445 \u043f\u043e\u0434\u0441\u0435\u0442\u0435\u0439:\n/ip/route/add dst-address=X.X.X.X/X gateway=wg-*\n\n\u0412\u0435\u0441\u044c \u0442\u0440\u0430\u0444\u0438\u043a \u0447\u0435\u0440\u0435\u0437 \u0442\u0443\u043d\u043d\u0435\u043b\u044c:\n/ip/route/add dst-address=0.0.0.0/0 gateway=wg-* distance=1\n\nPolicy-\u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f \u0447\u0435\u0440\u0435\u0437 mangle-\u043c\u0435\u0442\u043a\u0438\n\n\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435 address-list \u0434\u043b\u044f \u0438\u0437\u0431\u0438\u0440\u0430\u0442\u0435\u043b\u044c\u043d\u043e\u0439 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438',
+            igTipInternetWan: '\u0418\u043d\u0442\u0435\u0440\u043d\u0435\u0442 (WAN)\n\n\u041f\u0440\u044f\u043c\u043e\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0435 \u043a \u0438\u043d\u0442\u0435\u0440\u043d\u0435\u0442\u0443 \u0447\u0435\u0440\u0435\u0437 WAN-\u043f\u043e\u0440\u0442 MikroTik.\n\u0422\u0440\u0430\u0444\u0438\u043a, \u043d\u0435 \u043e\u0442\u043c\u0435\u0447\u0435\u043d\u043d\u044b\u0439 \u0434\u043b\u044f VPN, \u0438\u0434\u0451\u0442 \u0441\u044e\u0434\u0430 \u043d\u0430\u043f\u0440\u044f\u043c\u0443\u044e.',
+            igTipRoutingSrv: '\u041c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f (L3)\n\n/ip/route/add \u2014 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u044b \u043a \u0443\u0434\u0430\u043b\u0451\u043d\u043d\u044b\u043c LAN-\u043f\u043e\u0434\u0441\u0435\u0442\u044f\u043c \u0447\u0435\u0440\u0435\u0437 WireGuard-\u043f\u0438\u0440\u044b\n/ip/firewall/filter/add \u2014 \u0440\u0430\u0437\u0440\u0435\u0448\u0430\u0435\u0442 \u043f\u0435\u0440\u0435\u0441\u044b\u043b\u043a\u0443 \u043c\u0435\u0436\u0434\u0443 \u0442\u0443\u043d\u043d\u0435\u043b\u0435\u043c \u0438 LAN\n\n\u0421\u0435\u0440\u0432\u0435\u0440 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0438\u0440\u0443\u0435\u0442 \u0442\u0440\u0430\u0444\u0438\u043a \u043c\u0435\u0436\u0434\u0443 \u0432\u0441\u0435\u043c\u0438 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0451\u043d\u043d\u044b\u043c\u0438 \u0441\u0435\u0442\u044f\u043c\u0438. \u041a\u0430\u0436\u0434\u044b\u0439 \u043a\u043b\u0438\u0435\u043d\u0442 \u043f\u043e\u043b\u0443\u0447\u0430\u0435\u0442 \u043c\u0430\u0440\u0448\u0440\u0443\u0442 \u043a LAN \u0441\u0435\u0440\u0432\u0435\u0440\u0430. \u0414\u043b\u044f \u0441\u0432\u044f\u0437\u0438 \u043a\u043b\u0438\u0435\u043d\u0442\u043e\u0432 \u043c\u0435\u0436\u0434\u0443 \u0441\u043e\u0431\u043e\u0439 \u043d\u0443\u0436\u043d\u043e \u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u044b \u0432\u0440\u0443\u0447\u043d\u0443\u044e.',
+            igTipLan: 'LAN-\u043a\u043b\u0438\u0435\u043d\u0442\u044b\n\n\u0423\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0430 \u043b\u043e\u043a\u0430\u043b\u044c\u043d\u043e\u0439 \u0441\u0435\u0442\u0438. \u0418\u0445 \u0442\u0440\u0430\u0444\u0438\u043a \u043f\u0440\u043e\u0445\u043e\u0434\u0438\u0442 \u0447\u0435\u0440\u0435\u0437 MikroTik, \u043a\u043e\u0442\u043e\u0440\u044b\u0439 \u0440\u0435\u0448\u0430\u0435\u0442: \u043d\u0430\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0435\u0433\u043e \u0432 VPN-\u0442\u0443\u043d\u043d\u0435\u043b\u044c \u0438\u043b\u0438 \u043d\u0430\u043f\u0440\u044f\u043c\u0443\u044e \u0432 \u0438\u043d\u0442\u0435\u0440\u043d\u0435\u0442.',
+            igTipInternet: '\u0418\u043d\u0442\u0435\u0440\u043d\u0435\u0442\n\n\u041f\u0440\u044f\u043c\u043e\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0435 \u0447\u0435\u0440\u0435\u0437 WAN. \u041d\u0435-VPN \u0442\u0440\u0430\u0444\u0438\u043a \u0438\u0434\u0451\u0442 \u0441\u044e\u0434\u0430. VPN-\u0442\u0440\u0430\u0444\u0438\u043a \u2014 \u0447\u0435\u0440\u0435\u0437 WG-\u0442\u0443\u043d\u043d\u0435\u043b\u044c \u043a AWG-\u0441\u0435\u0440\u0432\u0435\u0440\u0443.',
+            igTipAwgServer: 'AWG-\u0441\u0435\u0440\u0432\u0435\u0440\n\n\u0423\u0434\u0430\u043b\u0451\u043d\u043d\u044b\u0439 VPN-\u0441\u0435\u0440\u0432\u0435\u0440 \u0441 AmneziaWG. \u041f\u043e\u043b\u0443\u0447\u0430\u0435\u0442 \u043f\u0440\u0435\u043e\u0431\u0440\u0430\u0437\u043e\u0432\u0430\u043d\u043d\u044b\u0435 \u043f\u0430\u043a\u0435\u0442\u044b \u043e\u0442 awg-proxy \u0438 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0438\u0440\u0443\u0435\u0442 \u0438\u0445 \u0432 \u0438\u043d\u0442\u0435\u0440\u043d\u0435\u0442.\n\n\u041f\u0443\u0442\u044c: \u041a\u043b\u0438\u0435\u043d\u0442 \u2192 MikroTik WG \u2192 awg-proxy \u2192 AWG-\u0441\u0435\u0440\u0432\u0435\u0440 \u2192 \u0418\u043d\u0442\u0435\u0440\u043d\u0435\u0442'
         }
     };
 
@@ -1228,6 +1402,30 @@
         });
         html += '</div>';
         return html;
+    }
+
+    function renderAWGParamsInline(awgParams) {
+        var keys = [
+            ['Jc', awgParams.jc], ['Jmin', awgParams.jmin], ['Jmax', awgParams.jmax],
+            ['S1', awgParams.s1], ['S2', awgParams.s2],
+            ['H1', awgParams.h1], ['H2', awgParams.h2], ['H3', awgParams.h3], ['H4', awgParams.h4]
+        ];
+        var html = '';
+        for (var i = 0; i < keys.length; i++) {
+            if (keys[i][1] === undefined) continue;
+            html += '<div class="field-tag ok"><span class="fname">' + esc(keys[i][0]) + '</span><span class="fval">' + esc(String(keys[i][1])) + '</span></div>';
+        }
+        return html;
+    }
+
+    function showS2SParams() {
+        var p = ensureS2SParams();
+        document.getElementById('s2s-awg-params').innerHTML = renderAWGParamsInline(p);
+    }
+
+    function showSrvParams() {
+        var p = ensureServerParams();
+        document.getElementById('srv-awg-params').innerHTML = renderAWGParamsInline(p);
     }
 
     // ============================================================
@@ -1520,6 +1718,7 @@
         } else {
             hintEl.textContent = t(hintKey);
         }
+        _igRefresh();
     }
 
     function initServiceCheckboxes() {
@@ -2434,6 +2633,7 @@
         if (!isSrv && prefixSel.value.indexOf('awg-server') === 0) prefixSel.value = 'awg-proxy';
         if (isS2S) ensureS2SParams();
         if (isSrv) ensureServerParams();
+        _igRefresh();
     }
 
     // ============================================================
@@ -2611,6 +2811,7 @@
         if (!s2sParams) {
             s2sParams = generateAWGParams();
             document.getElementById('s2s-awg-port').value = s2sParams.port;
+            showS2SParams();
         }
         return s2sParams;
     }
@@ -2618,6 +2819,7 @@
     function regenerateS2SParams() {
         s2sParams = generateAWGParams();
         document.getElementById('s2s-awg-port').value = s2sParams.port;
+        showS2SParams();
     }
 
     // ============================================================
@@ -2630,6 +2832,7 @@
         if (!serverParams) {
             serverParams = generateAWGParams();
             document.getElementById('srv-awg-port').value = serverParams.port;
+            showSrvParams();
         }
         return serverParams;
     }
@@ -2637,6 +2840,7 @@
     function regenerateServerParams() {
         serverParams = generateAWGParams();
         document.getElementById('srv-awg-port').value = serverParams.port;
+        showSrvParams();
     }
 
     function onSrvNetChange() {
@@ -3247,6 +3451,7 @@
         } else {
             ensureServerParams();
             serverParams.port = awgPort;
+            showSrvParams();
             var result = buildServerCommands(endpoint, serverParams, tunnelSubnet, storageServer, storageClient, prefix, serverLAN, clientLAN, netMode, clientNum, dnsServer);
             document.getElementById('srv-out-server').style.display = '';
             document.getElementById('srv-out-server').parentElement.style.display = '';
@@ -3957,6 +4162,493 @@
         // Hide server storage (not needed for add-client)
         document.getElementById('srv-storage-server').parentElement.style.display = 'none';
     })();
+
+    // ============================================================
+    // Infographic — "How will this work?" SVG diagrams
+    // ============================================================
+
+    function _igEsc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+    function _igFormatTip(text) {
+        var lines = text.split('\n');
+        var html = '<div class="ig-tip-title">' + _igEsc(lines[0]) + '</div>';
+        for (var i = 1; i < lines.length; i++) {
+            var line = lines[i];
+            if (line.trim() === '') { html += '<br>'; continue; }
+            var escaped = _igEsc(line);
+            escaped = escaped.replace(/(\/[a-z][a-z0-9\/]*(?:\/[a-z][a-z0-9-]*)*)/g, '<code>$1</code>');
+            escaped = escaped.replace(/\b(dst-address-list=!?[A-Za-z0-9_-]+|src-address=[0-9.\/]+|out-interface=[a-z0-9*-]+|mark-(?:connection|routing)|change-mss|clamp-to-pmtu|masquerade|dstnat|accept|type=FWD)\b/g, '<code>$1</code>');
+            html += '<div>' + escaped + '</div>';
+        }
+        return html;
+    }
+
+    var IG_COLORS = {
+        wireguard:  { fill: '#dbeafe', stroke: '#3b82f6', dark: '#1e3a5f' },
+        container:  { fill: '#dcfce7', stroke: '#22c55e', dark: '#1a3a2a' },
+        dns:        { fill: '#ffedd5', stroke: '#f97316', dark: '#3a2a1a' },
+        routing:    { fill: '#ede9fe', stroke: '#8b5cf6', dark: '#2a1f4a' },
+        firewall:   { fill: '#fee2e2', stroke: '#ef4444', dark: '#3a1a1a' },
+        mangle:     { fill: '#fef9c3', stroke: '#eab308', dark: '#3a3a1a' },
+        external:   { fill: '#f3f4f6', stroke: '#9ca3af', dark: '#2a2a2a' },
+        rulist:     { fill: '#e0e7ff', stroke: '#6366f1', dark: '#1e1e4a' },
+        scheduler:  { fill: '#fce7f3', stroke: '#ec4899', dark: '#3a1a2a' },
+        manual:     { fill: '#fef3c7', stroke: '#f59e0b', dark: '#3a2f1a' }
+    };
+
+    var _igDark = function() { return window.matchMedia && window.matchMedia('(prefers-color-scheme:dark)').matches; };
+
+    function _igBlock(x, y, w, h, colorKey, labelKey, tipKey) {
+        var c = IG_COLORS[colorKey] || IG_COLORS.external;
+        var dark = _igDark();
+        return '<g class="ig-block" data-tip="' + _igEsc(t(tipKey)) + '">' +
+            '<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+h+'" rx="8" ' +
+            'fill="'+(dark?c.dark:c.fill)+'" stroke="'+c.stroke+'" stroke-width="1.5"/>' +
+            '<text x="'+(x+w/2)+'" y="'+(y+h/2)+'" text-anchor="middle" dominant-baseline="central" ' +
+            'font-size="12" font-weight="600" fill="'+(dark?'#e5e7eb':'#1f2937')+'">' +
+            _igEsc(t(labelKey)) + '</text></g>';
+    }
+
+    function _igArrow(x1, y1, x2, y2, dashed, bidir) {
+        var d;
+        if (x1 === x2 || y1 === y2) { d = 'M'+x1+','+y1+' L'+x2+','+y2; }
+        else { var m = y1+(y2-y1)/2; d = 'M'+x1+','+y1+' C'+x1+','+m+' '+x2+','+m+' '+x2+','+y2; }
+        var color = _igDark() ? '#888' : '#6b7280';
+        return '<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="1.5" ' +
+            (dashed ? 'stroke-dasharray="5,3" ' : '') +
+            'marker-end="url(#ig-arrow)"' + (bidir ? ' marker-start="url(#ig-arrow)"' : '') + '/>';
+    }
+
+    function _igDefs() {
+        var color = _igDark() ? '#888' : '#6b7280';
+        return '<defs><marker id="ig-arrow" viewBox="0 0 10 7" refX="9" refY="3.5" ' +
+            'markerWidth="8" markerHeight="6" orient="auto-start-reverse">' +
+            '<polygon points="0 0, 10 3.5, 0 7" fill="'+color+'"/></marker></defs>';
+    }
+
+    function _igSvg(w, h, content) {
+        return '<svg viewBox="0 0 '+w+' '+h+'" width="100%" style="max-width:'+w+'px" xmlns="http://www.w3.org/2000/svg" ' +
+            'font-family="-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">' +
+            _igDefs() + content + '</svg>';
+    }
+
+    // Consistent grid layout for Container/Standalone diagrams:
+    //   Col L (x=10, w=150)   Col R (x=210, w=150)
+    //   Standard 5 rows: [10, 80, 150, 220, 290]
+    //   Non-RU 6 rows: [10, 80, 150, 220, 290, 360]
+    var CL = 10, CR = 210, BW = 150, BH = 44;
+    var RY = [10, 80, 150, 220, 290];
+    function _clc() { return CL + BW/2; }     // left col center = 85
+    function _crc() { return CR + BW/2; }     // right col center = 285
+
+    // --- Container + dns-fwd ---
+    function _igContainerDns() {
+        var s = '';
+        // Row 0: LAN + DNS
+        s += _igBlock(CL, RY[0], BW, BH, 'external', 'igLan', 'igTipLan');
+        s += _igBlock(CR, RY[0], BW, BH, 'dns', 'igDns', 'igTipDns');
+        s += _igArrow(_clc(), RY[0]+BH, _clc(), RY[1]);                    // LAN -> Mangle
+
+        // Row 1: Mangle + Routing, DNS feeds down to Mangle level then left into Mangle
+        s += _igBlock(CL, RY[1], BW, BH, 'mangle', 'igMangle', 'igTipMangle');
+        s += _igBlock(CR, RY[1], BW, BH, 'routing', 'igRouting', 'igTipRouting');
+        s += _igArrow(CL+BW, RY[1]+BH/2, CR, RY[1]+BH/2);                 // Mangle -> Routing
+        s += _igArrow(_crc(), RY[0]+BH, CL+BW, RY[1], true);              // DNS -> Mangle (dashed curve)
+
+        // Row 2: Firewall + WireGuard
+        s += _igBlock(CL, RY[2], BW, BH, 'firewall', 'igFirewall', 'igTipFirewall');
+        s += _igBlock(CR, RY[2], BW, BH, 'wireguard', 'igWireguard', 'igTipWireguard');
+        s += _igArrow(_clc(), RY[1]+BH, _clc(), RY[2]);                    // Mangle -> Firewall
+        s += _igArrow(_crc(), RY[1]+BH, _crc(), RY[2]);                    // Routing -> WireGuard
+
+        // Row 3: Internet (WAN) + Container on router
+        s += _igBlock(CL, RY[3], BW, BH, 'external', 'igInternetWan', 'igTipInternetWan');
+        s += _igBlock(CR, RY[3], BW, BH, 'container', 'igContainerOnRouter', 'igTipContainerOnRouter');
+        s += _igArrow(_clc(), RY[2]+BH, _clc(), RY[3]);                    // Firewall -> Internet
+        s += _igArrow(_crc(), RY[2]+BH, _crc(), RY[3]);                    // WG -> Container
+
+        // Row 4: AWG Server
+        s += _igBlock(CR, RY[4], BW, BH, 'external', 'igAwgServer', 'igTipAwgServer');
+        s += _igArrow(_crc(), RY[3]+BH, _crc(), RY[4]);                    // Container -> AWG
+
+        return _igSvg(CR+BW+10, RY[4]+BH+10, s);
+    }
+
+    // --- Container + tunnel ---
+    function _igContainerTunnel() {
+        var s = '';
+        // Row 0: LAN
+        s += _igBlock(CL, RY[0], BW, BH, 'external', 'igLan', 'igTipLan');
+        s += _igArrow(_clc(), RY[0]+BH, _clc(), RY[1]);                    // LAN -> Manual Config
+
+        // Row 1: Manual Config + Routing (manual)
+        s += _igBlock(CL, RY[1], BW, BH, 'manual', 'igManualConfig', 'igTipManualConfig');
+        s += _igBlock(CR, RY[1], BW, BH, 'routing', 'igRouting', 'igTipRoutingTunnel');
+        s += _igArrow(_clc(), RY[1]+BH, _clc(), RY[2]);                    // Manual -> Firewall
+        s += _igArrow(_crc(), RY[1]+BH, _crc(), RY[2]);                    // Routing -> WG
+
+        // Row 2: Firewall + WireGuard
+        s += _igBlock(CL, RY[2], BW, BH, 'firewall', 'igFirewall', 'igTipFirewall');
+        s += _igBlock(CR, RY[2], BW, BH, 'wireguard', 'igWireguard', 'igTipWireguard');
+
+        // Row 3: Internet (WAN) + Container on router
+        s += _igBlock(CL, RY[3], BW, BH, 'external', 'igInternetWan', 'igTipInternetWan');
+        s += _igBlock(CR, RY[3], BW, BH, 'container', 'igContainerOnRouter', 'igTipContainerOnRouter');
+        s += _igArrow(_clc(), RY[2]+BH, _clc(), RY[3]);                    // Firewall -> Internet
+        s += _igArrow(_crc(), RY[2]+BH, _crc(), RY[3]);                    // WG -> Container
+
+        // Row 4: AWG Server
+        s += _igBlock(CR, RY[4], BW, BH, 'external', 'igAwgServer', 'igTipAwgServer');
+        s += _igArrow(_crc(), RY[3]+BH, _crc(), RY[4]);                    // Container -> AWG
+
+        return _igSvg(CR+BW+10, RY[4]+BH+10, s);
+    }
+
+    // --- Container + non-ru ---
+    function _igContainerNonRu() {
+        var s = '';
+        // Layout: RU List + Scheduler left of main columns, connected to Mangle
+        // Extra column: x=10, main columns shifted right
+        var EX = 10, EW = 130;                  // extra col (RU List, Scheduler)
+        var ML = EX + EW + 20;                  // main left col x = 160
+        var MR = ML + BW + 50;                  // main right col x = 360
+        var mlc = ML + BW/2, mrc = MR + BW/2;  // centers
+
+        // Row 0: LAN
+        s += _igBlock(ML, RY[0], BW, BH, 'external', 'igLan', 'igTipLan');
+        s += _igArrow(mlc, RY[0]+BH, mlc, RY[1]);                          // LAN -> Mangle
+
+        // Row 0-1: Scheduler (row 0) -> RU List (row 1), left column
+        s += _igBlock(EX, RY[0], EW, BH, 'scheduler', 'igScheduler', 'igTipScheduler');
+        s += _igBlock(EX, RY[1], EW, BH, 'rulist', 'igRuList', 'igTipRuList');
+        s += _igArrow(EX+EW/2, RY[0]+BH, EX+EW/2, RY[1]);                 // Scheduler -> RU List (down)
+        s += _igArrow(EX+EW, RY[1]+BH/2, ML, RY[1]+BH/2, true);           // RU List -> Mangle (dashed, right)
+
+        // Row 1: Mangle + Routing
+        s += _igBlock(ML, RY[1], BW, BH, 'mangle', 'igMangle', 'igTipMangleNonRu');
+        s += _igBlock(MR, RY[1], BW, BH, 'routing', 'igRouting', 'igTipRouting');
+        s += _igArrow(ML+BW, RY[1]+BH/2, MR, RY[1]+BH/2);                 // Mangle -> Routing
+
+        // Row 2: Firewall + WireGuard
+        s += _igBlock(ML, RY[2], BW, BH, 'firewall', 'igFirewall', 'igTipFirewall');
+        s += _igBlock(MR, RY[2], BW, BH, 'wireguard', 'igWireguard', 'igTipWireguard');
+        s += _igArrow(mlc, RY[1]+BH, mlc, RY[2]);
+        s += _igArrow(mrc, RY[1]+BH, mrc, RY[2]);
+
+        // Row 3: Internet (WAN) + Container
+        s += _igBlock(ML, RY[3], BW, BH, 'external', 'igInternetWan', 'igTipInternetWan');
+        s += _igBlock(MR, RY[3], BW, BH, 'container', 'igContainerOnRouter', 'igTipContainerOnRouter');
+        s += _igArrow(mlc, RY[2]+BH, mlc, RY[3]);
+        s += _igArrow(mrc, RY[2]+BH, mrc, RY[3]);
+
+        // Row 4: AWG Server
+        s += _igBlock(MR, RY[4], BW, BH, 'external', 'igAwgServer', 'igTipAwgServer');
+        s += _igArrow(mrc, RY[3]+BH, mrc, RY[4]);
+
+        return _igSvg(MR+BW+10, RY[4]+BH+10, s);
+    }
+
+    // --- Standalone + dns-fwd ---
+    function _igStandaloneDns() {
+        var s = '';
+        // Row 0: LAN + DNS
+        s += _igBlock(CL, RY[0], BW, BH, 'external', 'igLan', 'igTipLan');
+        s += _igBlock(CR, RY[0], BW, BH, 'dns', 'igDns', 'igTipDns');
+        s += _igArrow(_clc(), RY[0]+BH, _clc(), RY[1]);
+
+        // Row 1: Mangle + Routing, DNS feeds down to Mangle
+        s += _igBlock(CL, RY[1], BW, BH, 'mangle', 'igMangle', 'igTipMangle');
+        s += _igBlock(CR, RY[1], BW, BH, 'routing', 'igRouting', 'igTipRouting');
+        s += _igArrow(CL+BW, RY[1]+BH/2, CR, RY[1]+BH/2);
+        s += _igArrow(_crc(), RY[0]+BH, CL+BW, RY[1], true);              // DNS -> Mangle (dashed curve)
+
+        // Row 2: Firewall + WireGuard
+        s += _igBlock(CL, RY[2], BW, BH, 'firewall', 'igFirewall', 'igTipFirewall');
+        s += _igBlock(CR, RY[2], BW, BH, 'wireguard', 'igWireguard', 'igTipWireguard');
+        s += _igArrow(_clc(), RY[1]+BH, _clc(), RY[2]);
+        s += _igArrow(_crc(), RY[1]+BH, _crc(), RY[2]);
+
+        // Row 3: Internet (WAN) + Standalone
+        s += _igBlock(CL, RY[3], BW, BH, 'external', 'igInternetWan', 'igTipInternetWan');
+        s += _igBlock(CR, RY[3], BW, BH, 'container', 'igStandalone', 'igTipStandalone');
+        s += _igArrow(_clc(), RY[2]+BH, _clc(), RY[3]);
+        s += _igArrow(_crc(), RY[2]+BH, _crc(), RY[3]);
+
+        // Row 4: AWG Server
+        s += _igBlock(CR, RY[4], BW, BH, 'external', 'igAwgServer', 'igTipAwgServer');
+        s += _igArrow(_crc(), RY[3]+BH, _crc(), RY[4]);
+
+        return _igSvg(CR+BW+10, RY[4]+BH+10, s);
+    }
+
+    // --- Standalone + tunnel ---
+    function _igStandaloneTunnel() {
+        var s = '';
+        // Row 0: LAN
+        s += _igBlock(CL, RY[0], BW, BH, 'external', 'igLan', 'igTipLan');
+        s += _igArrow(_clc(), RY[0]+BH, _clc(), RY[1]);
+
+        // Row 1: Manual Config + Routing (manual)
+        s += _igBlock(CL, RY[1], BW, BH, 'manual', 'igManualConfig', 'igTipManualConfig');
+        s += _igBlock(CR, RY[1], BW, BH, 'routing', 'igRouting', 'igTipRoutingTunnel');
+        s += _igArrow(_clc(), RY[1]+BH, _clc(), RY[2]);
+        s += _igArrow(_crc(), RY[1]+BH, _crc(), RY[2]);
+
+        // Row 2: Firewall + WireGuard
+        s += _igBlock(CL, RY[2], BW, BH, 'firewall', 'igFirewall', 'igTipFirewall');
+        s += _igBlock(CR, RY[2], BW, BH, 'wireguard', 'igWireguard', 'igTipWireguard');
+
+        // Row 3: Internet (WAN) + Standalone
+        s += _igBlock(CL, RY[3], BW, BH, 'external', 'igInternetWan', 'igTipInternetWan');
+        s += _igBlock(CR, RY[3], BW, BH, 'container', 'igStandalone', 'igTipStandalone');
+        s += _igArrow(_clc(), RY[2]+BH, _clc(), RY[3]);
+        s += _igArrow(_crc(), RY[2]+BH, _crc(), RY[3]);
+
+        // Row 4: AWG Server
+        s += _igBlock(CR, RY[4], BW, BH, 'external', 'igAwgServer', 'igTipAwgServer');
+        s += _igArrow(_crc(), RY[3]+BH, _crc(), RY[4]);
+
+        return _igSvg(CR+BW+10, RY[4]+BH+10, s);
+    }
+
+    // --- Standalone + non-ru ---
+    function _igStandaloneNonRu() {
+        var s = '';
+        var EX = 10, EW = 130;
+        var ML = EX + EW + 20, MR = ML + BW + 50;
+        var mlc = ML + BW/2, mrc = MR + BW/2;
+
+        // Row 0: LAN
+        s += _igBlock(ML, RY[0], BW, BH, 'external', 'igLan', 'igTipLan');
+        s += _igArrow(mlc, RY[0]+BH, mlc, RY[1]);
+
+        // RU List + Scheduler left of Mangle
+        s += _igBlock(EX, RY[0], EW, BH, 'scheduler', 'igScheduler', 'igTipScheduler');
+        s += _igBlock(EX, RY[1], EW, BH, 'rulist', 'igRuList', 'igTipRuList');
+        s += _igArrow(EX+EW/2, RY[0]+BH, EX+EW/2, RY[1]);
+        s += _igArrow(EX+EW, RY[1]+BH/2, ML, RY[1]+BH/2, true);
+
+        // Row 1: Mangle + Routing
+        s += _igBlock(ML, RY[1], BW, BH, 'mangle', 'igMangle', 'igTipMangleNonRu');
+        s += _igBlock(MR, RY[1], BW, BH, 'routing', 'igRouting', 'igTipRouting');
+        s += _igArrow(ML+BW, RY[1]+BH/2, MR, RY[1]+BH/2);
+
+        // Row 2: Firewall + WireGuard
+        s += _igBlock(ML, RY[2], BW, BH, 'firewall', 'igFirewall', 'igTipFirewall');
+        s += _igBlock(MR, RY[2], BW, BH, 'wireguard', 'igWireguard', 'igTipWireguard');
+        s += _igArrow(mlc, RY[1]+BH, mlc, RY[2]);
+        s += _igArrow(mrc, RY[1]+BH, mrc, RY[2]);
+
+        // Row 3: Internet (WAN) + Standalone
+        s += _igBlock(ML, RY[3], BW, BH, 'external', 'igInternetWan', 'igTipInternetWan');
+        s += _igBlock(MR, RY[3], BW, BH, 'container', 'igStandalone', 'igTipStandalone');
+        s += _igArrow(mlc, RY[2]+BH, mlc, RY[3]);
+        s += _igArrow(mrc, RY[2]+BH, mrc, RY[3]);
+
+        // Row 4: AWG Server
+        s += _igBlock(MR, RY[4], BW, BH, 'external', 'igAwgServer', 'igTipAwgServer');
+        s += _igArrow(mrc, RY[3]+BH, mrc, RY[4]);
+
+        return _igSvg(MR+BW+10, RY[4]+BH+10, s);
+    }
+
+    // --- Site-to-Site ---
+    function _igSiteToSite() {
+        var s = '';
+        var tc = _igDark() ? '#e5e7eb' : '#1f2937';
+        var SY = [24, 84, 144, 204, 264, 334];  // 6 rows: last = Internet
+        var bw = 150, bh = 40, gap = 20;
+        var ax = 10, ac = ax + bw/2;             // Side A
+        var bx = ax + bw + gap, bc = bx + bw/2;  // Side B
+        var totalW = bx + bw + 10;
+
+        // Side A (client)
+        s += '<text x="'+ac+'" y="14" text-anchor="middle" font-size="13" font-weight="700" fill="'+tc+'">' + _igEsc(t('igRouterA')) + '</text>';
+        s += _igBlock(ax, SY[0], bw, bh, 'external', 'igLan', 'igTipLan');
+        s += _igArrow(ac, SY[0]+bh, ac, SY[1], false, true);
+        s += _igBlock(ax, SY[1], bw, bh, 'routing', 'igRouting', 'igTipRoutingS2S');
+        s += _igArrow(ac, SY[1]+bh, ac, SY[2], false, true);
+        s += _igBlock(ax, SY[2], bw, bh, 'firewall', 'igFirewall', 'igTipFirewall');
+        s += _igArrow(ac, SY[2]+bh, ac, SY[3], false, true);
+        s += _igBlock(ax, SY[3], bw, bh, 'wireguard', 'igWireguard', 'igTipWireguard');
+        s += _igArrow(ac, SY[3]+bh, ac, SY[4], false, true);
+        s += _igBlock(ax, SY[4], bw, bh, 'container', 'igContainerClient', 'igTipContainer');
+
+        // Side B (server)
+        s += '<text x="'+bc+'" y="14" text-anchor="middle" font-size="13" font-weight="700" fill="'+tc+'">' + _igEsc(t('igRouterB')) + '</text>';
+        s += _igBlock(bx, SY[0], bw, bh, 'external', 'igLan', 'igTipLan');
+        s += _igArrow(bc, SY[0]+bh, bc, SY[1], false, true);
+        s += _igBlock(bx, SY[1], bw, bh, 'routing', 'igRouting', 'igTipRoutingS2S');
+        s += _igArrow(bc, SY[1]+bh, bc, SY[2], false, true);
+        s += _igBlock(bx, SY[2], bw, bh, 'firewall', 'igFirewall', 'igTipFirewallS2S');
+        s += _igArrow(bc, SY[2]+bh, bc, SY[3], false, true);
+        s += _igBlock(bx, SY[3], bw, bh, 'wireguard', 'igWireguard', 'igTipWireguard');
+        s += _igArrow(bc, SY[3]+bh, bc, SY[4], false, true);
+        s += _igBlock(bx, SY[4], bw, bh, 'container', 'igContainerServer', 'igTipContainer');
+
+        // Internet below both containers — 2 arrows down
+        var iw = 180;
+        var ix = (totalW - iw) / 2;
+        s += _igBlock(ix, SY[5], iw, bh, 'external', 'igInternet', 'igTipInternet');
+        s += _igArrow(ac, SY[4]+bh, ix+iw/2-40, SY[5]);                    // Client -> Internet
+        s += _igArrow(bc, SY[4]+bh, ix+iw/2+40, SY[5]);                    // Server -> Internet
+
+        return _igSvg(totalW, SY[5]+bh+10, s);
+    }
+
+    // --- Server (1:N Hub) ---
+    function _igServerHub() {
+        var s = '';
+        var tc = _igDark() ? '#e5e7eb' : '#1f2937';
+        var SY = [24, 84, 144, 204, 264, 334];  // 6 rows: last = Internet
+        var bw = 140, bh = 40, gap = 20;
+
+        // 3 columns: Server | Client#1 | Client#2
+        var sx = 10;                         // server x
+        var sc = sx + bw/2;                  // server center
+        var c1x = sx + bw + gap;             // client 1 x
+        var c1c = c1x + bw/2;               // client 1 center
+        var c2x = c1x + bw + gap;            // client 2 x
+        var c2c = c2x + bw/2;               // client 2 center
+        var totalW = c2x + bw + 10;
+
+        // Server (hub)
+        s += '<text x="'+sc+'" y="14" text-anchor="middle" font-size="13" font-weight="700" fill="'+tc+'">' + _igEsc(t('igServerHub')) + '</text>';
+        s += _igBlock(sx, SY[0], bw, bh, 'external', 'igLan', 'igTipLan');
+        s += _igArrow(sc, SY[0]+bh, sc, SY[1], false, true);
+        s += _igBlock(sx, SY[1], bw, bh, 'routing', 'igRouting', 'igTipRoutingSrv');
+        s += _igArrow(sc, SY[1]+bh, sc, SY[2], false, true);
+        s += _igBlock(sx, SY[2], bw, bh, 'firewall', 'igFirewall', 'igTipFirewallSrv');
+        s += _igArrow(sc, SY[2]+bh, sc, SY[3], false, true);
+        s += _igBlock(sx, SY[3], bw, bh, 'wireguard', 'igWireguard', 'igTipWireguard');
+        s += _igArrow(sc, SY[3]+bh, sc, SY[4], false, true);
+        s += _igBlock(sx, SY[4], bw, bh, 'container', 'igContainerServer', 'igTipContainer');
+
+        // Client #1
+        s += '<text x="'+c1c+'" y="14" text-anchor="middle" font-size="13" font-weight="700" fill="'+tc+'">' + _igEsc(t('igClientN')) + '</text>';
+        s += _igBlock(c1x, SY[0], bw, bh, 'external', 'igLan', 'igTipLan');
+        s += _igArrow(c1c, SY[0]+bh, c1c, SY[1], false, true);
+        s += _igBlock(c1x, SY[1], bw, bh, 'routing', 'igRouting', 'igTipRoutingS2S');
+        s += _igArrow(c1c, SY[1]+bh, c1c, SY[2], false, true);
+        s += _igBlock(c1x, SY[2], bw, bh, 'firewall', 'igFirewall', 'igTipFirewall');
+        s += _igArrow(c1c, SY[2]+bh, c1c, SY[3], false, true);
+        s += _igBlock(c1x, SY[3], bw, bh, 'wireguard', 'igWireguard', 'igTipWireguard');
+        s += _igArrow(c1c, SY[3]+bh, c1c, SY[4], false, true);
+        s += _igBlock(c1x, SY[4], bw, bh, 'container', 'igContainerClient', 'igTipContainer');
+
+        // Client #2
+        s += '<text x="'+c2c+'" y="14" text-anchor="middle" font-size="12" font-weight="700" fill="'+tc+'">' + _igEsc(t('igClient2')) + '</text>';
+        s += _igBlock(c2x, SY[0], bw, bh, 'external', 'igLan', 'igTipLan');
+        s += _igArrow(c2c, SY[0]+bh, c2c, SY[1], false, true);
+        s += _igBlock(c2x, SY[1], bw, bh, 'routing', 'igRouting', 'igTipRoutingS2S');
+        s += _igArrow(c2c, SY[1]+bh, c2c, SY[2], false, true);
+        s += _igBlock(c2x, SY[2], bw, bh, 'firewall', 'igFirewall', 'igTipFirewall');
+        s += _igArrow(c2c, SY[2]+bh, c2c, SY[3], false, true);
+        s += _igBlock(c2x, SY[3], bw, bh, 'wireguard', 'igWireguard', 'igTipWireguard');
+        s += _igArrow(c2c, SY[3]+bh, c2c, SY[4], false, true);
+        s += _igBlock(c2x, SY[4], bw, bh, 'container', 'igContainerClient', 'igTipContainer');
+
+        // Internet below all containers — 3 arrows down to it
+        var iw = 200;
+        var ix = (totalW - iw) / 2;          // centered
+        s += _igBlock(ix, SY[5], iw, bh, 'external', 'igInternet', 'igTipInternet');
+        s += _igArrow(sc, SY[4]+bh, ix+iw/2-60, SY[5]);                    // Server -> Internet
+        s += _igArrow(c1c, SY[4]+bh, ix+iw/2, SY[5]);                     // Client 1 -> Internet
+        s += _igArrow(c2c, SY[4]+bh, ix+iw/2+60, SY[5]);                  // Client 2 -> Internet
+
+        return _igSvg(totalW, SY[5]+bh+10, s);
+    }
+
+    // Tooltip: click to pin, click outside to dismiss
+    var _igPinned = null; // currently pinned block element
+    function _igShowTip(tip, block) {
+        var text = block.getAttribute('data-tip');
+        if (!text) return;
+        tip.innerHTML = _igFormatTip(text);
+        tip.classList.add('visible');
+        var r = block.getBoundingClientRect();
+        var left = r.left + r.width/2 - tip.offsetWidth/2;
+        left = Math.max(8, Math.min(left, window.innerWidth - tip.offsetWidth - 8));
+        tip.style.left = left + 'px';
+        var tipH = tip.offsetHeight;
+        var topAbove = r.top - tipH - 10;
+        if (topAbove >= 8) {
+            tip.style.top = topAbove + 'px';
+            tip.classList.add('above');
+            tip.classList.remove('below');
+        } else {
+            tip.style.top = (r.bottom + 10) + 'px';
+            tip.classList.remove('above');
+            tip.classList.add('below');
+        }
+        var arrowLeft = r.left + r.width/2 - left;
+        arrowLeft = Math.max(16, Math.min(arrowLeft, tip.offsetWidth - 16));
+        tip.style.setProperty('--arrow-left', arrowLeft + 'px');
+    }
+    function _igHideTip() {
+        var tip = document.getElementById('ig-tip');
+        if (tip) tip.classList.remove('visible');
+        _igPinned = null;
+    }
+    function _igBindTooltips(container) {
+        var tip = document.getElementById('ig-tip');
+        if (!tip) {
+            tip = document.createElement('div');
+            tip.id = 'ig-tip';
+            document.body.appendChild(tip);
+        }
+        var blocks = container.querySelectorAll('.ig-block');
+        for (var i = 0; i < blocks.length; i++) {
+            // Hover: show only if nothing is pinned
+            blocks[i].addEventListener('mouseenter', function() {
+                if (_igPinned) return;
+                _igShowTip(tip, this);
+            });
+            blocks[i].addEventListener('mouseleave', function() {
+                if (_igPinned) return;
+                tip.classList.remove('visible');
+            });
+            // Click: pin tooltip
+            blocks[i].addEventListener('click', function(e) {
+                e.stopPropagation();
+                if (_igPinned === this) { _igHideTip(); return; }
+                _igPinned = this;
+                _igShowTip(tip, this);
+            });
+        }
+        // Click outside dismisses pinned tooltip
+        document.addEventListener('click', function(e) {
+            if (!_igPinned) return;
+            if (tip.contains(e.target)) return;
+            _igHideTip();
+        });
+    }
+
+    function _igRefresh() {
+        var wrap = document.getElementById('infographic-container');
+        if (!wrap || !RY || !RY.length) return;
+        var svg = buildInfographic();
+        wrap.innerHTML = '<div class="infographic-wrap"><div class="ig-title" data-i18n="igTitle">' + t('igTitle') + '</div>' + svg + '</div>';
+        _igBindTooltips(wrap);
+    }
+
+    function buildInfographic() {
+        var mode = getDeployMode();
+        var scenario = getScenario();
+        if (mode === 'site-to-site') return _igSiteToSite();
+        if (mode === 'server') return _igServerHub();
+        if (mode === 'standalone') {
+            if (scenario === 'dns-fwd') return _igStandaloneDns();
+            if (scenario === 'non-ru') return _igStandaloneNonRu();
+            return _igStandaloneTunnel();
+        }
+        if (scenario === 'dns-fwd') return _igContainerDns();
+        if (scenario === 'non-ru') return _igContainerNonRu();
+        return _igContainerTunnel();
+    }
+
+    // Initial infographic render (after all constants are defined)
+    _igRefresh();
 </script>
 </body>
 </html>

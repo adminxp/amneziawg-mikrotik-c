@@ -135,6 +135,7 @@ Or download directly on the router (replace URL with the actual one):
     preshared-key="YOUR_PRESHARED_KEY" endpoint-address=172.18.0.2 endpoint-port=51820 \
     allowed-address=0.0.0.0/0 persistent-keepalive=25
 /ip/address/add address=YOUR_TUNNEL_IP interface=wg-awg-proxy
+/ip/firewall/nat/add chain=srcnat action=masquerade out-interface=wg-awg-proxy
 ```
 
 Replace:
