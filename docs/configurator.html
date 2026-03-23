@@ -974,7 +974,7 @@
             btnCopyUn: 'Copy uninstall',
             footer: 'Works entirely offline \u2014 no data leaves your browser.',
             errEmpty: 'Configuration field is empty. Paste the contents of your .conf file.',
-            errPrefix: 'Invalid tunnel prefix: only letters, digits, and hyphens allowed (1-30 chars, cannot start/end with hyphen).',
+            errPrefix: 'Invalid tunnel prefix: only letters, digits, hyphens and underscores allowed (1-30 chars, cannot start/end with hyphen).',
             errProxyIp: 'Invalid proxy device IP address.',
             errTitle: 'Errors:',
             ifaceSec: '[Interface] section',
@@ -1139,7 +1139,7 @@
             btnCopyUn: '\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c',
             footer: '\u0420\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u043f\u043e\u043b\u043d\u043e\u0441\u0442\u044c\u044e \u043e\u0444\u043b\u0430\u0439\u043d \u2014 \u0434\u0430\u043d\u043d\u044b\u0435 \u043d\u0435 \u043f\u043e\u043a\u0438\u0434\u0430\u044e\u0442 \u0432\u0430\u0448 \u0431\u0440\u0430\u0443\u0437\u0435\u0440.',
             errEmpty: '\u041f\u043e\u043b\u0435 \u043a\u043e\u043d\u0444\u0438\u0433\u0443\u0440\u0430\u0446\u0438\u0438 \u043f\u0443\u0441\u0442\u043e\u0435. \u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0435 .conf \u0444\u0430\u0439\u043b\u0430.',
-            errPrefix: '\u041d\u0435\u0434\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u044b\u0439 \u043f\u0440\u0435\u0444\u0438\u043a\u0441: \u0442\u043e\u043b\u044c\u043a\u043e \u0431\u0443\u043a\u0432\u044b, \u0446\u0438\u0444\u0440\u044b \u0438 \u0434\u0435\u0444\u0438\u0441\u044b (1-30 \u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432, \u043d\u0435 \u043c\u043e\u0436\u0435\u0442 \u043d\u0430\u0447\u0438\u043d\u0430\u0442\u044c\u0441\u044f/\u0437\u0430\u043a\u0430\u043d\u0447\u0438\u0432\u0430\u0442\u044c\u0441\u044f \u0434\u0435\u0444\u0438\u0441\u043e\u043c).',
+            errPrefix: '\u041d\u0435\u0434\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u044b\u0439 \u043f\u0440\u0435\u0444\u0438\u043a\u0441: \u0442\u043e\u043b\u044c\u043a\u043e \u0431\u0443\u043a\u0432\u044b, \u0446\u0438\u0444\u0440\u044b, \u0434\u0435\u0444\u0438\u0441\u044b \u0438 \u043f\u043e\u0434\u0447\u0451\u0440\u043a\u0438\u0432\u0430\u043d\u0438\u044f (1-30 \u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432, \u043d\u0435 \u043c\u043e\u0436\u0435\u0442 \u043d\u0430\u0447\u0438\u043d\u0430\u0442\u044c\u0441\u044f/\u0437\u0430\u043a\u0430\u043d\u0447\u0438\u0432\u0430\u0442\u044c\u0441\u044f \u0434\u0435\u0444\u0438\u0441\u043e\u043c).',
             errProxyIp: '\u041d\u0435\u0434\u043e\u043f\u0443\u0441\u0442\u0438\u043c\u044b\u0439 IP-\u0430\u0434\u0440\u0435\u0441 \u043f\u0440\u043e\u043a\u0441\u0438-\u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0430.',
             errTitle: '\u041e\u0448\u0438\u0431\u043a\u0438:',
             ifaceSec: '\u0421\u0435\u043a\u0446\u0438\u044f [Interface]',
@@ -1575,6 +1575,29 @@
             if (!peer[k]) errors.push('[Peer] ' + k + ' -- missing');
         });
         if (errors.length > 0) return errors;
+
+        // Normalize Address: filter out IPv6, default mask /32
+        if (iface.Address) {
+            var addrParts = iface.Address.split(/\s*,\s*/);
+            var ipv4Addr = '';
+            for (var ai = 0; ai < addrParts.length; ai++) {
+                var ap = addrParts[ai].trim();
+                if (ap && ap.indexOf(':') < 0) { ipv4Addr = ap; break; }
+            }
+            if (ipv4Addr && ipv4Addr.indexOf('/') < 0) ipv4Addr += '/32';
+            iface.Address = ipv4Addr;
+        }
+
+        // Normalize DNS: filter out IPv6 addresses
+        if (iface.DNS) {
+            var dnsParts = iface.DNS.split(/\s*,\s*/);
+            var ipv4Dns = [];
+            for (var di = 0; di < dnsParts.length; di++) {
+                var dp = dnsParts[di].trim();
+                if (dp && dp.indexOf(':') < 0) ipv4Dns.push(dp);
+            }
+            iface.DNS = ipv4Dns.join(', ');
+        }
 
         // Format validation
         if (!isValidBase64Key(iface.PrivateKey))
@@ -3863,7 +3886,7 @@
         }
 
         var prefix = getPrefixName();
-        if (!(/^[a-zA-Z0-9]$/.test(prefix) || /^[a-zA-Z0-9][a-zA-Z0-9-]{0,28}[a-zA-Z0-9]$/.test(prefix))) {
+        if (!(/^[a-zA-Z0-9]$/.test(prefix) || /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,28}[a-zA-Z0-9]$/.test(prefix))) {
             showError(t('errPrefix'));
             return;
         }
