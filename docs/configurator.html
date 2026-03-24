@@ -1713,6 +1713,37 @@
         {addr:'77.88.8.1', comment:'DNS Yandex', name:'common.dot.dns.yandex.net'}
     ];
 
+    // Map DNS server IPs to DoH forwarder names for auto-detection
+    var DNS_IP_TO_DOH = {
+        '8.8.8.8':'GoogleDNS', '8.8.4.4':'GoogleDNS',
+        '1.1.1.1':'CloudFlare', '1.0.0.1':'CloudFlare',
+        '195.133.25.16':'Comss',
+        '9.9.9.9':'Quad9', '149.112.112.112':'Quad9',
+        '77.88.8.8':'Yandex', '77.88.8.1':'Yandex'
+    };
+
+    function detectDohFromDns(dnsString) {
+        var servers = parseDNSServers(dnsString);
+        for (var i = 0; i < servers.length; i++) {
+            var name = DNS_IP_TO_DOH[servers[i]];
+            if (name) return name;
+        }
+        return null;
+    }
+
+    function autoSelectDoh(dnsString) {
+        var detected = detectDohFromDns(dnsString);
+        if (!detected) return;
+        var radios = document.getElementsByName('doh-fwd');
+        for (var i = 0; i < radios.length; i++) {
+            if (radios[i].value === detected) {
+                radios[i].checked = true;
+                document.getElementById('doh-custom-url').style.display = 'none';
+                break;
+            }
+        }
+    }
+
     // ============================================================
     // Scenario helpers
     // ============================================================
@@ -3868,6 +3899,9 @@
 
         var parsed = parseConf(text);
         var errors = validate(parsed);
+
+        // Auto-select DoH forwarder based on DNS servers in config
+        if (parsed.interface.DNS) autoSelectDoh(parsed.interface.DNS);
 
         var has = Object.keys(parsed.interface).length > 0 || Object.keys(parsed.peer).length > 0;
         if (has) {
