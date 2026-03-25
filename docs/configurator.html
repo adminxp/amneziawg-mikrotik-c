@@ -1829,11 +1829,11 @@
             var domains = [];
             for (var j = 0; j < svc.d.length; j++) domains.push('"' + svc.d[j] + '"');
             lines.push(':foreach d in={' + domains.join(';') + '} do={');
-            lines.push('  /ip/dns/static/add address-list=' + svc.list + ' forward-to=' + forwarderName + ' match-subdomain=yes type=FWD name=$d comment=' + prefix + '-dns-fwd');
+            lines.push('  :do { /ip/dns/static/add address-list=' + svc.list + ' forward-to=' + forwarderName + ' match-subdomain=yes type=FWD name=$d comment=' + prefix + '-dns-fwd } on-error={}');
             lines.push('}');
             if (svc.r) {
                 for (var j = 0; j < svc.r.length; j++) {
-                    lines.push('/ip/dns/static/add address-list=' + svc.list + ' forward-to=' + forwarderName + ' type=FWD regexp=' + svc.r[j] + ' comment=' + prefix + '-dns-fwd');
+                    lines.push(':do { /ip/dns/static/add address-list=' + svc.list + ' forward-to=' + forwarderName + ' type=FWD regexp=' + svc.r[j] + ' comment=' + prefix + '-dns-fwd } on-error={}');
                 }
             }
         }
@@ -1850,15 +1850,15 @@
 
     function buildFasttrackRestore(prefix) {
         return [
-            '  :foreach rule in=[/ip/firewall/filter/find where comment~"ft-modified-by-' + prefix + '"] do={',
-            '    :local c [/ip/firewall/filter/get $rule comment]',
-            '    :local origComment [:pick $c ([:find $c "|"] + 1) [:len $c]]',
-            '    /ip/firewall/filter/set $rule out-interface-list="" comment=$origComment',
-            '  }',
             '  :foreach rule in=[/ip/firewall/filter/find where comment~"disabled-by-' + prefix + '"] do={',
             '    :local c [/ip/firewall/filter/get $rule comment]',
             '    :local origComment [:pick $c ([:find $c "|"] + 1) [:len $c]]',
             '    /ip/firewall/filter/set $rule disabled=no comment=$origComment',
+            '  }',
+            '  :foreach rule in=[/ip/firewall/filter/find where comment~"ft-modified-by-' + prefix + '"] do={',
+            '    :local c [/ip/firewall/filter/get $rule comment]',
+            '    :local origComment [:pick $c ([:find $c "|"] + 1) [:len $c]]',
+            '    /ip/firewall/filter/set $rule out-interface-list="" comment=$origComment',
             '  }'
         ];
     }
@@ -1904,12 +1904,12 @@
             if (statics.length > 0) {
                 lines.push('# DNS static entries for DoH resolver IPs');
                 for (var i = 0; i < statics.length; i++) {
-                    lines.push('/ip/dns/static/add address=' + statics[i].addr + ' comment="' + prefix + '-dns-fwd" name=' + statics[i].name + ' type=A');
+                    lines.push(':do { /ip/dns/static/add address=' + statics[i].addr + ' comment="' + prefix + '-dns-fwd" name=' + statics[i].name + ' type=A } on-error={}');
                 }
             }
         } else {
             lines.push('# Custom DNS static entry');
-            lines.push('/ip/dns/static/add address=' + fwd.addr + ' comment="' + prefix + '-dns-fwd" name=' + fwd.name + ' type=A');
+            lines.push(':do { /ip/dns/static/add address=' + fwd.addr + ' comment="' + prefix + '-dns-fwd" name=' + fwd.name + ' type=A } on-error={}');
         }
         var fwdName = fwd.name;
         lines.push('# FWD entries');
@@ -1941,52 +1941,15 @@
         return lines;
     }
 
-    function buildNonRuScenario(prefix, exclusionKeys, forwarderName, storageDisk, serverHost) {
+    function buildNonRuScenario(prefix, exclusionKeys, forwarderName, serverHost) {
         var fwd = getDohForwarderInfo(forwarderName);
         var lines = [];
         lines.push('');
         lines.push('# ============================================================');
         lines.push('# Route all non-RU traffic through tunnel');
         lines.push('# ============================================================');
-        lines.push('');
-        lines.push('# RU address-list update script');
-        lines.push('/system/script/add name=' + prefix + '-update-ru policy=read,write,test,ftp comment=' + prefix + '-ru source={');
-        lines.push('  :local url "' + REPO.dl + 'ru_ranges.rsc"');
-        if (storageDisk === '__auto') {
-            lines.push('  :local awgDisk "disk1"');
-            lines.push('  :do { :set awgDisk [/container/envs/get [find where list="' + prefix + '-env" key="AWG_STORAGE"] value] } on-error={}');
-            lines.push('  :local fileName ($awgDisk . "/ru_ranges.rsc")');
-        } else if (storageDisk === 'disk1') {
-            lines.push('  :local fileName "ru_ranges.rsc"');
-        } else {
-            lines.push('  :local fileName "' + storageDisk + '/ru_ranges.rsc"');
-        }
-        lines.push('  :do { /tool/fetch url=$url dst-path=$fileName mode=https http-header-field="User-Agent: MikroTik" http-max-redirect-count=10');
-        lines.push('  } on-error={ :log error "RU list: fetch failed"; :error "fetch failed" }');
-        lines.push('  :delay 2s');
-        lines.push('  :local fileSize [/file get [find name=$fileName] size]');
-        lines.push('  :if ($fileSize < 400000 || $fileSize > 2000000) do={');
-        lines.push('    :log error ("RU list: bad file size " . $fileSize); /file remove $fileName; :error "bad file size" }');
-        lines.push('  :local oldRu [/ip firewall address-list print count-only where list=RU and comment=RIPE-RU]');
-        lines.push('  :local snap {\"u\"=[/user print count-only];\"f\"=[/ip firewall filter print count-only];\"n\"=[/ip firewall nat print count-only];\"m\"=[/ip firewall mangle print count-only];\"s\"=[/system script print count-only];\"c\"=[/system scheduler print count-only]}');
-        lines.push('  /ip firewall address-list remove [find where list=RU and comment=RIPE-RU]');
-        lines.push('  :do { /import file=$fileName } on-error={ :log error "RU list: import failed"; /file remove $fileName; :error "import failed" }');
-        lines.push('  :local safe true');
-        lines.push('  :local newRu [/ip firewall address-list print count-only where list=RU and comment=RIPE-RU]');
-        lines.push('  :if ($newRu < 1000) do={ :log error ("RU list: too few: " . $newRu); :set safe false }');
-        lines.push('  :if ([/user print count-only] != ($snap->"u")) do={ :log error "RU list: user count changed"; :set safe false }');
-        lines.push('  :if ([/ip firewall filter print count-only] != ($snap->"f")) do={ :log error "RU list: filter changed"; :set safe false }');
-        lines.push('  :if ([/ip firewall nat print count-only] != ($snap->"n")) do={ :log error "RU list: NAT changed"; :set safe false }');
-        lines.push('  :if ([/ip firewall mangle print count-only] != ($snap->"m")) do={ :log error "RU list: mangle changed"; :set safe false }');
-        lines.push('  :if ([/system script print count-only] != ($snap->"s")) do={ :log error "RU list: scripts changed"; :set safe false }');
-        lines.push('  :if ([/system scheduler print count-only] != ($snap->"c")) do={ :log error "RU list: schedulers changed"; :set safe false }');
-        lines.push('  /file remove $fileName');
-        lines.push('  :if (!$safe) do={ :log error "RU list: TAMPERING DETECTED"; :error "tampering" }');
-        lines.push('  :log info ("RU list: " . $oldRu . " -> " . $newRu . " entries")');
-        lines.push('}');
-        lines.push('/system/scheduler/add name=' + prefix + '-update-ru interval=1d start-time=04:05:00 on-event="/system/script/run ' + prefix + '-update-ru" policy=read,write,test,ftp comment=' + prefix + '-ru');
 
-        // DNS forwarder + statics (always needed for DoH bootstrap in non-RU scenario)
+        // DNS forwarder + statics (needed for DoH bootstrap in non-RU scenario)
         lines.push('{');
         if (fwd.isDoH) {
             lines.push('# DoH forwarder');
@@ -1995,12 +1958,12 @@
             if (statics.length > 0) {
                 lines.push('# DNS static entries for DoH resolver IPs');
                 for (var i = 0; i < statics.length; i++) {
-                    lines.push('/ip/dns/static/add address=' + statics[i].addr + ' comment="' + prefix + '-dns-fwd" name=' + statics[i].name + ' type=A');
+                    lines.push(':do { /ip/dns/static/add address=' + statics[i].addr + ' comment="' + prefix + '-dns-fwd" name=' + statics[i].name + ' type=A } on-error={}');
                 }
             }
         } else {
             lines.push('# Custom DNS static entry');
-            lines.push('/ip/dns/static/add address=' + fwd.addr + ' comment="' + prefix + '-dns-fwd" name=' + fwd.name + ' type=A');
+            lines.push(':do { /ip/dns/static/add address=' + fwd.addr + ' comment="' + prefix + '-dns-fwd" name=' + fwd.name + ' type=A } on-error={}');
         }
         if (exclusionKeys.length > 0) {
             lines.push('# FWD entries for exclusions');
@@ -2014,42 +1977,35 @@
         lines.push('  }');
         lines.push('}');
 
-        if (exclusionKeys.length > 0) {
-            var exListNames = [];
-            for (var i = 0; i < exclusionKeys.length; i++) {
-                var ex = EXCLUSIONS[exclusionKeys[i]];
-                if (ex) exListNames.push('"' + ex.list + '"');
-            }
-            lines.push('# Accept excluded services');
-            lines.push(':foreach l in={' + exListNames.join(';') + '} do={');
-            lines.push('  /ip/firewall/mangle/add chain=prerouting action=accept dst-address-list=$l in-interface-list=LAN comment=' + prefix + '-non-ru');
-            lines.push('}');
-        }
-
         if (serverHost) {
             lines.push('# Accept AWG server (direct, prevent routing loop)');
-            lines.push('/ip/firewall/address-list/add address=' + serverHost + ' list=' + prefix + '-vpn-server comment=' + prefix + '-non-ru');
+            lines.push(':do { /ip/firewall/address-list/add address=' + serverHost + ' list=' + prefix + '-vpn-server comment=' + prefix + '-non-ru } on-error={}');
             lines.push('/ip/firewall/mangle/add chain=prerouting action=accept dst-address-list=' + prefix + '-vpn-server in-interface-list=LAN comment=' + prefix + '-non-ru');
         }
         lines.push('# Policy routing');
         lines = lines.concat(buildPolicyRouting(prefix, prefix + '-non-ru-table', prefix + '-non-ru'));
-        lines.push('# Mark everything else for tunnel');
-        lines.push('/ip/firewall/mangle/add chain=prerouting action=mark-routing new-routing-mark=' + prefix + '-non-ru-table connection-mark=no-mark in-interface-list=LAN passthrough=no comment=' + prefix + '-non-ru');
+        lines.push('# Mark non-RU traffic for tunnel');
+        lines.push('/ip/firewall/mangle/add chain=prerouting action=mark-routing new-routing-mark=' + prefix + '-non-ru-table dst-address-list=!RU in-interface-list=LAN passthrough=no comment=' + prefix + '-non-ru');
         lines.push('# MSS clamp for WireGuard (MTU 1420)');
         lines.push('/ip/firewall/mangle/add chain=forward action=change-mss new-mss=clamp-to-pmtu passthrough=yes tcp-flags=syn protocol=tcp out-interface=wg-' + prefix + ' comment=' + prefix + '-mss');
         lines.push('/ip/firewall/mangle/add chain=forward action=change-mss new-mss=clamp-to-pmtu passthrough=yes tcp-flags=syn protocol=tcp in-interface=wg-' + prefix + ' comment=' + prefix + '-mss');
-        lines.push('# Configure FastTrack: only for non-VPN traffic (out-interface-list=WAN)');
+        lines.push('# Disable FastTrack (incompatible with policy routing)');
         lines.push(':foreach rule in=[/ip/firewall/filter/find where action=fasttrack-connection] do={');
-        lines.push('  :local curOut [/ip/firewall/filter/get $rule out-interface-list]');
-        lines.push('  :if ($curOut = "") do={');
-        lines.push('    :local origComment [/ip/firewall/filter/get $rule comment]');
-        lines.push('    /ip/firewall/filter/set $rule out-interface-list=WAN disabled=no comment=("ft-modified-by-' + prefix + '|" . $origComment)');
+        lines.push('  :local origComment [/ip/firewall/filter/get $rule comment]');
+        lines.push('  :if ([:find $origComment "disabled-by-"] < 0) do={');
+        lines.push('    /ip/firewall/filter/set $rule disabled=yes comment=("disabled-by-' + prefix + '|" . $origComment)');
         lines.push('  }');
         lines.push('}');
         lines.push('}');
 
-        lines.push('# Download RU address list (may take a while)');
-        lines.push('/system/script/run ' + prefix + '-update-ru');
+        lines.push('# Download RU address list');
+        lines.push(':do {');
+        lines.push('  /tool/fetch url="' + REPO.dl + 'ru_ranges.rsc" dst-path=ru_ranges.rsc mode=https http-header-field="User-Agent: MikroTik" http-max-redirect-count=10');
+        lines.push('  :delay 2s');
+        lines.push('  /import file=ru_ranges.rsc');
+        lines.push('  /file remove ru_ranges.rsc');
+        lines.push('  :log info "RU address list imported"');
+        lines.push('} on-error={ :log error "RU list: download/import failed" }');
 
         return lines;
     }
@@ -3967,9 +3923,8 @@
             if (scenario === 'dns-fwd') {
                 routingCommands = buildDnsRoutingScenario(prefix, selectedServices, dohFwd).join('\n') + '\n';
             } else {
-                var nonRuStorage = (mode === 'standalone') ? 'disk1' : storageDisk;
                 var serverHost = parsed.peer && parsed.peer.Endpoint ? parsed.peer.Endpoint.replace(/:[\d]+$/, '') : '';
-                routingCommands = buildNonRuScenario(prefix, exclusions, dohFwd, nonRuStorage, serverHost).join('\n') + '\n';
+                routingCommands = buildNonRuScenario(prefix, exclusions, dohFwd, serverHost).join('\n') + '\n';
             }
             document.getElementById('routing-output').dataset.plain = routingCommands;
             document.getElementById('routing-output').innerHTML = highlight(routingCommands);
