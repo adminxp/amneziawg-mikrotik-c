@@ -670,6 +670,11 @@
             </div>
             <div id="exclusions-grid" class="checkbox-grid"></div>
         </div>
+        <div id="netwatch-row" style="margin-top:8px">
+            <label><input type="checkbox" id="netwatch-enable" checked>
+            <span data-i18n="netwatchLabel">Netwatch failover</span></label>
+            <div class="hint" data-i18n="netwatchHint">Monitors tunnel availability by pinging 1.1.1.1 through the WG interface. If the tunnel is down, disables its route &mdash; traffic falls back to the next tunnel (by distance) or goes direct. Re-enables the route when the tunnel recovers.</div>
+        </div>
         <div id="storage-row" style="margin-top:14px">
             <label for="storage-select" data-i18n="storageLabel">Container storage</label>
             <select id="storage-select">
@@ -696,6 +701,7 @@
                 <option value="awg-proxy-2" data-i18n="pAwg2">awg-proxy-2 &mdash; 2nd tunnel</option>
                 <option value="awg-proxy-3" data-i18n="pAwg3">awg-proxy-3 &mdash; 3rd tunnel</option>
                 <option value="awg-proxy-4" data-i18n="pAwg4">awg-proxy-4 &mdash; 4th tunnel</option>
+                <option value="awg-proxy-5" data-i18n="pAwg5">awg-proxy-5 &mdash; 5th tunnel</option>
                 <option value="awg-server-1" data-i18n="pHub1" style="display:none">awg-server-1 &mdash; 1st server (default)</option>
                 <option value="awg-server-2" data-i18n="pHub2" style="display:none">awg-server-2 &mdash; 2nd server</option>
                 <option value="__custom" data-i18n="pCustom">Custom...</option>
@@ -992,7 +998,10 @@
             pAwg2: 'awg-proxy-2 \u2014 2nd tunnel',
             pAwg3: 'awg-proxy-3 \u2014 3rd tunnel',
             pAwg4: 'awg-proxy-4 \u2014 4th tunnel',
+            pAwg5: 'awg-proxy-5 \u2014 5th tunnel',
             pCustom: 'Custom...',
+            netwatchLabel: 'Netwatch failover',
+            netwatchHint: 'Monitors tunnel availability by pinging 1.1.1.1 through the WG interface. If the tunnel is down, disables its route \u2014 traffic falls back to the next tunnel (by distance) or goes direct. Re-enables when the tunnel recovers.',
             scenarioLabel: 'Routing scenario',
             scenarioTunnel: 'Tunnel only (manual routes)',
             scenarioDns: 'DNS-based routing for services',
@@ -1157,7 +1166,10 @@
             pAwg2: 'awg-proxy-2 \u2014 2-\u0439 \u0442\u0443\u043d\u043d\u0435\u043b\u044c',
             pAwg3: 'awg-proxy-3 \u2014 3-\u0439 \u0442\u0443\u043d\u043d\u0435\u043b\u044c',
             pAwg4: 'awg-proxy-4 \u2014 4-\u0439 \u0442\u0443\u043d\u043d\u0435\u043b\u044c',
+            pAwg5: 'awg-proxy-5 \u2014 5-\u0439 \u0442\u0443\u043d\u043d\u0435\u043b\u044c',
             pCustom: '\u0414\u0440\u0443\u0433\u043e\u0435...',
+            netwatchLabel: 'Netwatch failover',
+            netwatchHint: '\u041f\u0440\u043e\u0432\u0435\u0440\u044f\u0435\u0442 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0441\u0442\u044c \u0442\u0443\u043d\u043d\u0435\u043b\u044f \u043f\u0438\u043d\u0433\u043e\u043c 1.1.1.1 \u0447\u0435\u0440\u0435\u0437 WG-\u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441. \u0415\u0441\u043b\u0438 \u0442\u0443\u043d\u043d\u0435\u043b\u044c \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u2014 \u043e\u0442\u043a\u043b\u044e\u0447\u0430\u0435\u0442 \u0435\u0433\u043e \u043c\u0430\u0440\u0448\u0440\u0443\u0442, \u0442\u0440\u0430\u0444\u0438\u043a \u043f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0442\u0443\u043d\u043d\u0435\u043b\u044c (\u043f\u043e distance) \u0438\u043b\u0438 \u0438\u0434\u0451\u0442 \u043d\u0430\u043f\u0440\u044f\u043c\u0443\u044e. \u041f\u0440\u0438 \u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0438 \u043c\u0430\u0440\u0448\u0440\u0443\u0442 \u0432\u043a\u043b\u044e\u0447\u0430\u0435\u0442\u0441\u044f \u043e\u0431\u0440\u0430\u0442\u043d\u043e.',
             scenarioLabel: '\u0421\u0446\u0435\u043d\u0430\u0440\u0438\u0439 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438',
             scenarioTunnel: '\u0422\u043e\u043b\u044c\u043a\u043e \u0442\u0443\u043d\u043d\u0435\u043b\u044c (\u0440\u0443\u0447\u043d\u044b\u0435 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u044b)',
             scenarioDns: 'DNS-\u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f \u0434\u043b\u044f \u0441\u0435\u0440\u0432\u0438\u0441\u043e\u0432',
@@ -1764,6 +1776,7 @@
         document.getElementById('exclusions-panel').style.display = s === 'non-ru' ? 'block' : 'none';
         document.getElementById('fasttrack-warn').style.display = (s === 'dns-fwd' || s === 'non-ru') ? 'block' : 'none';
         document.getElementById('non-ru-warn').style.display = s === 'non-ru' ? 'block' : 'none';
+        document.getElementById('netwatch-row').style.display = (s === 'dns-fwd' || s === 'non-ru') ? 'block' : 'none';
         var hintKey = s === 'dns-fwd' ? 'scenarioDnsHint' : s === 'non-ru' ? 'scenarioNonRuHint' : 'scenarioTunnelHint';
         var hintEl = document.getElementById('scenario-hint');
         hintEl.setAttribute('data-i18n', hintKey);
@@ -1840,11 +1853,33 @@
         return lines;
     }
 
+    function getPrefixDistance(prefix) {
+        var map = {
+            'awg-proxy': 1, 'awg-proxy-2': 2, 'awg-proxy-3': 3,
+            'awg-proxy-4': 4, 'awg-proxy-5': 5
+        };
+        return map[prefix] || 1;
+    }
+
+    function buildNetwatch(prefix, commentTag) {
+        var lines = [];
+        lines.push('# Netwatch: auto-failover for ' + prefix);
+        lines.push('{');
+        lines.push(':local wgAddr [/ip/address/get [find where interface=wg-' + prefix + '] address]');
+        lines.push(':set wgAddr [:pick $wgAddr 0 [:find $wgAddr "/"]]');
+        lines.push('/tool/netwatch/add host=1.1.1.1 type=icmp src-address=$wgAddr interval=15s timeout=3s comment=' + commentTag + ' \\');
+        lines.push('  down-script="/ip/route/disable [find where comment=' + commentTag + ' and dst-address=0.0.0.0/0]; :log warning \\"' + prefix + ' tunnel DOWN - route disabled\\"" \\');
+        lines.push('  up-script="/ip/route/enable [find where comment=' + commentTag + ' and dst-address=0.0.0.0/0]; :log info \\"' + prefix + ' tunnel UP - route enabled\\""');
+        lines.push('}');
+        return lines;
+    }
+
     function buildPolicyRouting(prefix, tableName, commentTag) {
+        var distance = getPrefixDistance(prefix);
         return [
             ':do { /routing/table/add name=' + tableName + ' fib comment=' + commentTag + ' } on-error={}',
-            ':do { /ip/route/add dst-address=0.0.0.0/0 gateway=wg-' + prefix + ' routing-table=' + tableName + ' comment=' + commentTag + ' } on-error={}',
-            ':do { /routing/rule/add routing-mark=' + tableName + ' action=lookup-only-in-table table=' + tableName + ' comment=' + commentTag + ' } on-error={}'
+            ':do { /ip/route/add dst-address=0.0.0.0/0 gateway=wg-' + prefix + ' distance=' + distance + ' routing-table=' + tableName + ' comment=' + commentTag + ' } on-error={}',
+            ':do { /routing/rule/add routing-mark=' + tableName + ' action=lookup table=' + tableName + ' comment=' + commentTag + ' } on-error={}'
         ];
     }
 
@@ -1937,6 +1972,9 @@
         lines.push('    /ip/firewall/filter/set $rule out-interface-list=WAN disabled=no comment=("ft-modified-by-' + prefix + '|" . $origComment)');
         lines.push('  }');
         lines.push('}');
+        if (document.getElementById('netwatch-enable').checked) {
+            lines = lines.concat(buildNetwatch(prefix, prefix + '-fwd'));
+        }
         lines.push('}');
         return lines;
     }
@@ -2006,6 +2044,10 @@
         lines.push('  /file remove ru_ranges.rsc');
         lines.push('  :log info "RU address list imported"');
         lines.push('} on-error={ :log error "RU list: download/import failed" }');
+
+        if (document.getElementById('netwatch-enable').checked) {
+            lines = lines.concat(buildNetwatch(prefix, prefix + '-non-ru'));
+        }
 
         return lines;
     }
@@ -2081,6 +2123,7 @@
             src.push('  :do { /ip/firewall/address-list/remove [find where comment~"' + prefix + '-private"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where list="' + prefix + '-vpn-server"] } on-error={}');
             src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
+            src.push('  :do { /tool/netwatch/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
             src = src.concat(buildFasttrackRestore(prefix));
         }
@@ -2161,6 +2204,7 @@
             src.push('  :do { /ip/firewall/address-list/remove [find where comment~"' + prefix + '-private"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where list="' + prefix + '-vpn-server"] } on-error={}');
             src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
+            src.push('  :do { /tool/netwatch/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
             src = src.concat(buildFasttrackRestore(prefix));
         }
@@ -2626,6 +2670,7 @@
             document.getElementById('exclusions-panel').style.display = 'none';
             document.getElementById('fasttrack-warn').style.display = 'none';
             document.getElementById('non-ru-warn').style.display = 'none';
+            document.getElementById('netwatch-row').style.display = 'none';
         } else {
             onScenarioChange();
         }
@@ -4009,6 +4054,7 @@
         document.getElementById('storage-custom').style.display = 'none';
         document.getElementById('storage-custom').value = '';
         document.getElementById('prefix-select').value = 'awg-proxy';
+        document.getElementById('netwatch-enable').checked = true;
         document.getElementById('prefix-custom').style.display = 'none';
         document.getElementById('prefix-custom').value = '';
         document.getElementById('proxy-ip').value = '';
