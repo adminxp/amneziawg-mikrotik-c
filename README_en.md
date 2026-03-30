@@ -815,7 +815,7 @@ If you get `Storage device usb1 not found or has 0 free space` error -- the disk
 If you get `Insufficient disk space` error during container installation and you have free space on an external drive (USB, SD, NVMe) -- reconfigure the image download directory:
 
 ```routeros
-/container/config set tmpdir=usb1/pull ram-high=200M
+/container/config set tmpdir=usb1/pull memory-high=200M
 ```
 
 Replace `usb1` with your drive's mount-point (see `/disk/print`).
@@ -823,7 +823,7 @@ Replace `usb1` with your drive's mount-point (see `/disk/print`).
 After the container is installed, you can revert:
 
 ```routeros
-/container/config set tmpdir="" ram-high=0
+/container/config set tmpdir="" memory-high=0
 ```
 
 If using the configurator -- select the appropriate drive in the "Container storage" field, and tmpdir will be configured automatically.

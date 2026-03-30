@@ -824,7 +824,7 @@ DSTNAT-трафик идёт через `forward` chain, а не `input`. Есл
 Если при установке контейнера возникает ошибка `Insufficient disk space`, а на внешнем накопителе (USB, SD, NVMe) есть свободное место -- перенастройте директорию для загрузки образов:
 
 ```routeros
-/container/config set tmpdir=usb1/pull ram-high=200M
+/container/config set tmpdir=usb1/pull memory-high=200M
 ```
 
 Замените `usb1` на mount-point вашего накопителя (см. `/disk/print`).
@@ -832,7 +832,7 @@ DSTNAT-трафик идёт через `forward` chain, а не `input`. Есл
 После установки контейнера можно вернуть значение обратно:
 
 ```routeros
-/container/config set tmpdir="" ram-high=0
+/container/config set tmpdir="" memory-high=0
 ```
 
 Если используете конфигуратор -- выберите нужный накопитель в поле "Container storage", и tmpdir будет настроен автоматически.

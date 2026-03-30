@@ -2491,12 +2491,12 @@
             lines.push(':if ($awgDisk != "disk1") do={');
             lines.push('  :local tmpPath ($awgDisk . "/pull")');
             lines.push('  /container/envs/add list=' + prefix + '-env key=AWG_PREV_TMPDIR value=[/container/config/get tmpdir]');
-            lines.push('  /container/config set tmpdir=$tmpPath ram-high=200M');
+            lines.push('  /container/config set tmpdir=$tmpPath memory-high=200M');
             lines.push('}');
         } else if (isExternal) {
             lines.push(':local prevTmpdir [/container/config/get tmpdir]');
             lines.push('/container/envs/add list=' + prefix + '-env key=AWG_PREV_TMPDIR value=$prevTmpdir');
-            lines.push('/container/config set tmpdir=' + storageDisk + '/pull ram-high=200M');
+            lines.push('/container/config set tmpdir=' + storageDisk + '/pull memory-high=200M');
         }
         lines = lines.concat([
             '{',
@@ -3916,12 +3916,12 @@
             lines.push(':if ($awgDisk != "disk1") do={');
             lines.push('  :local tmpPath ($awgDisk . "/pull")');
             lines.push('  /container/envs/add list=' + prefix + '-env key=AWG_PREV_TMPDIR value=[/container/config/get tmpdir]');
-            lines.push('  /container/config set tmpdir=$tmpPath ram-high=200M');
+            lines.push('  /container/config set tmpdir=$tmpPath memory-high=200M');
             lines.push('}');
         } else if (isExternal) {
             lines.push(':local prevTmpdir [/container/config/get tmpdir]');
             lines.push('/container/envs/add list=' + prefix + '-env key=AWG_PREV_TMPDIR value=$prevTmpdir');
-            lines.push('/container/config set tmpdir=' + storageDisk + '/pull ram-high=200M');
+            lines.push('/container/config set tmpdir=' + storageDisk + '/pull memory-high=200M');
         }
 
         lines.push('{');
