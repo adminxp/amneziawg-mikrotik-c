@@ -56,6 +56,8 @@ typedef struct {
 } cps_template_t;
 
 /* Config struct */
+#define AWG_MAX_SERVER_PEERS 256
+
 typedef struct {
     int jc, jmin, jmax;
     int s1, s2, s3, s4;
@@ -65,8 +67,11 @@ typedef struct {
 
     uint8_t server_pub[32];
     uint8_t client_pub[32];
+    uint8_t server_peer_pubs[AWG_MAX_SERVER_PEERS][32];
     uint8_t mac1key_server[32];
     uint8_t mac1key_client[32];
+    uint8_t server_peer_mac1keys[AWG_MAX_SERVER_PEERS][32];
+    int server_peer_count;
 
     uint32_t h4_fixed;
     int h4_noop;        /* H4={4,4} && S4==0 */
@@ -106,8 +111,21 @@ uint8_t *transform_outbound(uint8_t *buf, int dataoff, int n,
                              const awg_config_t *cfg, uint64_t rand_val,
                              int *out_len, int *sendJunk);
 
+/* Same as transform_outbound(), but allows overriding the outbound MAC1 key
+ * for handshake packets. Pass NULL to use cfg->mac1key_out. */
+uint8_t *transform_outbound_with_mac1(uint8_t *buf, int dataoff, int n,
+                                      const awg_config_t *cfg,
+                                      const uint8_t *mac1key_out,
+                                      uint64_t rand_val,
+                                      int *out_len, int *sendJunk);
+
 /* Transform inbound AWG->WG. Returns output pointer and length, or NULL if invalid/junk. */
 uint8_t *transform_inbound(uint8_t *buf, int n, const awg_config_t *cfg, int *out_len);
+
+/* In server mode, match an original WireGuard handshake response against the
+ * configured explicit client peer list. Returns peer index or -1 if no match. */
+int config_server_resolve_peer_for_response(const awg_config_t *cfg,
+                                            const uint8_t *wg_resp, int n);
 
 /* Generate junk packets into pre-allocated buffer.
  * junk_buf: buffer of at least jc*jmax bytes (pre-filled with random).

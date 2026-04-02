@@ -14,6 +14,8 @@ void config_compute(awg_config_t *cfg) {
 
     compute_mac1_key(cfg->server_pub, cfg->mac1key_server);
     compute_mac1_key(cfg->client_pub, cfg->mac1key_client);
+    for (int i = 0; i < cfg->server_peer_count; i++)
+        compute_mac1_key(cfg->server_peer_pubs[i], cfg->server_peer_mac1keys[i]);
 
     cfg->h4_fixed = cfg->h4.min;
     cfg->h4_noop = (cfg->h4.min == WG_TRANSPORT_DATA &&
@@ -48,9 +50,13 @@ static inline void write32_le(uint8_t *p, uint32_t v) {
 }
 
 __attribute__((hot))
-uint8_t *transform_outbound(uint8_t *buf, int dataoff, int n,
-                             const awg_config_t *cfg, uint64_t rand_val,
-                             int *out_len, int *sendJunk) {
+uint8_t *transform_outbound_with_mac1(uint8_t *buf, int dataoff, int n,
+                                      const awg_config_t *cfg,
+                                      const uint8_t *mac1key_out,
+                                      uint64_t rand_val,
+                                      int *out_len, int *sendJunk) {
+    const uint8_t *out_key = mac1key_out ? mac1key_out : cfg->mac1key_out;
+
     *sendJunk = 0;
     if (n < 4) {
         *out_len = n;
@@ -62,8 +68,8 @@ uint8_t *transform_outbound(uint8_t *buf, int dataoff, int n,
 
     if (msgType == WG_HANDSHAKE_INIT && n == WG_INIT_SIZE) {
         write32_le(data, hrange_pick(&cfg->h1, rand_val));
-        if (cfg->mac1key_out)
-            recompute_mac1(data, cfg->mac1key_out);
+        if (out_key)
+            recompute_mac1(data, out_key);
         *sendJunk = (cfg->jc > 0);
         if (cfg->s1 > 0) {
             if (dataoff >= cfg->s1) {
@@ -86,8 +92,8 @@ uint8_t *transform_outbound(uint8_t *buf, int dataoff, int n,
 
     if (msgType == WG_HANDSHAKE_RESPONSE && n == WG_RESP_SIZE) {
         write32_le(data, hrange_pick(&cfg->h2, rand_val));
-        if (cfg->mac1key_out)
-            recompute_mac1_response(data, cfg->mac1key_out);
+        if (out_key)
+            recompute_mac1_response(data, out_key);
         if (cfg->s2 > 0) {
             if (dataoff >= cfg->s2) {
                 uint8_t *out = data - cfg->s2;
@@ -147,6 +153,29 @@ uint8_t *transform_outbound(uint8_t *buf, int dataoff, int n,
     /* Unknown, pass through */
     *out_len = n;
     return data;
+}
+
+__attribute__((hot))
+uint8_t *transform_outbound(uint8_t *buf, int dataoff, int n,
+                             const awg_config_t *cfg, uint64_t rand_val,
+                             int *out_len, int *sendJunk) {
+    return transform_outbound_with_mac1(buf, dataoff, n, cfg, NULL,
+                                        rand_val, out_len, sendJunk);
+}
+
+int config_server_resolve_peer_for_response(const awg_config_t *cfg,
+                                            const uint8_t *wg_resp, int n) {
+    uint8_t mac1[16];
+
+    if (!cfg || !wg_resp || n != WG_RESP_SIZE || read32_le(wg_resp) != WG_HANDSHAKE_RESPONSE)
+        return -1;
+
+    for (int i = 0; i < cfg->server_peer_count; i++) {
+        blake2s_128mac(cfg->server_peer_mac1keys[i], wg_resp, 60, mac1);
+        if (memcmp(mac1, wg_resp + 60, 16) == 0)
+            return i;
+    }
+    return -1;
 }
 
 __attribute__((hot))

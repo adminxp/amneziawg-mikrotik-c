@@ -802,37 +802,40 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
 
     /* Determine destination address */
     struct sockaddr_in *dest_addr = NULL;
+    session_entry_t *dest_entry = NULL;
+    uint32_t msg_type = 0;
+    const uint8_t *out_mac1key = NULL;
     if (server_mode) {
         /* Look up by receiver_index based on packet type */
         if (n < 4) return 0;
-        uint32_t msg_type;
         memcpy(&msg_type, pkt, 4);
 
         if (msg_type == WG_TRANSPORT_DATA && n >= WG_TRANSPORT_MIN) {
             /* receiver_index at bytes 4-7 */
             uint32_t recv_idx;
             memcpy(&recv_idx, pkt + 4, 4);
-            dest_addr = session_get(p, recv_idx);
+            dest_entry = session_get_entry(p, recv_idx);
         } else if (msg_type == WG_HANDSHAKE_RESPONSE && n == WG_RESP_SIZE) {
             /* receiver_index at bytes 8-11 */
             uint32_t recv_idx;
             memcpy(&recv_idx, pkt + 8, 4);
-            dest_addr = session_get(p, recv_idx);
+            dest_entry = session_get_entry(p, recv_idx);
         } else if (msg_type == WG_COOKIE_REPLY && n == WG_COOKIE_SIZE) {
             /* receiver_index at bytes 4-7 */
             uint32_t recv_idx;
             memcpy(&recv_idx, pkt + 4, 4);
-            dest_addr = session_get(p, recv_idx);
+            dest_entry = session_get_entry(p, recv_idx);
         } else if (msg_type == WG_HANDSHAKE_INIT && n == WG_INIT_SIZE) {
             /* Server-initiated rekey: no receiver_index, try sole client */
-            dest_addr = session_find_sole_client(p);
-            if (dest_addr)
+            dest_entry = session_find_sole_entry(p);
+            if (dest_entry)
                 log_debug("s2c: server: init routed to sole client");
         }
-        if (!dest_addr) {
+        if (!dest_entry) {
             log_debug("s2c: server: no session for packet, dropping");
             return 0;
         }
+        dest_addr = &dest_entry->addr;
     } else {
         /* reverse 1:1: use single client_addr */
         if (!atomic_load_explicit(&p->has_client, memory_order_acquire)) return 0;
@@ -860,10 +863,25 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
     }
 
     /* Handshake slow path */
+    if (server_mode) {
+        int peer_slot = session_get_peer_slot(dest_entry);
+        if (peer_slot >= 0 && peer_slot < cfg->server_peer_count)
+            out_mac1key = cfg->server_peer_mac1keys[peer_slot];
+
+        if (msg_type == WG_HANDSHAKE_RESPONSE && n == WG_RESP_SIZE && !out_mac1key) {
+            int resolved_peer = config_server_resolve_peer_for_response(cfg, pkt, n);
+            if (resolved_peer >= 0) {
+                session_set_peer_slot(dest_entry, resolved_peer);
+                out_mac1key = cfg->server_peer_mac1keys[resolved_peer];
+            }
+        }
+    }
+
     int out_len, sendJunk;
-    uint8_t *out = transform_outbound(base, prefix, n, cfg,
-                                       fastrand_u64(&p->rng),
-                                       &out_len, &sendJunk);
+    uint8_t *out = transform_outbound_with_mac1(base, prefix, n, cfg,
+                                                out_mac1key,
+                                                fastrand_u64(&p->rng),
+                                                &out_len, &sendJunk);
 
     if (sendJunk) {
         log_debug("s2c: reverse: handshake init, sending junk");

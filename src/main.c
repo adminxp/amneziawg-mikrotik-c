@@ -63,6 +63,90 @@ static void fatal(const char *msg) {
     _exit(1);
 }
 
+static int is_pub_sep(char c) {
+    return c == ',' || c == ';' || c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+static void add_server_peer_pub(awg_config_t *cfg, const uint8_t pub[32], const char *name) {
+    for (int i = 0; i < cfg->server_peer_count; i++) {
+        if (memcmp(cfg->server_peer_pubs[i], pub, 32) == 0)
+            return;
+    }
+    if (cfg->server_peer_count >= AWG_MAX_SERVER_PEERS) {
+        const char *parts[] = { name, ": too many peers (max ", "256", ")" };
+        log_msgn("FATAL: ", parts, 4);
+        _exit(1);
+    }
+    memcpy(cfg->server_peer_pubs[cfg->server_peer_count++], pub, 32);
+}
+
+static void parse_server_peer_list(awg_config_t *cfg, const char *name, const char *value) {
+    const char *p = value;
+    while (*p) {
+        while (*p && is_pub_sep(*p)) p++;
+        if (!*p) break;
+
+        const char *start = p;
+        while (*p && !is_pub_sep(*p)) p++;
+
+        int len = (int)(p - start);
+        if (len <= 0) continue;
+        if (len >= 128) {
+            const char *parts[] = { name, ": peer public key token is too long" };
+            log_msgn("FATAL: ", parts, 2);
+            _exit(1);
+        }
+
+        char token[128];
+        uint8_t pub[32];
+        memcpy(token, start, len);
+        token[len] = '\0';
+
+        if (base64_decode(token, len, pub, 32) != 32) {
+            const char *parts[] = { name, ": invalid client public key in peer list" };
+            log_msgn("FATAL: ", parts, 2);
+            _exit(1);
+        }
+        add_server_peer_pub(cfg, pub, name);
+    }
+}
+
+static void load_server_peer_file(awg_config_t *cfg, const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        const char *parts[] = { "AWG_CLIENT_PUBS_FILE: cannot open ", path };
+        log_msgn("FATAL: ", parts, 2);
+        _exit(1);
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        fatal("AWG_CLIENT_PUBS_FILE: cannot seek");
+    }
+    long size = ftell(f);
+    if (size < 0) {
+        fclose(f);
+        fatal("AWG_CLIENT_PUBS_FILE: cannot stat");
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        fatal("AWG_CLIENT_PUBS_FILE: cannot rewind");
+    }
+    char *buf = (char *)malloc((size_t)size + 1);
+    if (!buf) {
+        fclose(f);
+        fatal("AWG_CLIENT_PUBS_FILE: out of memory");
+    }
+    if (size > 0 && fread(buf, 1, (size_t)size, f) != (size_t)size) {
+        free(buf);
+        fclose(f);
+        fatal("AWG_CLIENT_PUBS_FILE: cannot read");
+    }
+    fclose(f);
+    buf[size] = '\0';
+    parse_server_peer_list(cfg, "AWG_CLIENT_PUBS_FILE", buf);
+    free(buf);
+}
+
 static proxy_t g_proxy;
 static awg_config_t g_config;
 /* CPS templates storage */
@@ -70,6 +154,7 @@ static cps_template_t g_cps_storage[5];
 
 int main(void) {
     int errs = 0;
+    const char *v;
     awg_config_t *cfg = &g_config;
     memset(cfg, 0, sizeof(*cfg));
 
@@ -86,10 +171,29 @@ int main(void) {
     const char *h3_str  = getenv_required("AWG_H3", &errs);
     const char *h4_str  = getenv_required("AWG_H4", &errs);
     const char *spub_str = getenv_required("AWG_SERVER_PUB", &errs);
-    const char *cpub_str = getenv_required("AWG_CLIENT_PUB", &errs);
+    const char *cpub_str = getenv("AWG_CLIENT_PUB");
+    const char *cpubs_str = getenv("AWG_CLIENT_PUBS");
+    const char *cpubs_file_str = getenv("AWG_CLIENT_PUBS_FILE");
 
     if (errs > 0) {
         fatal("missing required environment variables (see above)");
+    }
+
+    /* AWG_MODE: normal (default), reverse, server */
+    cfg->mode = AWG_MODE_NORMAL;
+    v = getenv("AWG_MODE");
+    if (v && v[0]) {
+        if (v[0] == 'r') cfg->mode = AWG_MODE_REVERSE;
+        else if (v[0] == 's') cfg->mode = AWG_MODE_SERVER;
+    }
+
+    if (cfg->mode != AWG_MODE_SERVER && (!cpub_str || !cpub_str[0])) {
+        log_msg("FATAL: ", "AWG_CLIENT_PUB is not set");
+        _exit(1);
+    }
+    if (cfg->mode == AWG_MODE_SERVER && (!cpub_str || !cpub_str[0]) &&
+        (!cpubs_str || !cpubs_str[0]) && (!cpubs_file_str || !cpubs_file_str[0])) {
+        fatal("server mode requires AWG_CLIENT_PUB or AWG_CLIENT_PUBS/AWG_CLIENT_PUBS_FILE");
     }
 
     /* Parse integers */
@@ -111,14 +215,20 @@ int main(void) {
         if (len != 32) fatal("AWG_SERVER_PUB: must decode to 32 bytes");
     }
 
-    /* Decode client public key */
-    {
+    /* Decode client public key (legacy single-peer / fallback key) */
+    if (cpub_str && cpub_str[0]) {
         int len = base64_decode(cpub_str, slen(cpub_str), cfg->client_pub, 32);
         if (len != 32) fatal("AWG_CLIENT_PUB: must decode to 32 bytes");
     }
 
+    if (cfg->mode == AWG_MODE_SERVER) {
+        if (cpubs_str && cpubs_str[0])
+            parse_server_peer_list(cfg, "AWG_CLIENT_PUBS", cpubs_str);
+        if (cpubs_file_str && cpubs_file_str[0])
+            load_server_peer_file(cfg, cpubs_file_str);
+    }
+
     /* Optional v2 params */
-    const char *v;
     if ((v = getenv("AWG_S3")) && v[0]) cfg->s3 = parse_int_str(v);
     if ((v = getenv("AWG_S4")) && v[0]) cfg->s4 = parse_int_str(v);
 
@@ -134,14 +244,6 @@ int main(void) {
             }
             cfg->cps[i] = &g_cps_storage[i];
         }
-    }
-
-    /* AWG_MODE: normal (default), reverse, server */
-    cfg->mode = AWG_MODE_NORMAL;
-    v = getenv("AWG_MODE");
-    if (v && v[0]) {
-        if (v[0] == 'r') cfg->mode = AWG_MODE_REVERSE;
-        else if (v[0] == 's') cfg->mode = AWG_MODE_SERVER;
     }
 
     /* Compute derived fields */
