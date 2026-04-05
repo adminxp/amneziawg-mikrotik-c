@@ -750,6 +750,97 @@ static void make_mac1_config(awg_config_t *cfg, int mode) {
     config_compute(cfg);
 }
 
+static void fill_test_pub(uint8_t pub[32], uint8_t seed) {
+    for (int i = 0; i < 32; i++)
+        pub[i] = (uint8_t)(seed + i);
+}
+
+static void build_test_response(uint8_t *pkt, const uint8_t mac1key[32], uint32_t receiver_index) {
+    memset(pkt, 0, WG_RESP_SIZE);
+    write32_le(pkt, WG_HANDSHAKE_RESPONSE);
+    fill_seq(pkt + 4, WG_RESP_SIZE - 4);
+    memcpy(pkt + 8, &receiver_index, 4);
+    recompute_mac1_response(pkt, mac1key);
+}
+
+static void test_server_response_peer_resolution_single_direct(void) {
+    awg_config_t cfg;
+    make_mac1_config(&cfg, AWG_MODE_SERVER);
+    fill_test_pub(cfg.client_pub, 0xD0); /* legacy fallback / placeholder */
+    cfg.server_peer_count = 1;
+    fill_test_pub(cfg.server_peer_pubs[0], 0x20);
+    config_compute(&cfg);
+
+    uint8_t buf[256 + WG_RESP_SIZE];
+    int dataoff = 256;
+    build_test_response(buf + dataoff, cfg.server_peer_mac1keys[0], 0x11111111u);
+
+    ASSERT_EQ(config_server_resolve_peer_for_response(&cfg, buf + dataoff, WG_RESP_SIZE), 0);
+
+    int out_len, sendJunk;
+    uint8_t *out = transform_outbound_with_mac1(buf, dataoff, WG_RESP_SIZE, &cfg,
+                                                cfg.server_peer_mac1keys[0],
+                                                42, &out_len, &sendJunk);
+    ASSERT(verify_mac1_response(out + cfg.s2, cfg.server_peer_mac1keys[0]));
+    ASSERT(!verify_mac1_response(out + cfg.s2, cfg.mac1key_client));
+}
+
+static void test_server_response_peer_resolution_two_direct_clients(void) {
+    awg_config_t cfg;
+    make_mac1_config(&cfg, AWG_MODE_SERVER);
+    memset(cfg.client_pub, 0, sizeof(cfg.client_pub));
+    cfg.server_peer_count = 2;
+    fill_test_pub(cfg.server_peer_pubs[0], 0x20);
+    fill_test_pub(cfg.server_peer_pubs[1], 0x60);
+    config_compute(&cfg);
+
+    uint8_t buf[256 + WG_RESP_SIZE];
+    int dataoff = 256;
+    build_test_response(buf + dataoff, cfg.server_peer_mac1keys[1], 0x22222222u);
+
+    ASSERT_EQ(config_server_resolve_peer_for_response(&cfg, buf + dataoff, WG_RESP_SIZE), 1);
+
+    int out_len, sendJunk;
+    uint8_t *out = transform_outbound_with_mac1(buf, dataoff, WG_RESP_SIZE, &cfg,
+                                                cfg.server_peer_mac1keys[1],
+                                                42, &out_len, &sendJunk);
+    ASSERT(verify_mac1_response(out + cfg.s2, cfg.server_peer_mac1keys[1]));
+    ASSERT(!verify_mac1_response(out + cfg.s2, cfg.server_peer_mac1keys[0]));
+}
+
+static void test_server_response_peer_resolution_mixed_direct_and_proxy_fallback(void) {
+    awg_config_t cfg;
+    uint8_t unknown_pub[32];
+    uint8_t unknown_mac1key[32];
+
+    make_mac1_config(&cfg, AWG_MODE_SERVER);
+    fill_test_pub(cfg.client_pub, 0xD0); /* placeholder / legacy proxy fallback */
+    cfg.server_peer_count = 1;
+    fill_test_pub(cfg.server_peer_pubs[0], 0x20); /* direct AWG client */
+    fill_test_pub(unknown_pub, 0x90);             /* proxy-only WG peer not listed */
+    config_compute(&cfg);
+    compute_mac1_key(unknown_pub, unknown_mac1key);
+
+    {
+        uint8_t buf[256 + WG_RESP_SIZE];
+        int dataoff = 256;
+        build_test_response(buf + dataoff, cfg.server_peer_mac1keys[0], 0x33333333u);
+        ASSERT_EQ(config_server_resolve_peer_for_response(&cfg, buf + dataoff, WG_RESP_SIZE), 0);
+    }
+
+    {
+        uint8_t buf[256 + WG_RESP_SIZE];
+        int dataoff = 256;
+        build_test_response(buf + dataoff, unknown_mac1key, 0x44444444u);
+        ASSERT_EQ(config_server_resolve_peer_for_response(&cfg, buf + dataoff, WG_RESP_SIZE), -1);
+
+        int out_len, sendJunk;
+        uint8_t *out = transform_outbound(buf, dataoff, WG_RESP_SIZE, &cfg, 42, &out_len, &sendJunk);
+        ASSERT(verify_mac1_response(out + cfg.s2, cfg.mac1key_client));
+        ASSERT(!verify_mac1_response(out + cfg.s2, unknown_mac1key));
+    }
+}
+
 /* Bug #1 (critical): outbound response must recompute MAC1 */
 static void test_mac1_outbound_response_normal(void) {
     awg_config_t cfg; make_mac1_config(&cfg, AWG_MODE_NORMAL);
@@ -1059,6 +1150,9 @@ int main(void) {
     RUN_TEST(roundtrip_v2);
     RUN_TEST(v1_backward);
     RUN_TEST(v2_false_positive);
+    RUN_TEST(server_response_peer_resolution_single_direct);
+    RUN_TEST(server_response_peer_resolution_two_direct_clients);
+    RUN_TEST(server_response_peer_resolution_mixed_direct_and_proxy_fallback);
     /* MAC1 tests */
     RUN_TEST(mac1_outbound_init_normal);
     RUN_TEST(mac1_outbound_response_normal);

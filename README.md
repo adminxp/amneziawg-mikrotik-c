@@ -263,13 +263,16 @@ services:
       AWG_H3: "1505218884"
       AWG_H4: "1343091225"
       AWG_SERVER_PUB: "<публичный_ключ_WG_сервера>"
-      AWG_CLIENT_PUB: "not-used-in-server-mode"
+      AWG_CLIENT_PUB: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      AWG_CLIENT_PUBS: "<публичный_ключ_клиента_1>,<публичный_ключ_клиента_2>"
+      # или вместо строки выше:
+      # AWG_CLIENT_PUBS_FILE: "/etc/awg-proxy/client-pubs.txt"
       AWG_LOG_LEVEL: info
 ```
 
 > Замените параметры AWG_JC, AWG_S1, AWG_H1--H4 и т.д. на свои. Эти параметры должны совпадать на сервере и на всех клиентах.
 
-> `AWG_CLIENT_PUB` в серверном режиме не используется (каждый клиент имеет свой ключ), но переменная обязательна — укажите любое значение.
+> В server mode `AWG_CLIENT_PUBS` / `AWG_CLIENT_PUBS_FILE` — это новый явный список **реальных публичных ключей клиентов**, который нужен для прямых AmneziaWG 2.0 клиентов. `AWG_CLIENT_PUB` остаётся как legacy single-peer / proxy-only fallback. Для старого сценария `proxy → server → WG` placeholder по-прежнему работает, потому что normal-клиентский прокси пересчитает входящий MAC1 ещё раз. Для прямого клиента этого пересчёта нет, поэтому одного placeholder уже недостаточно.
 
 ```bash
 docker compose up -d
@@ -303,7 +306,10 @@ Environment=AWG_H2=1883150219
 Environment=AWG_H3=1505218884
 Environment=AWG_H4=1343091225
 Environment=AWG_SERVER_PUB=<публичный_ключ_WG_сервера>
-Environment=AWG_CLIENT_PUB=not-used-in-server-mode
+Environment=AWG_CLIENT_PUB=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+Environment=AWG_CLIENT_PUBS=<публичный_ключ_клиента_1>,<публичный_ключ_клиента_2>
+# Или вместо AWG_CLIENT_PUBS:
+# Environment=AWG_CLIENT_PUBS_FILE=/etc/awg-proxy/client-pubs.txt
 Environment=AWG_LOG_LEVEL=info
 ExecStart=/usr/local/bin/awg-proxy-linux-amd64
 Restart=always
@@ -346,7 +352,9 @@ systemctl enable --now awg-proxy
 
 4. Настройте MikroTik через конфигуратор.
 
-> **Важно:** перезапускать awg-proxy на сервере при добавлении нового клиента **не нужно** — таблица сессий обновляется автоматически. Достаточно добавить peer в WireGuard-сервер.
+5. Если этот клиент должен подключаться **напрямую как AmneziaWG 2.0**, добавьте его реальный публичный ключ в `AWG_CLIENT_PUBS` (или в файл `AWG_CLIENT_PUBS_FILE`) на сервере. Для proxy-only клиентов старое placeholder-поведение через `AWG_CLIENT_PUB` остаётся рабочим.
+
+> **Важно:** перезапускать awg-proxy на сервере при добавлении нового клиента **обычно не нужно** — таблица сессий обновляется автоматически. Но если вы меняете сам список `AWG_CLIENT_PUBS` / `AWG_CLIENT_PUBS_FILE`, перезапустите awg-proxy, чтобы он перечитал peer list.
 
 ### 4. Проверка работы
 
@@ -452,7 +460,9 @@ ping 192.168.11.X
 | `AWG_S2` | Да | -- | Паддинг handshake response |
 | `AWG_H1`--`AWG_H4` | Да | -- | Типы сообщений |
 | `AWG_SERVER_PUB` | Да | -- | Публичный ключ сервера |
-| `AWG_CLIENT_PUB` | Да | -- | Публичный ключ клиента |
+| `AWG_CLIENT_PUB` | Да* | -- | Публичный ключ клиента; в `server` режиме — legacy single-peer / proxy-only fallback |
+| `AWG_CLIENT_PUBS` | Нет | -- | В `server` режиме: список реальных публичных ключей direct-клиентов |
+| `AWG_CLIENT_PUBS_FILE` | Нет | -- | В `server` режиме: путь к файлу со списком реальных публичных ключей direct-клиентов |
 | `AWG_S3` | Нет | `0` | Паддинг cookie reply (v2) |
 | `AWG_S4` | Нет | `0` | Паддинг transport data (v2) |
 | `AWG_I1`--`AWG_I5` | Нет | -- | CPS-шаблоны (v1.5/v2) |
@@ -466,6 +476,8 @@ ping 192.168.11.X
 | `AWG_CPU_S2C` | Нет | `-1` | CPU для потока server→client |
 | `AWG_BUSY_POLL` | Нет | `0` | SO_BUSY_POLL таймаут (мкс) |
 | `AWG_DNS` | Нет | -- | DNS-сервер для резолва hostname в AWG_REMOTE |
+
+`*` В `server` режиме должен быть задан либо legacy `AWG_CLIENT_PUB`, либо явный direct-peer список `AWG_CLIENT_PUBS` / `AWG_CLIENT_PUBS_FILE`.
 
 Версия протокола определяется автоматически: **v2** если заданы S3/S4 или H в виде диапазонов, **v1.5** если заданы CPS-шаблоны (I1-I5), иначе **v1**.
 
@@ -532,6 +544,25 @@ AWG_CLIENT_PUB=aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789+/ABCD=
 # Автоматическое получение из WireGuard-интерфейса роутера:
 AWG_CLIENT_PUB=[/interface/wireguard/get [find name=wg-awg-proxy] public-key]
 ```
+
+- В режимах `normal` и `reverse` `AWG_CLIENT_PUB` — обычный обязательный ключ удалённого peer.
+- В режиме `server` `AWG_CLIENT_PUB` — **legacy fallback**: single-peer совместимость и старый placeholder-сценарий для proxy-only клиентов.
+- Для прямых AmneziaWG 2.0 клиентов в режиме `server` теперь нужно перечислить реальные клиентские ключи через **`AWG_CLIENT_PUBS`** или **`AWG_CLIENT_PUBS_FILE`**.
+
+**`AWG_CLIENT_PUBS`** -- список реальных публичных ключей direct-клиентов для режима `server`. Разделители: запятая, пробел или перевод строки.
+
+```
+AWG_CLIENT_PUBS=base64key1,base64key2
+AWG_CLIENT_PUBS="base64key1 base64key2"
+```
+
+**`AWG_CLIENT_PUBS_FILE`** -- путь к файлу со списком реальных публичных ключей direct-клиентов для режима `server`.
+
+```
+AWG_CLIENT_PUBS_FILE=/etc/awg-proxy/client-pubs.txt
+```
+
+Каждая строка файла — один base64 WireGuard public key. При исходящем WG handshake response серверный прокси сравнивает исходный стандартный MAC1 с ключами из этого списка, находит нужного peer и затем переписывает ответ уже с его peer-specific MAC1. Если совпадения нет, используется legacy fallback из `AWG_CLIENT_PUB`.
 
 #### Необязательные -- протокол v2
 

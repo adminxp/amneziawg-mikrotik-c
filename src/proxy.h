@@ -20,6 +20,7 @@
 typedef struct {
     uint32_t sender_index;
     struct sockaddr_in addr;
+    _Atomic int peer_slot;
     _Atomic int valid;
 } session_entry_t;
 
@@ -117,48 +118,73 @@ typedef struct {
 } proxy_t;
 
 /* Session table operations */
+static inline session_entry_t *session_get_entry(proxy_t *p, uint32_t index) {
+    uint32_t slot = index & SESSION_TABLE_MASK;
+    for (int i = 0; i < 4; i++) {
+        uint32_t s = (slot + i) & SESSION_TABLE_MASK;
+        if (atomic_load_explicit(&p->sessions[s].valid, memory_order_acquire) &&
+            p->sessions[s].sender_index == index)
+            return &p->sessions[s];
+    }
+    return NULL;
+}
+
 static inline void session_put(proxy_t *p, uint32_t index, struct sockaddr_in *addr) {
     uint32_t slot = index & SESSION_TABLE_MASK;
     for (int i = 0; i < 4; i++) {
         uint32_t s = (slot + i) & SESSION_TABLE_MASK;
         if (!atomic_load_explicit(&p->sessions[s].valid, memory_order_acquire) ||
             p->sessions[s].sender_index == index) {
+            int preserve_peer = atomic_load_explicit(&p->sessions[s].valid, memory_order_relaxed) &&
+                                p->sessions[s].sender_index == index;
             p->sessions[s].sender_index = index;
             p->sessions[s].addr = *addr;
+            if (!preserve_peer)
+                atomic_store_explicit(&p->sessions[s].peer_slot, -1, memory_order_relaxed);
             atomic_store_explicit(&p->sessions[s].valid, 1, memory_order_release);
             return;
         }
     }
     p->sessions[slot].sender_index = index;
     p->sessions[slot].addr = *addr;
+    atomic_store_explicit(&p->sessions[slot].peer_slot, -1, memory_order_relaxed);
     atomic_store_explicit(&p->sessions[slot].valid, 1, memory_order_release);
 }
 
 static inline struct sockaddr_in *session_get(proxy_t *p, uint32_t index) {
-    uint32_t slot = index & SESSION_TABLE_MASK;
-    for (int i = 0; i < 4; i++) {
-        uint32_t s = (slot + i) & SESSION_TABLE_MASK;
-        if (atomic_load_explicit(&p->sessions[s].valid, memory_order_acquire) &&
-            p->sessions[s].sender_index == index)
-            return &p->sessions[s].addr;
-    }
-    return NULL;
+    session_entry_t *entry = session_get_entry(p, index);
+    return entry ? &entry->addr : NULL;
 }
 
-/* Find client address when only one unique client exists in session table */
-static inline struct sockaddr_in *session_find_sole_client(proxy_t *p) {
-    struct sockaddr_in *found = NULL;
+static inline void session_set_peer_slot(session_entry_t *entry, int peer_slot) {
+    if (entry)
+        atomic_store_explicit(&entry->peer_slot, peer_slot, memory_order_relaxed);
+}
+
+static inline int session_get_peer_slot(session_entry_t *entry) {
+    return entry ? atomic_load_explicit(&entry->peer_slot, memory_order_relaxed) : -1;
+}
+
+/* Find client entry when only one unique client exists in session table */
+static inline session_entry_t *session_find_sole_entry(proxy_t *p) {
+    session_entry_t *found = NULL;
     for (int i = 0; i < SESSION_TABLE_SIZE; i++) {
         if (!atomic_load_explicit(&p->sessions[i].valid, memory_order_acquire))
             continue;
         if (!found) {
-            found = &p->sessions[i].addr;
-        } else if (found->sin_addr.s_addr != p->sessions[i].addr.sin_addr.s_addr ||
-                   found->sin_port != p->sessions[i].addr.sin_port) {
+            found = &p->sessions[i];
+        } else if (found->addr.sin_addr.s_addr != p->sessions[i].addr.sin_addr.s_addr ||
+                   found->addr.sin_port != p->sessions[i].addr.sin_port) {
             return NULL; /* multiple clients */
         }
     }
     return found;
+}
+
+/* Find client address when only one unique client exists in session table */
+static inline struct sockaddr_in *session_find_sole_client(proxy_t *p) {
+    session_entry_t *entry = session_find_sole_entry(p);
+    return entry ? &entry->addr : NULL;
 }
 
 /* Initialize proxy. Returns 0 on success. */
