@@ -43,6 +43,7 @@ typedef struct {
     _Atomic int stopped;            /* 4B */
     _Atomic int has_client;         /* 4B */
     _Atomic int last_active;        /* 4B */
+    _Atomic int last_remote_rx;     /* 4B — set when data received from remote */
     _Atomic int reconnect_needed;   /* 4B */
     struct sockaddr_in client_addr; /* 16B */
     int gso_ok;                     /* 4B */

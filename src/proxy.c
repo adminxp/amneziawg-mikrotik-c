@@ -911,6 +911,7 @@ static int do_reconnect(proxy_t *p) {
     if (fd < 0) return -1;
 
     atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
+    atomic_store_explicit(&p->last_remote_rx, 0, memory_order_relaxed);
     if (p->cfg->mode == AWG_MODE_NORMAL)
         atomic_store_explicit(&p->has_client, 0, memory_order_release);
     atomic_store_explicit(&p->reconnect_needed, 0, memory_order_relaxed);
@@ -989,6 +990,7 @@ static void *s2c_thread(void *arg) {
             }
 
             atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
+            atomic_store_explicit(&p->last_remote_rx, 1, memory_order_relaxed);
             reconnect_backoff = 1;
 
             if (!atomic_load_explicit(&p->has_client, memory_order_acquire)) continue;
@@ -1035,6 +1037,7 @@ static void *s2c_thread(void *arg) {
             prev_nrecv = nrecv;
 
             atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
+            atomic_store_explicit(&p->last_remote_rx, 1, memory_order_relaxed);
             reconnect_backoff = 1;
 
             if (!reverse && !atomic_load_explicit(&p->has_client, memory_order_acquire)) continue;
@@ -1151,6 +1154,7 @@ int proxy_run(proxy_t *p) {
     int checks_needed = timeout_secs / 5;
     if (checks_needed < 1) checks_needed = 1;
     int inactive_count = 0;
+    int remote_silent_count = 0;
 
     /* Epoll for signal + timer only */
     int epfd = epoll_create1(EPOLL_CLOEXEC);
@@ -1190,9 +1194,27 @@ int proxy_run(proxy_t *p) {
             if (fd == p->timer_fd) {
                 uint64_t expirations;
                 read(p->timer_fd, &expirations, sizeof(expirations));
-                if (atomic_exchange_explicit(&p->last_active, 0, memory_order_relaxed)) {
+                int had_activity = atomic_exchange_explicit(&p->last_active, 0, memory_order_relaxed);
+                int had_remote_rx = atomic_exchange_explicit(&p->last_remote_rx, 0, memory_order_relaxed);
+                if (had_activity) {
                     inactive_count = 0;
+                    if (!had_remote_rx) {
+                        /* Client sending but remote silent — DNS may have changed */
+                        remote_silent_count++;
+                        if (remote_silent_count >= checks_needed) {
+                            log_info("remote silent (DNS re-resolve), triggering reconnect");
+                            int rfd2 = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
+                            if (rfd2 >= 0) {
+                                atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
+                                shutdown(rfd2, SHUT_RDWR);
+                            }
+                            remote_silent_count = 0;
+                        }
+                    } else {
+                        remote_silent_count = 0;
+                    }
                 } else {
+                    remote_silent_count = 0;
                     inactive_count++;
                     if (inactive_count >= checks_needed) {
                         log_info("remote timeout, triggering reconnect");
