@@ -27,6 +27,7 @@
   - [Insufficient disk space](#insufficient-disk-space)
   - [not allowed by device-mode](#not-allowed-by-device-mode)
   - [child spawn failed / could not load next layer](#child-spawn-failed--could-not-load-next-layer)
+  - [Handshake не проходит после восстановления из бэкапа](#handshake-не-проходит-после-восстановления-из-бэкапа)
 - [Сборка из исходников](#сборка-из-исходников)
 - [Лицензия](#лицензия)
 
@@ -920,6 +921,48 @@ DSTNAT-трафик идёт через `forward` chain, а не `input`. Есл
    ```routeros
    /container add file=awg-proxy-arm.tar.gz ...
    ```
+
+### Handshake не проходит после восстановления из бэкапа
+
+После воссановления RouterOS из бэкапа (backup/restore) WireGuard handshake не завершается, хотя контейнеры работают, veth-интерфейсы в состоянии running и пинг до контейнера проходит. В логах:
+
+```
+wg-awg-proxy: [peer] ...: Handshake for peer did not complete after 5 seconds, retrying (try 2)
+```
+
+**При��ина:** восстановление из бэкапа сбрасывает системные часы на дату создания бэкапа. WireGuard использует TAI64N timestamp в handshake init для защиты от replay-атак — сервер запоминает последний timestamp каждого пира и отбрасывает handshake с более старым временем. Если часы роутера отстают от реального времени, сервер молча игнорируе�� все handshake-пакеты.
+
+**Диагностика:**
+
+```routeros
+/system/clock/print
+# Если дата не совпадает с текущей — это причина
+```
+
+**Исправление:**
+
+1. Установите правильное время:
+```routeros
+/system/clock/set date=apr/05/2026 time=12:00:00
+```
+
+2. Включите NTP-клиент для автоматической синхронизации:
+```routeros
+/system/ntp/client/set enabled=yes servers=time.google.com,pool.ntp.org
+```
+
+3. Перезапустите контейнеры и сбросьте WG-пиры для принудительного нового handshake:
+```routeros
+/container/stop [find]
+:delay 5s
+/container/start [find]
+# Сбросить пиры (disable/enable)
+/interface/wireguard/peers/set [find where !disabled] disabled=yes
+:delay 2s
+/interface/wireguard/peers/set [find where disabled] disabled=no
+```
+
+> **Совет:** После каждого восстановления из бэкапа первым делом проверяйте системные часы (`/system/clock/print`).
 
 ## Сборка из исходников
 

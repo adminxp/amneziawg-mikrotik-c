@@ -27,6 +27,7 @@ Lightweight Docker container that allows MikroTik routers to connect to AmneziaW
   - [Insufficient disk space](#insufficient-disk-space)
   - [not allowed by device-mode](#not-allowed-by-device-mode)
   - [child spawn failed / could not load next layer](#child-spawn-failed--could-not-load-next-layer)
+  - [Handshake fails after backup restore](#handshake-fails-after-backup-restore)
 - [Building from Source](#building-from-source)
 - [License](#license)
 
@@ -911,6 +912,48 @@ Checklist:
    ```routeros
    /container add file=awg-proxy-arm.tar.gz ...
    ```
+
+### Handshake fails after backup restore
+
+After restoring RouterOS from a backup, WireGuard handshake does not complete even though containers are running, veth interfaces are up, and ping to the container works. Logs show:
+
+```
+wg-awg-proxy: [peer] ...: Handshake for peer did not complete after 5 seconds, retrying (try 2)
+```
+
+**Cause:** Backup restore resets the system clock to the backup creation date. WireGuard uses a TAI64N timestamp in the handshake init message for replay protection — the server remembers the latest timestamp for each peer and silently drops handshakes with an older timestamp. If the router's clock is behind the real time, the server ignores all handshake packets.
+
+**Diagnosis:**
+
+```routeros
+/system/clock/print
+# If the date doesn't match the current date — this is the cause
+```
+
+**Fix:**
+
+1. Set the correct time:
+```routeros
+/system/clock/set date=apr/05/2026 time=12:00:00
+```
+
+2. Enable NTP client for automatic synchronization:
+```routeros
+/system/ntp/client/set enabled=yes servers=time.google.com,pool.ntp.org
+```
+
+3. Restart containers and reset WG peers to force a new handshake:
+```routeros
+/container/stop [find]
+:delay 5s
+/container/start [find]
+# Reset peers (disable/enable)
+/interface/wireguard/peers/set [find where !disabled] disabled=yes
+:delay 2s
+/interface/wireguard/peers/set [find where disabled] disabled=no
+```
+
+> **Tip:** After every backup restore, always check the system clock first (`/system/clock/print`).
 
 ## Building from Source
 
