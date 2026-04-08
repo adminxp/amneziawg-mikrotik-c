@@ -403,6 +403,40 @@ static void test_hrange_pick_contains(void) {
     }
 }
 
+static void test_config_validate_accepts_safe_limits(void) {
+    awg_config_t cfg = make_test_config();
+    const char *err = "unexpected";
+
+    cfg.s1 = AWG_PACKET_BUF_SIZE - WG_INIT_SIZE;
+    cfg.s2 = AWG_PACKET_BUF_SIZE - WG_RESP_SIZE;
+    cfg.s3 = AWG_PACKET_BUF_SIZE - WG_COOKIE_SIZE;
+    cfg.s4 = AWG_PACKET_HEADROOM;
+
+    ASSERT_EQ(config_validate(&cfg, &err), 0);
+    ASSERT(err == NULL);
+}
+
+static void test_config_validate_rejects_unsafe_padding(void) {
+    awg_config_t cfg = make_test_config();
+    const char *err = NULL;
+
+    cfg.s1 = AWG_PACKET_BUF_SIZE - WG_INIT_SIZE + 1;
+    ASSERT_EQ(config_validate(&cfg, &err), -1);
+    ASSERT(err != NULL);
+
+    cfg = make_test_config();
+    err = NULL;
+    cfg.s4 = AWG_PACKET_HEADROOM + 1;
+    ASSERT_EQ(config_validate(&cfg, &err), -1);
+    ASSERT(err != NULL);
+
+    cfg = make_test_config();
+    err = NULL;
+    cfg.s2 = -1;
+    ASSERT_EQ(config_validate(&cfg, &err), -1);
+    ASSERT(err != NULL);
+}
+
 /* 21. Outbound cookie with S3 */
 static void test_outbound_cookie_with_s3(void) {
     awg_config_t cfg = make_test_config();
@@ -1147,6 +1181,8 @@ int main(void) {
     RUN_TEST(no_padding_s2_zero);
     RUN_TEST(outbound_too_short);
     RUN_TEST(hrange_pick_contains);
+    RUN_TEST(config_validate_accepts_safe_limits);
+    RUN_TEST(config_validate_rejects_unsafe_padding);
     RUN_TEST(outbound_cookie_with_s3);
     RUN_TEST(outbound_transport_with_s4);
     RUN_TEST(inbound_scanning_s3);

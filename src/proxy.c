@@ -261,6 +261,7 @@ static int send_gso(int fd, struct iovec *iovecs, int count,
 
 int proxy_init(proxy_t *p, awg_config_t *cfg,
                const char *listen_str, const char *remote_str, int src_port) {
+    const char *cfg_err = NULL;
     memset(p, 0, sizeof(*p));
     p->cfg = cfg;
     p->listen_fd = -1;
@@ -268,6 +269,11 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
     p->signal_fd = -1;
     p->timer_fd = -1;
     p->gso_ok = 1;
+
+    if (config_validate(cfg, &cfg_err) < 0) {
+        log_error2("invalid config: ", cfg_err);
+        return -1;
+    }
 
     /* Parse listen address */
     char host[256];
@@ -348,7 +354,7 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
     /* recv_s2c: remote socket, connected — no addr needed */
     for (int i = 0; i < BATCH_SIZE; i++) {
         p->recv_s2c.iovecs[i].iov_base = p->recv_s2c.bufs[i] + s2c_headroom;
-        p->recv_s2c.iovecs[i].iov_len = BUF_SIZE + 256 - s2c_headroom;
+        p->recv_s2c.iovecs[i].iov_len = BUF_SIZE + AWG_PACKET_HEADROOM - s2c_headroom;
         p->recv_s2c.msgs[i].msg_hdr.msg_iov = &p->recv_s2c.iovecs[i];
         p->recv_s2c.msgs[i].msg_hdr.msg_iovlen = 1;
     }
@@ -939,7 +945,7 @@ static void *s2c_thread(void *arg) {
 
     int reverse = (p->cfg->mode != AWG_MODE_NORMAL);
     int s2c_headroom = reverse ? p->cfg->s4 : 0;
-    int s2c_buflen = BUF_SIZE + 256 - s2c_headroom;
+    int s2c_buflen = BUF_SIZE + AWG_PACKET_HEADROOM - s2c_headroom;
     int gro_no_coalesce = 0;
 
     while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {

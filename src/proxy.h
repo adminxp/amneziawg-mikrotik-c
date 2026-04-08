@@ -8,7 +8,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#define BUF_SIZE       1500
+#define BUF_SIZE       AWG_PACKET_BUF_SIZE
 #define BATCH_SIZE     32
 #define H4_RING_SIZE   4096
 #define GRO_BUF_SIZE   65536
@@ -56,7 +56,7 @@ typedef struct {
 
     /* Batch I/O buffers — c2s direction */
     struct {
-        uint8_t bufs[BATCH_SIZE][BUF_SIZE + 256];
+        uint8_t bufs[BATCH_SIZE][BUF_SIZE + AWG_PACKET_HEADROOM];
         struct mmsghdr msgs[BATCH_SIZE];
         struct iovec iovecs[BATCH_SIZE];
         struct sockaddr_in addrs[BATCH_SIZE];
@@ -69,7 +69,7 @@ typedef struct {
 
     /* Batch I/O buffers — s2c direction (non-GRO path) */
     struct {
-        uint8_t bufs[BATCH_SIZE][BUF_SIZE + 256];
+        uint8_t bufs[BATCH_SIZE][BUF_SIZE + AWG_PACKET_HEADROOM];
         struct mmsghdr msgs[BATCH_SIZE];
         struct iovec iovecs[BATCH_SIZE];
     } recv_s2c;

@@ -16,6 +16,10 @@
 #define WG_COOKIE_SIZE    64
 #define WG_TRANSPORT_MIN  32
 
+/* Shared fixed buffer sizes used by the proxy data paths */
+#define AWG_PACKET_BUF_SIZE 1500
+#define AWG_PACKET_HEADROOM 256
+
 /* H range for v2 */
 typedef struct {
     uint32_t min, max;
@@ -103,6 +107,9 @@ typedef struct {
 
 /* Compute MAC1 keys and fast-path flags. Call after setting all config fields. */
 void config_compute(awg_config_t *cfg);
+
+/* Validate config values that participate in buffer sizing and layout. */
+int config_validate(const awg_config_t *cfg, const char **err_msg);
 
 /* Transform outbound WG->AWG. Returns output pointer and length.
  * buf has dataoff bytes of headroom before the packet data.
