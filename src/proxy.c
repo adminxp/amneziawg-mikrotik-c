@@ -535,6 +535,10 @@ static void *c2s_thread_normal(void *arg) {
                 gro_no_coalesce = 0;
                 for (int off = 0; off < total && nrecv < BATCH_SIZE; off += seg_size) {
                     int plen = (off + seg_size <= total) ? seg_size : (int)(total - off);
+                    if (plen > BUF_SIZE) {
+                        log_debug("c2s: dropping oversized GRO segment");
+                        continue;
+                    }
                     memcpy(p->recv_c2s.bufs[nrecv] + prefix, p->gro_buf_c2s + off, plen);
                     p->recv_c2s.msgs[nrecv].msg_len = plen;
                     nrecv++;
@@ -543,6 +547,10 @@ static void *c2s_thread_normal(void *arg) {
                 if (++gro_no_coalesce >= 8) {
                     p->gro_enabled_c2s = 0;
                     log_info("c2s: GRO not coalescing, falling back to recvmmsg");
+                }
+                if (total > BUF_SIZE) {
+                    log_debug("c2s: dropping oversized GRO datagram");
+                    continue;
                 }
                 memcpy(p->recv_c2s.bufs[0] + prefix, p->gro_buf_c2s, (int)total);
                 p->recv_c2s.msgs[0].msg_len = (unsigned int)total;
