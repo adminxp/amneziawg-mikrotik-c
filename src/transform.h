@@ -27,7 +27,8 @@ typedef struct {
 
 static inline uint32_t hrange_pick(const hrange_t *r, uint64_t rand_val) {
     if (r->min == r->max) return r->min;
-    return r->min + (uint32_t)(rand_val % (uint64_t)(r->max - r->min + 1));
+    uint64_t span = (uint64_t)r->max - (uint64_t)r->min + 1u;
+    return r->min + (uint32_t)(rand_val % span);
 }
 
 static inline int hrange_contains(const hrange_t *r, uint32_t v) {

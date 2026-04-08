@@ -401,6 +401,9 @@ static void test_hrange_pick_contains(void) {
         uint32_t v = hrange_pick(&r4, (uint64_t)i * 0x9E3779B97F4A7C15ULL);
         ASSERT(hrange_contains(&r4, v));
     }
+
+    hrange_t r5 = {0u, UINT32_MAX};
+    ASSERT_EQ(hrange_pick(&r5, 0x1122334455667788ULL), 0x55667788u);
 }
 
 static void test_config_validate_accepts_safe_limits(void) {
