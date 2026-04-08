@@ -7,6 +7,10 @@
  * Handshakes are rare (1-2 per connection), so static is fine. */
 static __thread uint8_t hs_buf[AWG_PACKET_BUF_SIZE];
 
+static int hrange_overlaps(const hrange_t *a, const hrange_t *b) {
+    return a->min <= b->max && b->min <= a->max;
+}
+
 int config_validate(const awg_config_t *cfg, const char **err_msg) {
     if (cfg->s1 < 0 || cfg->s1 > AWG_PACKET_BUF_SIZE - WG_INIT_SIZE) {
         *err_msg = "AWG_S1: must be between 0 and 1352";
@@ -22,6 +26,15 @@ int config_validate(const awg_config_t *cfg, const char **err_msg) {
     }
     if (cfg->s4 < 0 || cfg->s4 > AWG_PACKET_HEADROOM) {
         *err_msg = "AWG_S4: must be between 0 and 256";
+        return -1;
+    }
+    if (hrange_overlaps(&cfg->h1, &cfg->h2) ||
+        hrange_overlaps(&cfg->h1, &cfg->h3) ||
+        hrange_overlaps(&cfg->h1, &cfg->h4) ||
+        hrange_overlaps(&cfg->h2, &cfg->h3) ||
+        hrange_overlaps(&cfg->h2, &cfg->h4) ||
+        hrange_overlaps(&cfg->h3, &cfg->h4)) {
+        *err_msg = "AWG_H1..AWG_H4: ranges must not overlap";
         return -1;
     }
 
