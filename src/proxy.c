@@ -36,6 +36,22 @@ static inline uint32_t pick_h4(proxy_t *p) {
     return v;
 }
 
+static int checked_mul_size(size_t a, size_t b, size_t *out) {
+    if (a != 0 && b > SIZE_MAX / a)
+        return -1;
+    *out = a * b;
+    return 0;
+}
+
+static int junk_layout_sizes(const awg_config_t *cfg,
+                             size_t *junk_bytes, size_t *junk_sizes_bytes) {
+    if (checked_mul_size((size_t)cfg->jc, (size_t)cfg->jmax, junk_bytes) < 0)
+        return -1;
+    if (checked_mul_size((size_t)cfg->jc, sizeof(int), junk_sizes_bytes) < 0)
+        return -1;
+    return 0;
+}
+
 static int resolve_addr(const char *host, uint16_t port, struct sockaddr_in *addr) {
     memset(addr, 0, sizeof(*addr));
     addr->sin_family = AF_INET;
@@ -309,8 +325,12 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
 
     /* Pre-allocate junk buffers */
     if (cfg->jc > 0 && cfg->jmax > 0) {
-        p->junk_buf = (uint8_t *)malloc(cfg->jc * cfg->jmax);
-        p->junk_sizes = (int *)malloc(cfg->jc * sizeof(int));
+        size_t junk_bytes;
+        size_t junk_sizes_bytes;
+        if (junk_layout_sizes(cfg, &junk_bytes, &junk_sizes_bytes) < 0)
+            return -1;
+        p->junk_buf = (uint8_t *)malloc(junk_bytes);
+        p->junk_sizes = (int *)malloc(junk_sizes_bytes);
         if (!p->junk_buf || !p->junk_sizes) return -1;
     }
 
@@ -401,12 +421,17 @@ static void send_junk_and_cps_to(proxy_t *p, int fd, struct sockaddr_in *addr) {
         send_packet_to(fd, p->cps_bufs[i], p->cps_lens[i], addr);
 
     if (cfg->jc > 0 && cfg->jmax > 0) {
-        fastrand_fill(&p->rng, p->junk_buf, cfg->jc * cfg->jmax);
+        size_t junk_bytes;
+        size_t junk_sizes_bytes;
+        if (junk_layout_sizes(cfg, &junk_bytes, &junk_sizes_bytes) < 0)
+            return;
+        (void)junk_sizes_bytes;
+        fastrand_fill(&p->rng, p->junk_buf, junk_bytes);
         int njunk = generate_junk(cfg, p->junk_buf, p->junk_sizes);
-        int off = 0;
+        size_t off = 0;
         for (int i = 0; i < njunk; i++) {
             send_packet_to(fd, p->junk_buf + off, p->junk_sizes[i], addr);
-            off += p->junk_sizes[i];
+            off += (size_t)p->junk_sizes[i];
         }
     }
 }
@@ -422,12 +447,17 @@ static void send_junk_and_cps(proxy_t *p, int fd) {
 
     /* Junk packets */
     if (cfg->jc > 0 && cfg->jmax > 0) {
-        fastrand_fill(&p->rng, p->junk_buf, cfg->jc * cfg->jmax);
+        size_t junk_bytes;
+        size_t junk_sizes_bytes;
+        if (junk_layout_sizes(cfg, &junk_bytes, &junk_sizes_bytes) < 0)
+            return;
+        (void)junk_sizes_bytes;
+        fastrand_fill(&p->rng, p->junk_buf, junk_bytes);
         int njunk = generate_junk(cfg, p->junk_buf, p->junk_sizes);
-        int off = 0;
+        size_t off = 0;
         for (int i = 0; i < njunk; i++) {
             send_packet(fd, p->junk_buf + off, p->junk_sizes[i]);
-            off += p->junk_sizes[i];
+            off += (size_t)p->junk_sizes[i];
         }
     }
 }
