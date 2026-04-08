@@ -395,6 +395,12 @@ static void test_hrange_pick_contains(void) {
     ASSERT(hrange_contains(&r3, 20));
     ASSERT(!hrange_contains(&r3, 9));
     ASSERT(!hrange_contains(&r3, 21));
+
+    hrange_t r4 = {1000200001u, 4294967295u};
+    for (int i = 0; i < 1000; i++) {
+        uint32_t v = hrange_pick(&r4, (uint64_t)i * 0x9E3779B97F4A7C15ULL);
+        ASSERT(hrange_contains(&r4, v));
+    }
 }
 
 /* 21. Outbound cookie with S3 */

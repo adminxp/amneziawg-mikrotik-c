@@ -24,9 +24,8 @@ static void fill_h4_ring(proxy_t *p) {
             p->h4_ring[i] = v;
         return;
     }
-    int span = (int)(p->cfg->h4.max - p->cfg->h4.min + 1);
     for (int i = 0; i < H4_RING_SIZE; i++)
-        p->h4_ring[i] = p->cfg->h4.min + (uint32_t)fastrand_intn(&p->rng, span);
+        p->h4_ring[i] = hrange_pick(&p->cfg->h4, fastrand_u64(&p->rng));
 }
 
 static inline uint32_t pick_h4(proxy_t *p) {
