@@ -45,6 +45,8 @@ static int resolve_addr(const char *host, uint16_t port, struct sockaddr_in *add
     if (inet_pton(AF_INET, host, &addr->sin_addr) == 1)
         return 0;
 
+    log_info2("resolving ", host);
+
     struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM };
     struct addrinfo *res;
     int gai_err = getaddrinfo(host, NULL, &hints, &res);
@@ -55,6 +57,13 @@ static int resolve_addr(const char *host, uint16_t port, struct sockaddr_in *add
     }
     memcpy(addr, res->ai_addr, sizeof(*addr));
     addr->sin_port = htons(port);
+
+    char ipbuf[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, &addr->sin_addr, ipbuf, sizeof(ipbuf))) {
+        const char *parts[] = { "resolved ", host, " -> ", ipbuf };
+        log_infon(parts, 4);
+    }
+
     freeaddrinfo(res);
     return 0;
 }
@@ -149,6 +158,14 @@ static int dial_remote(proxy_t *p, int blocking) {
         log_error2("connect failed: ", strerror(errno));
         close(fd);
         return -1;
+    }
+
+    if (g_log_level >= LOG_INFO) {
+        char ipbuf[INET_ADDRSTRLEN], pbuf[12];
+        inet_ntop(AF_INET, &p->remote_addr.sin_addr, ipbuf, sizeof(ipbuf));
+        const char *parts[] = { "connected to ", ipbuf, ":",
+                                u32_to_str(pbuf, ntohs(p->remote_addr.sin_port)) };
+        log_infon(parts, 4);
     }
 
     set_socket_buffers(fd, p->cfg->socket_buf);
@@ -582,6 +599,8 @@ static void *c2s_thread_normal(void *arg) {
                     p->send_c2s.iovecs[nsend].iov_base = base;
                     p->send_c2s.iovecs[nsend].iov_len = total;
                     nsend++;
+                    if (!atomic_exchange_explicit(&p->fe_transport_c2s, 1, memory_order_relaxed))
+                        log_info("c2s: first transport packet to remote");
                     continue;
                 }
             }
@@ -593,6 +612,19 @@ static void *c2s_thread_normal(void *arg) {
                 nsend = 0;
             }
 
+            /* Detect WG handshake init from client */
+            if (n >= 4) {
+                uint32_t hin;
+                memcpy(&hin, data, 4);
+                if (hin == WG_HANDSHAKE_INIT &&
+                    !atomic_exchange_explicit(&p->fe_init_seen, 1, memory_order_relaxed)) {
+                    char nb[12];
+                    const char *parts[] = { "c2s: WG handshake init received from client (size=",
+                                            u32_to_str(nb, n), ")" };
+                    log_infon(parts, 3);
+                }
+            }
+
             int out_len, sendJunk;
             uint8_t *out = transform_outbound(p->recv_c2s.bufs[i], prefix, n,
                                                cfg, fastrand_u64(&p->rng),
@@ -602,6 +634,12 @@ static void *c2s_thread_normal(void *arg) {
                 log_debug("c2s: handshake init, sending junk");
                 send_junk_and_cps(p, remote_fd);
                 send_packet(remote_fd, out, out_len);
+                if (!atomic_exchange_explicit(&p->fe_init_sent, 1, memory_order_relaxed)) {
+                    char nb[12];
+                    const char *parts[] = { "c2s: AWG handshake init forwarded to remote (size=",
+                                            u32_to_str(nb, out_len), ")" };
+                    log_infon(parts, 3);
+                }
                 continue;
             }
 
@@ -771,6 +809,8 @@ static inline int process_s2c_pkt_normal(proxy_t *p, uint8_t *pkt, int n,
                 send_iovecs[idx].iov_len = n - s4;
                 send_addrs[idx] = p->client_addr;
                 (*nsend)++;
+                if (!atomic_exchange_explicit(&p->fe_transport_s2c, 1, memory_order_relaxed))
+                    log_info("s2c: first transport packet to client");
                 return 1;
             }
         }
@@ -779,13 +819,39 @@ static inline int process_s2c_pkt_normal(proxy_t *p, uint8_t *pkt, int n,
     /* Slow path: handshake or unknown */
     int out_len;
     uint8_t *out = transform_inbound(pkt, n, cfg, &out_len);
-    if (!out) return 0;
+    if (!out) {
+        log_debug("s2c: junk packet dropped");
+        return 0;
+    }
+
+    /* Identify handshake type for diagnostics */
+    uint32_t mtype = 0;
+    if (out_len >= 4) memcpy(&mtype, out, 4);
+    if (g_log_level >= LOG_DEBUG) {
+        const char *type_str = "unknown";
+        if (mtype == WG_HANDSHAKE_INIT) type_str = "init";
+        else if (mtype == WG_HANDSHAKE_RESPONSE) type_str = "resp";
+        else if (mtype == WG_COOKIE_REPLY) type_str = "cookie";
+        char nb[12];
+        const char *parts[] = { "s2c: handshake type=", type_str, " size=", u32_to_str(nb, out_len) };
+        log_debugn(parts, 4);
+    }
+    if (mtype == WG_HANDSHAKE_RESPONSE &&
+        !atomic_exchange_explicit(&p->fe_resp_received, 1, memory_order_relaxed)) {
+        char nb[12];
+        const char *parts[] = { "s2c: AWG handshake response received from remote, transformed to WG (size=",
+                                u32_to_str(nb, out_len), ")" };
+        log_infon(parts, 3);
+    }
 
     int idx = *nsend;
     send_iovecs[idx].iov_base = out;
     send_iovecs[idx].iov_len = out_len;
     send_addrs[idx] = p->client_addr;
     (*nsend)++;
+    if (mtype == WG_HANDSHAKE_RESPONSE &&
+        !atomic_exchange_explicit(&p->fe_resp_sent, 1, memory_order_relaxed))
+        log_info("s2c: WG handshake response delivered to client");
     return 1;
 }
 
@@ -915,6 +981,16 @@ static int do_reconnect(proxy_t *p) {
     if (p->cfg->mode == AWG_MODE_NORMAL)
         atomic_store_explicit(&p->has_client, 0, memory_order_release);
     atomic_store_explicit(&p->reconnect_needed, 0, memory_order_relaxed);
+
+    /* Reset first-event flags so handshake phases re-log after reconnect */
+    atomic_store_explicit(&p->fe_init_seen,     0, memory_order_relaxed);
+    atomic_store_explicit(&p->fe_init_sent,     0, memory_order_relaxed);
+    atomic_store_explicit(&p->fe_remote_pkt,    0, memory_order_relaxed);
+    atomic_store_explicit(&p->fe_resp_received, 0, memory_order_relaxed);
+    atomic_store_explicit(&p->fe_resp_sent,     0, memory_order_relaxed);
+    atomic_store_explicit(&p->fe_transport_c2s, 0, memory_order_relaxed);
+    atomic_store_explicit(&p->fe_transport_s2c, 0, memory_order_relaxed);
+
     atomic_store_explicit(&p->remote_fd, fd, memory_order_release);
 
     log_info2("reconnected to ", p->remote_host);
@@ -993,6 +1069,13 @@ static void *s2c_thread(void *arg) {
             atomic_store_explicit(&p->last_remote_rx, 1, memory_order_relaxed);
             reconnect_backoff = 1;
 
+            if (!atomic_exchange_explicit(&p->fe_remote_pkt, 1, memory_order_relaxed)) {
+                char nb[12];
+                const char *parts[] = { "s2c: first packet received from remote (size=",
+                                        u32_to_str(nb, n), ")" };
+                log_infon(parts, 3);
+            }
+
             if (!atomic_load_explicit(&p->has_client, memory_order_acquire)) continue;
 
             if (seg_size > 0 && n > seg_size) {
@@ -1039,6 +1122,14 @@ static void *s2c_thread(void *arg) {
             atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
             atomic_store_explicit(&p->last_remote_rx, 1, memory_order_relaxed);
             reconnect_backoff = 1;
+
+            if (!atomic_exchange_explicit(&p->fe_remote_pkt, 1, memory_order_relaxed)) {
+                int first_n = (int)p->recv_s2c.msgs[0].msg_len;
+                char nb[12];
+                const char *parts[] = { "s2c: first packet received from remote (size=",
+                                        u32_to_str(nb, first_n), ")" };
+                log_infon(parts, 3);
+            }
 
             if (!reverse && !atomic_load_explicit(&p->has_client, memory_order_acquire)) continue;
 
@@ -1097,24 +1188,20 @@ int proxy_run(proxy_t *p) {
     }
     log_socket_buffers(p->listen_fd, cfg, "listen");
 
-    /* Connect to remote with retry */
+    /* Connect to remote with infinite retry (DNS may not be ready at startup).
+     * Signals are not yet blocked here, so SIGTERM/SIGINT terminate via default
+     * handler — listen_fd is the only open resource and OS reclaims it. */
     int rfd = -1;
-    for (int attempt = 0; attempt < 5; attempt++) {
+    int backoff = 1;
+    for (;;) {
         rfd = dial_remote(p, 1);
         if (rfd >= 0) break;
-        if (attempt < 4) {
-            int delay = 1 << attempt; /* 1, 2, 4, 8 sec */
-            if (delay > 10) delay = 10;
-            char db[12];
-            log_error2("initial connect failed, retrying in ", u32_to_str(db, delay));
-            struct timespec slp = { .tv_sec = delay };
-            nanosleep(&slp, NULL);
-        }
-    }
-    if (rfd < 0) {
-        log_error("initial connect failed after 5 attempts");
-        close(p->listen_fd);
-        return -1;
+        char db[12];
+        log_error2("initial connect failed, retrying in ", u32_to_str(db, backoff));
+        struct timespec slp = { .tv_sec = backoff };
+        nanosleep(&slp, NULL);
+        backoff *= 2;
+        if (backoff > 30) backoff = 30;
     }
     atomic_store_explicit(&p->remote_fd, rfd, memory_order_release);
     log_socket_buffers(rfd, cfg, "remote");

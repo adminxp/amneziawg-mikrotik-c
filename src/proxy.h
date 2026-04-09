@@ -36,7 +36,7 @@ typedef struct {
 #endif
 
 typedef struct {
-    /* === Hot fields: 1st cache line (64B) === */
+    /* === Hot fields === */
     awg_config_t *cfg;              /* 8B */
     int listen_fd;                  /* 4B */
     _Atomic int remote_fd;          /* 4B */
@@ -45,6 +45,15 @@ typedef struct {
     _Atomic int last_active;        /* 4B */
     _Atomic int last_remote_rx;     /* 4B — set when data received from remote */
     _Atomic int reconnect_needed;   /* 4B */
+    /* First-event flags (one per connection — touched once after start/reconnect) */
+    _Atomic uint8_t fe_init_seen;       /* WG handshake init seen from client */
+    _Atomic uint8_t fe_init_sent;       /* AWG handshake init sent to remote */
+    _Atomic uint8_t fe_remote_pkt;      /* any packet received from remote */
+    _Atomic uint8_t fe_resp_received;   /* AWG handshake response received */
+    _Atomic uint8_t fe_resp_sent;       /* WG handshake response delivered to client */
+    _Atomic uint8_t fe_transport_c2s;   /* first transport packet to remote */
+    _Atomic uint8_t fe_transport_s2c;   /* first transport packet to client */
+    uint8_t _pad_fe;
     struct sockaddr_in client_addr; /* 16B */
     int gso_ok;                     /* 4B */
     int gro_enabled;                /* 4B */
