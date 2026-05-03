@@ -27,6 +27,7 @@ Lightweight Docker container that allows MikroTik routers to connect to AmneziaW
   - [Insufficient disk space](#insufficient-disk-space)
   - [not allowed by device-mode](#not-allowed-by-device-mode)
   - [child spawn failed / could not load next layer](#child-spawn-failed--could-not-load-next-layer)
+  - [RU address list not loading after reboot](#ru-address-list-not-loading-after-reboot)
   - [Handshake fails after backup restore](#handshake-fails-after-backup-restore)
 - [Building from Source](#building-from-source)
 - [License](#license)
@@ -912,6 +913,80 @@ Checklist:
    ```routeros
    /container add file=awg-proxy-arm.tar.gz ...
    ```
+
+### RU address list not loading after reboot
+
+When using the "All non-RU traffic through tunnel" scenario, the RU address list may not load automatically after a router reboot. Common causes:
+
+**1. Scheduler: `start-time=startup` + `interval` are incompatible**
+
+This is documented RouterOS behavior: if a scheduler has a non-zero `interval`, the `start-time=startup` trigger **does not fire**. The scheduler will show `run-count=0` after reboot.
+
+Solution — two separate schedulers:
+
+```routeros
+# Boot trigger (interval MUST be 0)
+/system/scheduler/add name=awg-proxy-ru-startup on-event="/system/script/run awg-proxy-ru-update" start-time=startup interval=0 comment=awg-proxy
+
+# Daily update
+/system/scheduler/add name=awg-proxy-ru-daily on-event="/system/script/run awg-proxy-ru-update" start-time=04:00:00 interval=1d comment=awg-proxy
+```
+
+If you have a single scheduler with `start-time=startup interval=1d` — remove it and create two.
+
+**2. USB disk mounts with a delay**
+
+USB storage appears 5-30 seconds after boot. If the script runs earlier, it won't find the `.rsc` file on USB. The configurator adds a mount wait loop to the script (up to 60 seconds):
+
+```routeros
+:if ($disk != "disk1") do={
+  :local waited 0
+  :while ([:len [/disk/find where mount-point=$disk]] = 0 && $waited < 60) do={
+    :delay 5s
+    :set waited ($waited + 5)
+  }
+}
+```
+
+**3. Network not ready at boot**
+
+DHCP and DNS may be unavailable in the first seconds after boot. The script waits for network availability (up to 60 seconds) before downloading:
+
+```routeros
+:local waitNet 0
+:while ($waitNet < 60) do={
+  :do { :resolve "github.com"; :set waitNet 99 } on-error={ :delay 5s; :set waitNet ($waitNet + 5) }
+}
+```
+
+If a cached `.rsc` file exists on disk, it is imported immediately (without waiting for network), so routing works from the first seconds. The fresh version is downloaded later.
+
+**4. Clock lost after reboot (WG handshake fails)**
+
+Some MikroTik models (without RTC battery) lose time on reboot. If the clock is significantly off, the WireGuard server rejects handshakes (TAI64N replay protection). Until handshake succeeds, the tunnel is down and LAN traffic is lost.
+
+Boot sequence:
+1. Clock wrong → WG handshake rejected → tunnel down
+2. NTP syncs time (~5-15 sec) → clock corrected
+3. WG handshake succeeds → tunnel up
+4. USB mounts (~10-30 sec) → RU list imported from cache
+
+**Important:** The router's own NTP traffic goes direct (not through tunnel), since mangle rules only apply to `in-interface-list=LAN`. The issue is NTP sync speed, not routing.
+
+Recommendations:
+
+```routeros
+# Use IP-based NTP servers (no DNS resolution needed at boot)
+/system/ntp/client/set enabled=yes servers=216.239.35.0,216.239.35.4,ntp2.vniiftri.ru,ntp.ix.ru
+
+# Add NTP and DNS server IPs to RU list (for LAN devices to sync time directly)
+/ip/firewall/address-list/add list=RU address=216.239.35.0 comment=awg-proxy-ntp
+/ip/firewall/address-list/add list=RU address=216.239.35.4 comment=awg-proxy-ntp
+/ip/firewall/address-list/add list=RU address=8.8.8.8 comment=awg-proxy-dns
+/ip/firewall/address-list/add list=RU address=8.8.4.4 comment=awg-proxy-dns
+```
+
+LAN internet outage window is ~10-20 seconds (until NTP sync + WG handshake). NTP time-jump can also confuse scheduler timing.
 
 ### Handshake fails after backup restore
 

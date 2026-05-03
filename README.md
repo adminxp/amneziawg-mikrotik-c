@@ -27,6 +27,7 @@
   - [Insufficient disk space](#insufficient-disk-space)
   - [not allowed by device-mode](#not-allowed-by-device-mode)
   - [child spawn failed / could not load next layer](#child-spawn-failed--could-not-load-next-layer)
+  - [Список RU-адресов не загружается после перезагрузки](#список-ru-адресов-не-загружается-после-перезагрузки)
   - [Handshake не проходит после восстановления из бэкапа](#handshake-не-проходит-после-восстановления-из-бэкапа)
 - [Сборка из исходников](#сборка-из-исходников)
 - [Лицензия](#лицензия)
@@ -921,6 +922,80 @@ DSTNAT-трафик идёт через `forward` chain, а не `input`. Есл
    ```routeros
    /container add file=awg-proxy-arm.tar.gz ...
    ```
+
+### Список RU-адресов не загружается после перезагрузки
+
+При использовании сценария "Весь не-РФ трафик через туннель" список RU-адресов может не загружаться автоматически после перезагрузки роутера. Типичные причины:
+
+**1. Scheduler: `start-time=startup` + `interval` несовместимы**
+
+Это документированное поведение RouterOS: если у scheduler задан `interval` отличный от `0`, trigger `start-time=startup` **не срабатывает**. Scheduler покажет `run-count=0` после перезагрузки.
+
+Решение — два отдельных scheduler:
+
+```routeros
+# Для запуска при загрузке (interval ОБЯЗАТЕЛЬНО 0)
+/system/scheduler/add name=awg-proxy-ru-startup on-event="/system/script/run awg-proxy-ru-update" start-time=startup interval=0 comment=awg-proxy
+
+# Для ежедневного обновления
+/system/scheduler/add name=awg-proxy-ru-daily on-event="/system/script/run awg-proxy-ru-update" start-time=04:00:00 interval=1d comment=awg-proxy
+```
+
+Если у вас один scheduler с `start-time=startup interval=1d` — удалите его и создайте два.
+
+**2. USB-диск монтируется с задержкой**
+
+USB-накопитель появляется через 5-30 секунд после загрузки. Если скрипт запускается раньше, он не найдёт файл `.rsc` на USB. Конфигуратор добавляет в скрипт ожидание монтирования (до 60 секунд):
+
+```routeros
+:if ($disk != "disk1") do={
+  :local waited 0
+  :while ([:len [/disk/find where mount-point=$disk]] = 0 && $waited < 60) do={
+    :delay 5s
+    :set waited ($waited + 5)
+  }
+}
+```
+
+**3. Сеть не готова при загрузке**
+
+DHCP и DNS могут быть недоступны в первые секунды после boot. Скрипт ожидает доступность сети (до 60 секунд) перед скачиванием:
+
+```routeros
+:local waitNet 0
+:while ($waitNet < 60) do={
+  :do { :resolve "github.com"; :set waitNet 99 } on-error={ :delay 5s; :set waitNet ($waitNet + 5) }
+}
+```
+
+Если кешированный `.rsc` файл есть на диске — он импортируется сразу (не дожидаясь сети), и маршрутизация работает с первых секунд. Свежая версия скачивается позже.
+
+**4. Потеря времени при перезагрузке (WG handshake fails)**
+
+Некоторые модели MikroTik (без батарейки RTC) теряют время при перезагрузке. Если часы сильно отстают, WireGuard-сервер отклоняет handshake (защита TAI64N от replay-атак). Пока handshake не пройдёт — туннель не работает и LAN-трафик теряется.
+
+Последовательность при загрузке:
+1. Время сбито → WG handshake не проходит → туннель не работает
+2. NTP синхронизирует время (~5-15 сек) → время исправлено
+3. WG handshake проходит → туннель поднимается
+4. USB монтируется (~10-30 сек) → RU-список загружается из кеша
+
+**Важно:** NTP-трафик самого роутера идёт напрямую (не через туннель), т.к. mangle-правила действуют только на `in-interface-list=LAN`. Проблема не в маршрутизации NTP, а в скорости синхронизации.
+
+Рекомендации:
+
+```routeros
+# Используйте IP-адреса для NTP (не требуют DNS-резолва при старте)
+/system/ntp/client/set enabled=yes servers=216.239.35.0,216.239.35.4,ntp2.vniiftri.ru,ntp.ix.ru
+
+# Добавьте NTP и DNS серверы в RU list (для LAN-устройств, чтобы их NTP тоже шёл напрямую)
+/ip/firewall/address-list/add list=RU address=216.239.35.0 comment=awg-proxy-ntp
+/ip/firewall/address-list/add list=RU address=216.239.35.4 comment=awg-proxy-ntp
+/ip/firewall/address-list/add list=RU address=8.8.8.8 comment=awg-proxy-dns
+/ip/firewall/address-list/add list=RU address=8.8.4.4 comment=awg-proxy-dns
+```
+
+Окно без интернета для LAN ~10-20 секунд (до синхронизации NTP + WG handshake). NTP time-jump также может сбить планирование scheduler.
 
 ### Handshake не проходит после восстановления из бэкапа
 
