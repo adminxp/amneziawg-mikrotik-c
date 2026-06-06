@@ -1546,13 +1546,38 @@
         return true;
     }
 
-    function isValidAllowedIPs(s) {
-        var parts = s.split(/\s*,\s*/);
+    // Split a comma-separated AllowedIPs list into trimmed, non-empty tokens.
+    // Tolerates trailing/double commas, stray whitespace and newlines that are
+    // common in large split-tunnel lists (thousands of subnets concatenated by a
+    // script), which previously failed validation as bogus empty entries.
+    function splitAllowedIPs(s) {
+        var out = [];
+        var parts = (s || '').split(',');
         for (var i = 0; i < parts.length; i++) {
             var p = parts[i].trim();
-            if (!isValidIPCIDR(p) && !isValidIPv6CIDR(p)) return false;
+            if (p) out.push(p);
         }
-        return parts.length > 0;
+        return out;
+    }
+
+    // Returns the first token that is neither a valid IPv4 nor IPv6 CIDR, or null
+    // if every token is valid. Empty list -> '' (nothing valid to use).
+    function firstInvalidAllowedIP(s) {
+        var parts = splitAllowedIPs(s);
+        if (parts.length === 0) return '';
+        for (var i = 0; i < parts.length; i++) {
+            if (!isValidIPCIDR(parts[i]) && !isValidIPv6CIDR(parts[i])) return parts[i];
+        }
+        return null;
+    }
+
+    function isValidAllowedIPs(s) {
+        return firstInvalidAllowedIP(s) === null;
+    }
+
+    // Normalize for RouterOS: drop empty entries, collapse whitespace around commas.
+    function normalizeAllowedIPs(s) {
+        return splitAllowedIPs(s).join(',');
     }
 
     function isValidIP(s) {
@@ -1703,8 +1728,11 @@
             errors.push('[Peer] PublicKey -- invalid base64 key (expected 44 chars, 32 bytes)');
         if (!isValidEndpoint(peer.Endpoint))
             errors.push('[Peer] Endpoint -- invalid format (expected host:port)');
-        if (!isValidAllowedIPs(peer.AllowedIPs))
-            errors.push('[Peer] AllowedIPs -- invalid format (expected comma-separated CIDR)');
+        var badAllowedIP = firstInvalidAllowedIP(peer.AllowedIPs);
+        if (badAllowedIP !== null)
+            errors.push(badAllowedIP === ''
+                ? '[Peer] AllowedIPs -- no valid CIDR entries found'
+                : '[Peer] AllowedIPs -- invalid entry "' + (badAllowedIP.length > 40 ? badAllowedIP.slice(0, 40) + '…' : badAllowedIP) + '" (expected X.X.X.X/N or IPv6/N)');
         if (peer.PresharedKey && !isValidBase64Key(peer.PresharedKey))
             errors.push('[Peer] PresharedKey -- invalid base64 key (expected 44 chars, 32 bytes)');
         if (peer.PersistentKeepalive && !isPositiveInt(peer.PersistentKeepalive))
@@ -2467,7 +2495,7 @@
             ' public-key="' + p.PublicKey + '"';
         if (p.PresharedKey) peerAdd += ' preshared-key="' + p.PresharedKey + '"';
         peerAdd += ' endpoint-address=' + vethIP + ' endpoint-port=51820' +
-            ' allowed-address=' + p.AllowedIPs.replace(/\s*,\s*/g, ',');
+            ' allowed-address=' + normalizeAllowedIPs(p.AllowedIPs);
         if (p.PersistentKeepalive) peerAdd += ' persistent-keepalive=' + randomizeKeepalive(p.PersistentKeepalive);
 
         var detectedProto = detectProtocol(i);
@@ -2747,7 +2775,7 @@
             ' public-key="' + p.PublicKey + '"';
         if (p.PresharedKey) peerAdd += ' preshared-key="' + p.PresharedKey + '"';
         peerAdd += ' endpoint-address=' + proxyIP + ' endpoint-port=51820' +
-            ' allowed-address=' + p.AllowedIPs.replace(/\s*,\s*/g, ',');
+            ' allowed-address=' + normalizeAllowedIPs(p.AllowedIPs);
         if (p.PersistentKeepalive) peerAdd += ' persistent-keepalive=' + randomizeKeepalive(p.PersistentKeepalive);
 
         var lines = [
