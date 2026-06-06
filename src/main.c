@@ -232,6 +232,12 @@ int main(void) {
     if ((v = getenv("AWG_S3")) && v[0]) cfg->s3 = parse_int_str(v);
     if ((v = getenv("AWG_S4")) && v[0]) cfg->s4 = parse_int_str(v);
 
+    {
+        const char *cfg_err = NULL;
+        if (config_validate(cfg, &cfg_err) < 0)
+            fatal(cfg_err);
+    }
+
     /* CPS templates I1-I5 */
     const char *inames[] = { "AWG_I1", "AWG_I2", "AWG_I3", "AWG_I4", "AWG_I5" };
     for (int i = 0; i < 5; i++) {

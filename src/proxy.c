@@ -24,9 +24,8 @@ static void fill_h4_ring(proxy_t *p) {
             p->h4_ring[i] = v;
         return;
     }
-    int span = (int)(p->cfg->h4.max - p->cfg->h4.min + 1);
     for (int i = 0; i < H4_RING_SIZE; i++)
-        p->h4_ring[i] = p->cfg->h4.min + (uint32_t)fastrand_intn(&p->rng, span);
+        p->h4_ring[i] = hrange_pick(&p->cfg->h4, fastrand_u64(&p->rng));
 }
 
 static inline uint32_t pick_h4(proxy_t *p) {
@@ -35,6 +34,22 @@ static inline uint32_t pick_h4(proxy_t *p) {
     if (p->h4_idx == 0)
         fill_h4_ring(p);
     return v;
+}
+
+static int checked_mul_size(size_t a, size_t b, size_t *out) {
+    if (a != 0 && b > SIZE_MAX / a)
+        return -1;
+    *out = a * b;
+    return 0;
+}
+
+static int junk_layout_sizes(const awg_config_t *cfg,
+                             size_t *junk_bytes, size_t *junk_sizes_bytes) {
+    if (checked_mul_size((size_t)cfg->jc, (size_t)cfg->jmax, junk_bytes) < 0)
+        return -1;
+    if (checked_mul_size((size_t)cfg->jc, sizeof(int), junk_sizes_bytes) < 0)
+        return -1;
+    return 0;
 }
 
 static int resolve_addr(const char *host, uint16_t port, struct sockaddr_in *addr) {
@@ -279,6 +294,7 @@ static int send_gso(int fd, struct iovec *iovecs, int count,
 
 int proxy_init(proxy_t *p, awg_config_t *cfg,
                const char *listen_str, const char *remote_str, int src_port) {
+    const char *cfg_err = NULL;
     memset(p, 0, sizeof(*p));
     p->cfg = cfg;
     p->listen_fd = -1;
@@ -286,6 +302,11 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
     p->signal_fd = -1;
     p->timer_fd = -1;
     p->gso_ok = 1;
+
+    if (config_validate(cfg, &cfg_err) < 0) {
+        log_error2("invalid config: ", cfg_err);
+        return -1;
+    }
 
     /* Parse listen address */
     char host[256];
@@ -321,8 +342,12 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
 
     /* Pre-allocate junk buffers */
     if (cfg->jc > 0 && cfg->jmax > 0) {
-        p->junk_buf = (uint8_t *)malloc(cfg->jc * cfg->jmax);
-        p->junk_sizes = (int *)malloc(cfg->jc * sizeof(int));
+        size_t junk_bytes;
+        size_t junk_sizes_bytes;
+        if (junk_layout_sizes(cfg, &junk_bytes, &junk_sizes_bytes) < 0)
+            return -1;
+        p->junk_buf = (uint8_t *)malloc(junk_bytes);
+        p->junk_sizes = (int *)malloc(junk_sizes_bytes);
         if (!p->junk_buf || !p->junk_sizes) return -1;
     }
 
@@ -366,7 +391,7 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
     /* recv_s2c: remote socket, connected — no addr needed */
     for (int i = 0; i < BATCH_SIZE; i++) {
         p->recv_s2c.iovecs[i].iov_base = p->recv_s2c.bufs[i] + s2c_headroom;
-        p->recv_s2c.iovecs[i].iov_len = BUF_SIZE + 256 - s2c_headroom;
+        p->recv_s2c.iovecs[i].iov_len = BUF_SIZE + AWG_PACKET_HEADROOM - s2c_headroom;
         p->recv_s2c.msgs[i].msg_hdr.msg_iov = &p->recv_s2c.iovecs[i];
         p->recv_s2c.msgs[i].msg_hdr.msg_iovlen = 1;
     }
@@ -413,12 +438,17 @@ static void send_junk_and_cps_to(proxy_t *p, int fd, struct sockaddr_in *addr) {
         send_packet_to(fd, p->cps_bufs[i], p->cps_lens[i], addr);
 
     if (cfg->jc > 0 && cfg->jmax > 0) {
-        fastrand_fill(&p->rng, p->junk_buf, cfg->jc * cfg->jmax);
+        size_t junk_bytes;
+        size_t junk_sizes_bytes;
+        if (junk_layout_sizes(cfg, &junk_bytes, &junk_sizes_bytes) < 0)
+            return;
+        (void)junk_sizes_bytes;
+        fastrand_fill(&p->rng, p->junk_buf, junk_bytes);
         int njunk = generate_junk(cfg, p->junk_buf, p->junk_sizes);
-        int off = 0;
+        size_t off = 0;
         for (int i = 0; i < njunk; i++) {
             send_packet_to(fd, p->junk_buf + off, p->junk_sizes[i], addr);
-            off += p->junk_sizes[i];
+            off += (size_t)p->junk_sizes[i];
         }
     }
 }
@@ -434,12 +464,17 @@ static void send_junk_and_cps(proxy_t *p, int fd) {
 
     /* Junk packets */
     if (cfg->jc > 0 && cfg->jmax > 0) {
-        fastrand_fill(&p->rng, p->junk_buf, cfg->jc * cfg->jmax);
+        size_t junk_bytes;
+        size_t junk_sizes_bytes;
+        if (junk_layout_sizes(cfg, &junk_bytes, &junk_sizes_bytes) < 0)
+            return;
+        (void)junk_sizes_bytes;
+        fastrand_fill(&p->rng, p->junk_buf, junk_bytes);
         int njunk = generate_junk(cfg, p->junk_buf, p->junk_sizes);
-        int off = 0;
+        size_t off = 0;
         for (int i = 0; i < njunk; i++) {
             send_packet(fd, p->junk_buf + off, p->junk_sizes[i]);
-            off += p->junk_sizes[i];
+            off += (size_t)p->junk_sizes[i];
         }
     }
 }
@@ -517,6 +552,10 @@ static void *c2s_thread_normal(void *arg) {
                 gro_no_coalesce = 0;
                 for (int off = 0; off < total && nrecv < BATCH_SIZE; off += seg_size) {
                     int plen = (off + seg_size <= total) ? seg_size : (int)(total - off);
+                    if (plen > BUF_SIZE) {
+                        log_debug("c2s: dropping oversized GRO segment");
+                        continue;
+                    }
                     memcpy(p->recv_c2s.bufs[nrecv] + prefix, p->gro_buf_c2s + off, plen);
                     p->recv_c2s.msgs[nrecv].msg_len = plen;
                     nrecv++;
@@ -525,6 +564,10 @@ static void *c2s_thread_normal(void *arg) {
                 if (++gro_no_coalesce >= 8) {
                     p->gro_enabled_c2s = 0;
                     log_info("c2s: GRO not coalescing, falling back to recvmmsg");
+                }
+                if (total > BUF_SIZE) {
+                    log_debug("c2s: dropping oversized GRO datagram");
+                    continue;
                 }
                 memcpy(p->recv_c2s.bufs[0] + prefix, p->gro_buf_c2s, (int)total);
                 p->recv_c2s.msgs[0].msg_len = (unsigned int)total;
@@ -1016,7 +1059,7 @@ static void *s2c_thread(void *arg) {
 
     int reverse = (p->cfg->mode != AWG_MODE_NORMAL);
     int s2c_headroom = reverse ? p->cfg->s4 : 0;
-    int s2c_buflen = BUF_SIZE + 256 - s2c_headroom;
+    int s2c_buflen = BUF_SIZE + AWG_PACKET_HEADROOM - s2c_headroom;
     int gro_no_coalesce = 0;
 
     while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {

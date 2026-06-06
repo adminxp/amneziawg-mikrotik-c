@@ -16,6 +16,10 @@
 #define WG_COOKIE_SIZE    64
 #define WG_TRANSPORT_MIN  32
 
+/* Shared fixed buffer sizes used by the proxy data paths */
+#define AWG_PACKET_BUF_SIZE 1500
+#define AWG_PACKET_HEADROOM 256
+
 /* H range for v2 */
 typedef struct {
     uint32_t min, max;
@@ -23,7 +27,8 @@ typedef struct {
 
 static inline uint32_t hrange_pick(const hrange_t *r, uint64_t rand_val) {
     if (r->min == r->max) return r->min;
-    return r->min + (uint32_t)(rand_val % (uint64_t)(r->max - r->min + 1));
+    uint64_t span = (uint64_t)r->max - (uint64_t)r->min + 1u;
+    return r->min + (uint32_t)(rand_val % span);
 }
 
 static inline int hrange_contains(const hrange_t *r, uint32_t v) {
@@ -103,6 +108,9 @@ typedef struct {
 
 /* Compute MAC1 keys and fast-path flags. Call after setting all config fields. */
 void config_compute(awg_config_t *cfg);
+
+/* Validate config values that participate in buffer sizing and layout. */
+int config_validate(const awg_config_t *cfg, const char **err_msg);
 
 /* Transform outbound WG->AWG. Returns output pointer and length.
  * buf has dataoff bytes of headroom before the packet data.

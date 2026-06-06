@@ -4,8 +4,43 @@
 #include <string.h>
 
 /* Static buffer for handshake packets when headroom is insufficient.
- * Handshakes are rare (1-2 per connection), so static is fine. Max: S_max + 148 */
-static __thread uint8_t hs_buf[1500];
+ * Handshakes are rare (1-2 per connection), so static is fine. */
+static __thread uint8_t hs_buf[AWG_PACKET_BUF_SIZE];
+
+static int hrange_overlaps(const hrange_t *a, const hrange_t *b) {
+    return a->min <= b->max && b->min <= a->max;
+}
+
+int config_validate(const awg_config_t *cfg, const char **err_msg) {
+    if (cfg->s1 < 0 || cfg->s1 > AWG_PACKET_BUF_SIZE - WG_INIT_SIZE) {
+        *err_msg = "AWG_S1: must be between 0 and 1352";
+        return -1;
+    }
+    if (cfg->s2 < 0 || cfg->s2 > AWG_PACKET_BUF_SIZE - WG_RESP_SIZE) {
+        *err_msg = "AWG_S2: must be between 0 and 1408";
+        return -1;
+    }
+    if (cfg->s3 < 0 || cfg->s3 > AWG_PACKET_BUF_SIZE - WG_COOKIE_SIZE) {
+        *err_msg = "AWG_S3: must be between 0 and 1436";
+        return -1;
+    }
+    if (cfg->s4 < 0 || cfg->s4 > AWG_PACKET_HEADROOM) {
+        *err_msg = "AWG_S4: must be between 0 and 256";
+        return -1;
+    }
+    if (hrange_overlaps(&cfg->h1, &cfg->h2) ||
+        hrange_overlaps(&cfg->h1, &cfg->h3) ||
+        hrange_overlaps(&cfg->h1, &cfg->h4) ||
+        hrange_overlaps(&cfg->h2, &cfg->h3) ||
+        hrange_overlaps(&cfg->h2, &cfg->h4) ||
+        hrange_overlaps(&cfg->h3, &cfg->h4)) {
+        *err_msg = "AWG_H1..AWG_H4: ranges must not overlap";
+        return -1;
+    }
+
+    *err_msg = NULL;
+    return 0;
+}
 
 void config_compute(awg_config_t *cfg) {
     static const uint8_t z[32] = {0};

@@ -395,6 +395,60 @@ static void test_hrange_pick_contains(void) {
     ASSERT(hrange_contains(&r3, 20));
     ASSERT(!hrange_contains(&r3, 9));
     ASSERT(!hrange_contains(&r3, 21));
+
+    hrange_t r4 = {1000200001u, 4294967295u};
+    for (int i = 0; i < 1000; i++) {
+        uint32_t v = hrange_pick(&r4, (uint64_t)i * 0x9E3779B97F4A7C15ULL);
+        ASSERT(hrange_contains(&r4, v));
+    }
+
+    hrange_t r5 = {0u, UINT32_MAX};
+    ASSERT_EQ(hrange_pick(&r5, 0x1122334455667788ULL), 0x55667788u);
+}
+
+static void test_config_validate_accepts_safe_limits(void) {
+    awg_config_t cfg = make_test_config();
+    const char *err = "unexpected";
+
+    cfg.s1 = AWG_PACKET_BUF_SIZE - WG_INIT_SIZE;
+    cfg.s2 = AWG_PACKET_BUF_SIZE - WG_RESP_SIZE;
+    cfg.s3 = AWG_PACKET_BUF_SIZE - WG_COOKIE_SIZE;
+    cfg.s4 = AWG_PACKET_HEADROOM;
+
+    ASSERT_EQ(config_validate(&cfg, &err), 0);
+    ASSERT(err == NULL);
+}
+
+static void test_config_validate_rejects_unsafe_padding(void) {
+    awg_config_t cfg = make_test_config();
+    const char *err = NULL;
+
+    cfg.s1 = AWG_PACKET_BUF_SIZE - WG_INIT_SIZE + 1;
+    ASSERT_EQ(config_validate(&cfg, &err), -1);
+    ASSERT(err != NULL);
+
+    cfg = make_test_config();
+    err = NULL;
+    cfg.s4 = AWG_PACKET_HEADROOM + 1;
+    ASSERT_EQ(config_validate(&cfg, &err), -1);
+    ASSERT(err != NULL);
+
+    cfg = make_test_config();
+    err = NULL;
+    cfg.s2 = -1;
+    ASSERT_EQ(config_validate(&cfg, &err), -1);
+    ASSERT(err != NULL);
+}
+
+static void test_config_validate_rejects_overlapping_hranges(void) {
+    awg_config_t cfg = make_test_config();
+    const char *err = NULL;
+
+    cfg.h1 = (hrange_t){100, 200};
+    cfg.h2 = (hrange_t){200, 300};
+
+    ASSERT_EQ(config_validate(&cfg, &err), -1);
+    ASSERT(err != NULL);
 }
 
 /* 21. Outbound cookie with S3 */
@@ -1141,6 +1195,9 @@ int main(void) {
     RUN_TEST(no_padding_s2_zero);
     RUN_TEST(outbound_too_short);
     RUN_TEST(hrange_pick_contains);
+    RUN_TEST(config_validate_accepts_safe_limits);
+    RUN_TEST(config_validate_rejects_unsafe_padding);
+    RUN_TEST(config_validate_rejects_overlapping_hranges);
     RUN_TEST(outbound_cookie_with_s3);
     RUN_TEST(outbound_transport_with_s4);
     RUN_TEST(inbound_scanning_s3);
