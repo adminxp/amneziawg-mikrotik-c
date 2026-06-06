@@ -949,6 +949,7 @@
         <div class="card s2s-side">
             <div class="s2s-side-header">
                 <div class="card-title" style="margin-bottom:0" id="srv-client-title" data-i18n="srvOutputClient">Client 1</div>
+                <button class="btn btn-secondary" id="srv-download-conf" onclick="downloadAwgConf()" data-i18n="btnAwgConf">.conf for AmneziaWG</button>
                 <button class="btn btn-secondary" id="srv-copy-client" onclick="copyOutput('srv-out-client','srv-copy-client')" data-i18n="btnCopy">Copy all</button>
             </div>
             <pre id="srv-out-client" class="s2s-output"></pre>
@@ -1010,6 +1011,7 @@
             parsedTitle: 'Parsed parameters',
             outputTitle: 'Step 1: Install AWG Proxy',
             btnCopy: 'Copy all',
+            btnAwgConf: '.conf for AmneziaWG',
             routingTitle: 'Step 2: Routing Setup',
             btnCopyRouting: 'Copy routing',
             routingNote: 'Paste this AFTER Step 1 completes (wait for "Installation complete!").',
@@ -1181,6 +1183,7 @@
             parsedTitle: '\u0420\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u043d\u043d\u044b\u0435 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b',
             outputTitle: '\u0428\u0430\u0433 1: \u0423\u0441\u0442\u0430\u043d\u043e\u0432\u043a\u0430 AWG Proxy',
             btnCopy: '\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c',
+            btnAwgConf: '.conf \u0434\u043b\u044f AmneziaWG',
             routingTitle: '\u0428\u0430\u0433 2: \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438',
             btnCopyRouting: '\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c',
             routingNote: '\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u042d\u0422\u041e \u041f\u041e\u0421\u041b\u0415 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u044f \u0428\u0430\u0433\u0430 1 (\u0434\u043e\u0436\u0434\u0438\u0442\u0435\u0441\u044c "Installation complete!").',
@@ -3104,6 +3107,8 @@
     // ============================================================
     var serverParams = null;
     var serverFromURL = null;
+    var lastAwgConf = null;
+    var lastAwgConfName = 'awg-client.conf';
 
     function ensureServerParams() {
         if (!serverParams) {
@@ -3372,6 +3377,8 @@
         src.push('  :do { /ip/firewall/filter/remove [find where comment=' + prefix + '-wg-in] } on-error={}');
         src.push('  :do { /ip/firewall/filter/remove [find where comment=' + prefix + '-wg-mgmt] } on-error={}');
         src.push('  :do { /ip/firewall/nat/remove [find where comment=' + prefix + '-dstnat] } on-error={}');
+        src.push('  :do { /ip/firewall/nat/remove [find where comment=' + prefix + '-ft-nat] } on-error={}');
+        src.push('  :do { /ip/firewall/filter/remove [find where comment=' + prefix + '-ft-fwd] } on-error={}');
         src.push('  /ip/firewall/nat/remove [find where src-address="' + net.natSrc + '"]');
         src.push('  :do { /ip/firewall/nat/remove [find where out-interface="wg-' + prefix + '"] } on-error={}');
         src.push('  /ip/address/remove [find where address="' + net.hostAddr + '"]');
@@ -3392,6 +3399,33 @@
         src.push('  :put "Done."');
         src.push('}');
         return src.join('\n');
+    }
+
+    // Build a valid AmneziaWG .conf for a direct full-tunnel client (protocol v1: Jc/Jmin/Jmax/S1/S2/H1-H4).
+    // o: { clientPriv, serverPub, awgParams, endpoint, awgPort, tunClientIP, dnsServer }
+    function buildAwgConf(o) {
+        var p = o.awgParams;
+        var lines = [];
+        lines.push('[Interface]');
+        lines.push('PrivateKey = ' + o.clientPriv);
+        lines.push('Address = ' + o.tunClientIP + '/32');
+        if (o.dnsServer) lines.push('DNS = ' + o.dnsServer);
+        lines.push('Jc = ' + p.jc);
+        lines.push('Jmin = ' + p.jmin);
+        lines.push('Jmax = ' + p.jmax);
+        lines.push('S1 = ' + p.s1);
+        lines.push('S2 = ' + p.s2);
+        lines.push('H1 = ' + p.h1);
+        lines.push('H2 = ' + p.h2);
+        lines.push('H3 = ' + p.h3);
+        lines.push('H4 = ' + p.h4);
+        lines.push('');
+        lines.push('[Peer]');
+        lines.push('PublicKey = ' + o.serverPub);
+        lines.push('Endpoint = ' + o.endpoint + ':' + o.awgPort);
+        lines.push('AllowedIPs = 0.0.0.0/0');
+        lines.push('PersistentKeepalive = 25');
+        return lines.join('\n');
     }
 
     function buildServerCommands(endpoint, awgParams, tunnelCidr, storageServer, storageClient, prefix, serverLAN, clientLAN, netMode, clientNum, dnsServer) {
@@ -3455,6 +3489,9 @@
         ls.push('/ip/firewall/filter/add chain=input action=accept protocol=udp src-address=' + vethIP + ' dst-port=' + wgPort + ' place-before=0 comment=' + prefix + '-wg-in');
         ls.push('/ip/firewall/filter/add chain=input action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-wg-mgmt');
         ls.push('/ip/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgPort + ' in-interface-list=WAN to-addresses=' + vethIP + ' to-ports=' + awgPort + ' comment=' + prefix + '-dstnat');
+        ls.push('# Full-tunnel egress for direct AmneziaWG clients (no-op for site-to-site peers that don\'t route 0.0.0.0/0)');
+        ls.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + tunnelCidr + ' out-interface-list=WAN comment=' + prefix + '-ft-nat');
+        ls.push('/ip/firewall/filter/add chain=forward action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-ft-fwd');
         ls.push('');
 
         ls.push('# 5. Container environment variables');
@@ -3567,7 +3604,16 @@
             client: lc.join('\n'),
             shareURL: shareURL,
             serverKey: serverKey,
-            clientKey: clientKey
+            clientKey: clientKey,
+            awgConf: buildAwgConf({
+                clientPriv: clientKey.privateKey,
+                serverPub: serverKey.publicKey,
+                awgParams: awgParams,
+                endpoint: endpoint,
+                awgPort: awgPort,
+                tunClientIP: tunClientIP,
+                dnsServer: dnsServer
+            })
         };
     }
 
@@ -3679,7 +3725,16 @@
         return {
             serverUpdate: lu.join('\n'),
             client: lc.join('\n'),
-            shareURL: nextURL
+            shareURL: nextURL,
+            awgConf: buildAwgConf({
+                clientPriv: clientKey.privateKey,
+                serverPub: serverWgPubKey,
+                awgParams: awgParams,
+                endpoint: endpoint,
+                awgPort: awgPort,
+                tunClientIP: tunClientIP,
+                dnsServer: dnsServer
+            })
         };
     }
 
@@ -3730,6 +3785,8 @@
             document.getElementById('srv-out-client').innerHTML = highlight(result.client);
             document.getElementById('srv-client-title').textContent = t('srvOutputClient') + ' ' + clientNum;
             document.getElementById('srv-share-url').value = result.shareURL;
+            lastAwgConf = result.awgConf;
+            lastAwgConfName = 'awg-client-' + clientNum + '.conf';
         } else {
             ensureServerParams();
             serverParams.port = awgPort;
@@ -3744,6 +3801,8 @@
             document.getElementById('srv-out-client').innerHTML = highlight(result.client);
             document.getElementById('srv-client-title').textContent = t('srvOutputClient') + ' ' + clientNum;
             document.getElementById('srv-share-url').value = result.shareURL;
+            lastAwgConf = result.awgConf;
+            lastAwgConfName = 'awg-client-' + clientNum + '.conf';
         }
 
         document.getElementById('srv-output-section').style.display = 'block';
@@ -4307,6 +4366,18 @@
         document.getElementById('doh-custom-url').style.display = 'none';
         document.getElementById('doh-custom-url').value = '';
         document.getElementById('conf-input').focus();
+    }
+
+    function downloadFile(name, content) {
+        var b = new Blob([content], { type: 'application/octet-stream' });
+        var u = URL.createObjectURL(b), a = document.createElement('a');
+        a.href = u; a.download = name;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(u); }, 1500);
+    }
+
+    function downloadAwgConf() {
+        if (lastAwgConf) downloadFile(lastAwgConfName, lastAwgConf);
     }
 
     function copyOutput(preId, btnId) {
