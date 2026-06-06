@@ -805,6 +805,7 @@
                 <div class="radio-group">
                     <label><input type="radio" name="srv-net" value="none" onchange="onSrvNetChange()"> <span data-i18n="srvNetNone">None</span></label>
                     <label><input type="radio" name="srv-net" value="l3" checked onchange="onSrvNetChange()"> <span data-i18n="srvNetL3">L3 routing (IP)</span></label>
+                    <label><input type="radio" name="srv-net" value="awg" onchange="onSrvNetChange()"> <span data-i18n="srvNetAwg">Direct AmneziaWG client</span></label>
                 </div>
                 <div id="srv-net-hint" class="hint" data-i18n="srvNetL3Hint">Devices will be able to reach each other by IP across subnets. What becomes possible: access NAS/file shares, IP cameras, printers by address, remote desktop (RDP/VNC), manage routers via WinBox/SSH, host game servers, access home automation (Home Assistant). Does NOT work: broadcast/multicast services. Note: each client only sees the server LAN by default. To connect two clients to each other, additional routes must be added manually.</div>
             </div>
@@ -846,7 +847,7 @@
                         <option value="usb1-part1">usb1-part1/</option>
                     </select>
                 </div>
-                <div>
+                <div id="srv-storage-client-wrap">
                     <label for="srv-storage-client" data-i18n="srvStorageClient">Client storage</label>
                     <select id="srv-storage-client">
                         <option value="__auto" data-i18n="sAuto">Auto (usb1/ &rarr; disk1/)</option>
@@ -949,10 +950,10 @@
         <div class="card s2s-side">
             <div class="s2s-side-header">
                 <div class="card-title" style="margin-bottom:0" id="srv-client-title" data-i18n="srvOutputClient">Client 1</div>
-                <button class="btn btn-secondary" id="srv-download-conf" onclick="downloadAwgConf()" data-i18n="btnAwgConf">.conf for AmneziaWG</button>
                 <button class="btn btn-secondary" id="srv-copy-client" onclick="copyOutput('srv-out-client','srv-copy-client')" data-i18n="btnCopy">Copy all</button>
             </div>
             <pre id="srv-out-client" class="s2s-output"></pre>
+            <button class="btn btn-primary" id="srv-download-conf" onclick="downloadAwgConf()" data-i18n="btnDownloadConf" style="display:none;margin-top:10px">Download .conf</button>
         </div>
         <div id="srv-server-update" class="card s2s-side" style="display:none">
             <div class="s2s-side-header">
@@ -1011,7 +1012,7 @@
             parsedTitle: 'Parsed parameters',
             outputTitle: 'Step 1: Install AWG Proxy',
             btnCopy: 'Copy all',
-            btnAwgConf: '.conf for AmneziaWG',
+            btnDownloadConf: 'Download .conf',
             routingTitle: 'Step 2: Routing Setup',
             btnCopyRouting: 'Copy routing',
             routingNote: 'Paste this AFTER Step 1 completes (wait for "Installation complete!").',
@@ -1097,6 +1098,9 @@
             srvNetNone: 'None',
             srvNetL3: 'L3 routing (IP)',
             srvNetL2: 'L2+L3 Bridging (EoIP)',
+            srvNetAwg: 'Direct AmneziaWG client',
+            srvNetAwgHint: 'Generates a ready-to-import .conf for a phone / laptop / AmneziaWG app instead of a second MikroTik. All device traffic is routed through the hub (full tunnel, AllowedIPs = 0.0.0.0/0). The head MikroTik just gets a peer with one tunnel IP — no client-side router needed. LAN merging fields are not used here.',
+            srvAwgConfTitle: '.conf for AmneziaWG — Client',
             srvNetNoneHint: 'VPN tunnel only. No routing between LANs is configured \u2014 further network setup is up to the admin. Once the tunnel is established, you can connect to the remote MikroTik via WinBox/SSH using its tunnel IP (e.g. 10.10.10.2).',
             srvNetL3Hint: 'Devices will be able to reach each other by IP across subnets. What becomes possible: access NAS/file shares, IP cameras, printers by address, remote desktop (RDP/VNC), manage routers via WinBox/SSH, host game servers, access home automation (Home Assistant). Does NOT work: broadcast/multicast services \u2014 auto-discovery (mDNS/Bonjour, DLNA, AirPlay, Chromecast), Windows Network Neighborhood, printer auto-discovery, Wake-on-LAN. Note: each client only sees the server LAN by default. To connect two clients to each other, additional routes must be added manually \u2014 see README section "Routing between clients".',
             srvNetL2Hint: 'Single network \u2014 all devices as if on one switch. Everything works: mDNS (Bonjour), DLNA, AirPlay, Chromecast, Windows Network, printer discovery. Downside: broadcast traffic goes through tunnel, more load.',
@@ -1183,7 +1187,7 @@
             parsedTitle: '\u0420\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u043d\u043d\u044b\u0435 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b',
             outputTitle: '\u0428\u0430\u0433 1: \u0423\u0441\u0442\u0430\u043d\u043e\u0432\u043a\u0430 AWG Proxy',
             btnCopy: '\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c',
-            btnAwgConf: '.conf \u0434\u043b\u044f AmneziaWG',
+            btnDownloadConf: '\u0421\u043a\u0430\u0447\u0430\u0442\u044c .conf',
             routingTitle: '\u0428\u0430\u0433 2: \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438',
             btnCopyRouting: '\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c',
             routingNote: '\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u042d\u0422\u041e \u041f\u041e\u0421\u041b\u0415 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u044f \u0428\u0430\u0433\u0430 1 (\u0434\u043e\u0436\u0434\u0438\u0442\u0435\u0441\u044c "Installation complete!").',
@@ -1266,6 +1270,9 @@
             srvNetNone: '\u041d\u0435\u0442',
             srvNetL3: 'L3 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f (IP)',
             srvNetL2: 'L2+L3 Bridging (EoIP)',
+            srvNetAwg: '\u041f\u0440\u044f\u043c\u043e\u0439 \u043a\u043b\u0438\u0435\u043d\u0442 AmneziaWG',
+            srvNetAwgHint: '\u0412\u043c\u0435\u0441\u0442\u043e \u0432\u0442\u043e\u0440\u043e\u0433\u043e MikroTik \u0433\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u0435\u0442 \u0433\u043e\u0442\u043e\u0432\u044b\u0439 .conf \u0434\u043b\u044f \u0438\u043c\u043f\u043e\u0440\u0442\u0430 \u0432 \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435 AmneziaWG (\u0442\u0435\u043b\u0435\u0444\u043e\u043d / \u043d\u043e\u0443\u0442\u0431\u0443\u043a). \u0412\u0435\u0441\u044c \u0442\u0440\u0430\u0444\u0438\u043a \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0430 \u0438\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 \u0445\u0430\u0431 (full-tunnel, AllowedIPs = 0.0.0.0/0). \u041d\u0430 \u0433\u043e\u043b\u043e\u0432\u043d\u043e\u043c MikroTik \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e peer \u0441 \u043e\u0434\u043d\u0438\u043c IP \u0432 \u0442\u0443\u043d\u043d\u0435\u043b\u0435 \u2014 \u043a\u043b\u0438\u0435\u043d\u0442\u0441\u043a\u0438\u0439 \u0440\u043e\u0443\u0442\u0435\u0440 \u043d\u0435 \u043d\u0443\u0436\u0435\u043d. \u041f\u043e\u043b\u044f \u043e\u0431\u044a\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f LAN \u0437\u0434\u0435\u0441\u044c \u043d\u0435 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f.',
+            srvAwgConfTitle: '.conf \u0434\u043b\u044f AmneziaWG \u2014 \u041a\u043b\u0438\u0435\u043d\u0442',
             srvNetNoneHint: '\u0422\u043e\u043b\u044c\u043a\u043e VPN-\u0442\u0443\u043d\u043d\u0435\u043b\u044c. \u041c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f \u043c\u0435\u0436\u0434\u0443 \u0441\u0435\u0442\u044f\u043c\u0438 \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u0430\u0438\u0432\u0430\u0435\u0442\u0441\u044f \u2014 \u0434\u0430\u043b\u044c\u043d\u0435\u0439\u0448\u0430\u044f \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430 \u0441\u0435\u0442\u0438 \u043d\u0430 \u0430\u0434\u043c\u0438\u043d\u0435. \u041f\u043e\u0434\u043a\u043b\u044e\u0447\u0438\u0442\u044c\u0441\u044f \u043a \u0443\u0434\u0430\u043b\u0451\u043d\u043d\u043e\u043c\u0443 \u0440\u043e\u0443\u0442\u0435\u0440\u0443 \u043c\u043e\u0436\u043d\u043e \u0447\u0435\u0440\u0435\u0437 \u041f\u043e\u0441\u043b\u0435 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f \u043c\u043e\u0436\u043d\u043e \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0430\u0442\u044c\u0441\u044f \u043a \u0443\u0434\u0430\u043b\u0451\u043d\u043d\u043e\u043c\u0443 MikroTik \u0447\u0435\u0440\u0435\u0437 WinBox/SSH \u043f\u043e \u0442\u0443\u043d\u043d\u0435\u043b\u044c\u043d\u043e\u043c\u0443 IP (\u043d\u0430\u043f\u0440. 10.10.10.2).',
             srvNetL3Hint: '\u0423\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0430 \u0441\u043c\u043e\u0433\u0443\u0442 \u043e\u0431\u0440\u0430\u0449\u0430\u0442\u044c\u0441\u044f \u0434\u0440\u0443\u0433 \u043a \u0434\u0440\u0443\u0433\u0443 \u043f\u043e IP \u043c\u0435\u0436\u0434\u0443 \u043f\u043e\u0434\u0441\u0435\u0442\u044f\u043c\u0438. \u0421\u0442\u0430\u043d\u0435\u0442 \u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e: \u0434\u043e\u0441\u0442\u0443\u043f \u043a NAS/\u0444\u0430\u0439\u043b\u043e\u0432\u044b\u043c \u0448\u0430\u0440\u0430\u043c, IP-\u043a\u0430\u043c\u0435\u0440\u0430\u043c, \u043f\u0440\u0438\u043d\u0442\u0435\u0440\u0430\u043c \u043f\u043e \u0430\u0434\u0440\u0435\u0441\u0443, \u0443\u0434\u0430\u043b\u0451\u043d\u043d\u044b\u0439 \u0440\u0430\u0431\u043e\u0447\u0438\u0439 \u0441\u0442\u043e\u043b (RDP/VNC), \u0443\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u0440\u043e\u0443\u0442\u0435\u0440\u0430\u043c\u0438 \u0447\u0435\u0440\u0435\u0437 WinBox/SSH, \u0438\u0433\u0440\u043e\u0432\u044b\u0435 \u0441\u0435\u0440\u0432\u0435\u0440\u044b, \u0434\u043e\u0441\u0442\u0443\u043f \u043a \u0443\u043c\u043d\u043e\u043c\u0443 \u0434\u043e\u043c\u0443 (Home Assistant). \u041d\u0415 \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442: broadcast/multicast-\u0441\u0435\u0440\u0432\u0438\u0441\u044b \u2014 \u0430\u0432\u0442\u043e\u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u0438\u0435 (mDNS/Bonjour, DLNA, AirPlay, Chromecast), \u0441\u0435\u0442\u0435\u0432\u043e\u0435 \u043e\u043a\u0440\u0443\u0436\u0435\u043d\u0438\u0435 Windows, \u0430\u0432\u0442\u043e\u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u0438\u0435 \u043f\u0440\u0438\u043d\u0442\u0435\u0440\u043e\u0432, Wake-on-LAN. \u0412\u0430\u0436\u043d\u043e: \u043a\u0430\u0436\u0434\u044b\u0439 \u043a\u043b\u0438\u0435\u043d\u0442 \u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e \u0432\u0438\u0434\u0438\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0441\u0435\u0442\u044c \u0441\u0435\u0440\u0432\u0435\u0440\u0430. \u0427\u0442\u043e\u0431\u044b \u043a\u043b\u0438\u0435\u043d\u0442\u044b \u0432\u0438\u0434\u0435\u043b\u0438 \u0434\u0440\u0443\u0433 \u0434\u0440\u0443\u0433\u0430, \u043d\u0443\u0436\u043d\u043e \u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u044b \u0432\u0440\u0443\u0447\u043d\u0443\u044e \u2014 \u0441\u043c. README, \u0440\u0430\u0437\u0434\u0435\u043b "\u041c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f \u043c\u0435\u0436\u0434\u0443 \u043a\u043b\u0438\u0435\u043d\u0442\u0430\u043c\u0438".',
             srvNetL2Hint: '\u0415\u0434\u0438\u043d\u0430\u044f \u0441\u0435\u0442\u044c \u2014 \u0432\u0441\u0435 \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0430 \u043a\u0430\u043a \u0432 \u043e\u0434\u043d\u043e\u043c \u0441\u0432\u0438\u0442\u0447\u0435. \u0420\u0430\u0431\u043e\u0442\u0430\u0435\u0442 \u0412\u0421\u0401: mDNS (Bonjour), DLNA, AirPlay, Chromecast, \u0441\u0435\u0442\u0435\u0432\u043e\u0435 \u043e\u043a\u0440\u0443\u0436\u0435\u043d\u0438\u0435 Windows, \u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u0438\u0435 \u043f\u0440\u0438\u043d\u0442\u0435\u0440\u043e\u0432. \u041c\u0438\u043d\u0443\u0441: broadcast-\u0442\u0440\u0430\u0444\u0438\u043a \u0438\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 \u0442\u0443\u043d\u043d\u0435\u043b\u044c, \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0430\u0433\u0440\u0443\u0437\u043a\u0430.',
@@ -3126,23 +3133,29 @@
     }
 
     function onSrvNetChange() {
-        var radios = document.getElementsByName('srv-net');
-        var val = 'none';
-        for (var i = 0; i < radios.length; i++) if (radios[i].checked) val = radios[i].value;
-        var hintKey = val === 'l3' ? 'srvNetL3Hint' : 'srvNetNoneHint';
+        var val = getSrvNetMode();
+        var isAwg = val === 'awg';
+        var hintKey = isAwg ? 'srvNetAwgHint' : (val === 'l3' ? 'srvNetL3Hint' : 'srvNetNoneHint');
         var el = document.getElementById('srv-net-hint');
         el.setAttribute('data-i18n', hintKey);
         el.textContent = t(hintKey);
-        // Update LAN labels: required for L3/L2, optional for None
-        var req = val !== 'none';
-        var srvKey = req ? 'srvLanServerReq' : 'srvLanServerOpt';
-        var cliKey = req ? 'srvLanClientReq' : 'srvLanClientOpt';
-        var srvLabel = document.getElementById('srv-lan-server-label');
-        var cliLabel = document.getElementById('srv-lan-client-label');
-        srvLabel.setAttribute('data-i18n', srvKey);
-        srvLabel.textContent = t(srvKey);
-        cliLabel.setAttribute('data-i18n', cliKey);
-        cliLabel.textContent = t(cliKey);
+        // LAN merging + client-side MikroTik storage are only relevant for site-to-site (none/l3).
+        // A direct AmneziaWG client (phone/laptop) has no LAN to merge and no client router.
+        document.getElementById('srv-lan-fields').style.display = isAwg ? 'none' : '';
+        var csWrap = document.getElementById('srv-storage-client-wrap');
+        if (csWrap) csWrap.style.display = isAwg ? 'none' : '';
+        if (!isAwg) {
+            // Update LAN labels: required for L3, optional for None
+            var req = val !== 'none';
+            var srvKey = req ? 'srvLanServerReq' : 'srvLanServerOpt';
+            var cliKey = req ? 'srvLanClientReq' : 'srvLanClientOpt';
+            var srvLabel = document.getElementById('srv-lan-server-label');
+            var cliLabel = document.getElementById('srv-lan-client-label');
+            srvLabel.setAttribute('data-i18n', srvKey);
+            srvLabel.textContent = t(srvKey);
+            cliLabel.setAttribute('data-i18n', cliKey);
+            cliLabel.textContent = t(cliKey);
+        }
     }
 
     function getSrvNetMode() {
@@ -3738,6 +3751,27 @@
         };
     }
 
+    // Right-hand output column. For 'awg' mode it shows the importable .conf (plain text,
+    // copyable) + a visible "Download .conf" button; otherwise the client-side MikroTik script.
+    function renderClientPanel(result, netMode, clientNum) {
+        var pre = document.getElementById('srv-out-client');
+        var title = document.getElementById('srv-client-title');
+        var dlBtn = document.getElementById('srv-download-conf');
+        lastAwgConf = result.awgConf;
+        lastAwgConfName = 'awg-client-' + clientNum + '.conf';
+        if (netMode === 'awg') {
+            pre.dataset.plain = result.awgConf;
+            pre.textContent = result.awgConf;
+            title.textContent = t('srvAwgConfTitle') + ' ' + clientNum;
+            if (dlBtn) dlBtn.style.display = '';
+        } else {
+            pre.dataset.plain = result.client;
+            pre.innerHTML = highlight(result.client);
+            title.textContent = t('srvOutputClient') + ' ' + clientNum;
+            if (dlBtn) dlBtn.style.display = 'none';
+        }
+    }
+
     function generateServer() {
         var errs = [];
         var mode = getDeployMode();
@@ -3756,16 +3790,22 @@
         var dnsServer = document.getElementById('srv-dns').value.trim();
         var prefix = getPrefixName();
 
+        // Direct AmneziaWG client: full-tunnel, no LAN merging — ignore LAN inputs entirely.
+        if (netMode === 'awg') { serverLAN = ''; clientLAN = ''; }
+
         if (!endpoint) { errs.push(t('errSrvEndpoint')); }
         var tun = parseSlash24(tunnelSubnet);
         if (!tun) { errs.push(t('errSrvTunnelSubnet')); }
         var awgPort = Number(awgPortStr);
         if (awgPort < 1024 || awgPort > 65535) { errs.push(t('errAwgPort')); }
-        if (netMode !== 'none' && (!serverLAN || !clientLAN)) { errs.push(t('errSrvLanRequired')); }
+        if (netMode === 'l3' && (!serverLAN || !clientLAN)) { errs.push(t('errSrvLanRequired')); }
         if (serverLAN && !/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(serverLAN)) { errs.push(t('errLanSubnet')); }
         if (clientLAN && !/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(clientLAN)) { errs.push(t('errLanSubnet')); }
+        // A direct AmneziaWG client resolves the endpoint hostname itself (via the device's
+        // system DNS, before the tunnel comes up) — no proxy-side DNS is needed. Only the
+        // client-side MikroTik container (none/l3) needs AWG_DNS to resolve a hostname endpoint.
         var isHostname = endpoint && !/^\d{1,3}(\.\d{1,3}){3}$/.test(endpoint);
-        if (isHostname && !dnsServer) { errs.push(t('errDnsRequired')); }
+        if (netMode !== 'awg' && isHostname && !dnsServer) { errs.push(t('errDnsRequired')); }
 
         if (errs.length > 0) {
             document.getElementById('errors-container').innerHTML = '<div class="alert alert-error">' + errs.map(esc).join('<br>') + '</div>';
@@ -3781,12 +3821,8 @@
             document.getElementById('srv-server-update').style.display = 'block';
             document.getElementById('srv-out-update').dataset.plain = result.serverUpdate;
             document.getElementById('srv-out-update').innerHTML = highlight(result.serverUpdate);
-            document.getElementById('srv-out-client').dataset.plain = result.client;
-            document.getElementById('srv-out-client').innerHTML = highlight(result.client);
-            document.getElementById('srv-client-title').textContent = t('srvOutputClient') + ' ' + clientNum;
+            renderClientPanel(result, netMode, clientNum);
             document.getElementById('srv-share-url').value = result.shareURL;
-            lastAwgConf = result.awgConf;
-            lastAwgConfName = 'awg-client-' + clientNum + '.conf';
         } else {
             ensureServerParams();
             serverParams.port = awgPort;
@@ -3797,12 +3833,8 @@
             document.getElementById('srv-server-update').style.display = 'none';
             document.getElementById('srv-out-server').dataset.plain = result.server;
             document.getElementById('srv-out-server').innerHTML = highlight(result.server);
-            document.getElementById('srv-out-client').dataset.plain = result.client;
-            document.getElementById('srv-out-client').innerHTML = highlight(result.client);
-            document.getElementById('srv-client-title').textContent = t('srvOutputClient') + ' ' + clientNum;
+            renderClientPanel(result, netMode, clientNum);
             document.getElementById('srv-share-url').value = result.shareURL;
-            lastAwgConf = result.awgConf;
-            lastAwgConfName = 'awg-client-' + clientNum + '.conf';
         }
 
         document.getElementById('srv-output-section').style.display = 'block';
