@@ -2661,7 +2661,15 @@
             '  :if ($minor <= 20) do={ :set suffix "-7.20-Docker" }',
             '  :local file ""',
             '  :if ($arch = "arm64") do={ :set file ("awg-proxy-arm64" . $suffix . ".tar.gz") }',
-            '  :if ($arch = "arm") do={ :set file ("awg-proxy-arm" . $suffix . ".tar.gz") }',
+            '  :if ($arch = "arm") do={',
+            '    :set file ("awg-proxy-arm" . $suffix . ".tar.gz")',
+            '    :local rbModel ""',
+            '    :do { :set rbModel [/system/routerboard/get model] } on-error={}',
+            '    :local bName [/system/resource/get board-name]',
+            '    :if ($rbModel~"E50UG" || $rbModel~"E60iUGS" || $bName~"^hEX") do={',
+            '      :set file ("awg-proxy-armv5" . $suffix . ".tar.gz")',
+            '    }',
+            '  }',
             '  :if ($arch ~ "x86") do={ :set file ("awg-proxy-amd64" . $suffix . ".tar.gz") }',
             '  :if ($file = "") do={ :error "Unsupported architecture: $arch" }',
             '  :local url "' + REPO.dl + '$file"',
@@ -2847,6 +2855,7 @@
         lines.push('  :put "1. Download the binary for your platform:"');
         lines.push('  :put "   Linux arm64: ' + REPO.dl + 'awg-proxy-linux-arm64"');
         lines.push('  :put "   Linux arm:   ' + REPO.dl + 'awg-proxy-linux-arm"');
+        lines.push('  :put "   Linux armv5: ' + REPO.dl + 'awg-proxy-linux-armv5"');
         lines.push('  :put "   Linux amd64: ' + REPO.dl + 'awg-proxy-linux-amd64"');
         lines.push('  :put ""');
         lines.push('  :put "2. Set environment variables and run:"');
@@ -3141,11 +3150,106 @@
         };
     }
 
+    // Site-to-site uses a v2 primary profile (H ranges + S3) with a v1 fallback
+    // (fixed H) for DPI resilience: if the primary obfuscation stops getting
+    // through, both sides fall back to the secondary profile automatically.
+    function randomHRange() {
+        var base = randomUint32();
+        var width = randomInt(8, 64);
+        if (base > 4294967295 - width) base -= width;
+        return { min: base, max: base + width };
+    }
+
+    function hRangesOverlap(a, b) {
+        return a.min <= b.max && b.min <= a.max;
+    }
+
+    function generateV2Obf(avoidS1) {
+        var s1;
+        do { s1 = randomInt(15, 150); } while (Math.abs(s1 - avoidS1) < 5);
+        var rs;
+        for (var attempt = 0; attempt < 100; attempt++) {
+            rs = [randomHRange(), randomHRange(), randomHRange(), randomHRange()];
+            var ok = true;
+            for (var i = 0; i < 4 && ok; i++)
+                for (var j = i + 1; j < 4; j++)
+                    if (hRangesOverlap(rs[i], rs[j])) { ok = false; break; }
+            if (ok) break;
+        }
+        return {
+            s1: s1, s2: randomInt(15, 150), s3: randomInt(20, 100),
+            h1: rs[0].min + '-' + rs[0].max,
+            h2: rs[1].min + '-' + rs[1].max,
+            h3: rs[2].min + '-' + rs[2].max,
+            h4: rs[3].min + '-' + rs[3].max
+        };
+    }
+
+    // CPS (I1-I5) templates: AmneziaWG signature-junk sent by the initiator
+    // (fixed magic header + random tail). The responder just drops them, so
+    // only the client side needs them — this lifts server-mode clients to v1.5.
+    function generateCPSTemplate() {
+        var nbytes = randomInt(2, 6);
+        var hex = '';
+        for (var i = 0; i < nbytes; i++) {
+            var b = randomInt(0, 255).toString(16);
+            hex += (b.length < 2 ? '0' : '') + b;
+        }
+        return '<b 0x' + hex + '><r ' + randomInt(4, 16) + '>';
+    }
+
+    function generateCPSTemplates(n) {
+        var a = [];
+        for (var i = 0; i < n; i++) a.push(generateCPSTemplate());
+        return a;
+    }
+
+    function cpsEnvLines(prefix, cps) {
+        var e = [];
+        if (cps) for (var k = 0; k < cps.length; k++)
+            e.push('/container/envs/add list=' + prefix + '-env key=AWG_I' + (k + 1) + ' value="' + cps[k] + '"');
+        return e;
+    }
+
+    function generateS2SParams() {
+        var base = generateAWGParams();
+        // Fallback (v1): fixed H + the base S1/S2
+        base.fallback = { s1: base.s1, s2: base.s2,
+                          h1: base.h1, h2: base.h2, h3: base.h3, h4: base.h4 };
+        // Primary (v2): distinct S1/S2, S3 padding, H ranges
+        var pri = generateV2Obf(base.fallback.s1);
+        base.s1 = pri.s1; base.s2 = pri.s2; base.s3 = pri.s3;
+        base.h1 = pri.h1; base.h2 = pri.h2; base.h3 = pri.h3; base.h4 = pri.h4;
+        return base;
+    }
+
+    function s2sObfEnvLines(prefix, ap) {
+        var e = [];
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_JC value="' + ap.jc + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_JMIN value="' + ap.jmin + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_JMAX value="' + ap.jmax + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_S1 value="' + ap.s1 + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_S2 value="' + ap.s2 + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_S3 value="' + ap.s3 + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_H1 value="' + ap.h1 + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_H2 value="' + ap.h2 + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_H3 value="' + ap.h3 + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_H4 value="' + ap.h4 + '"');
+        // v1 fallback profile (backward-compat / DPI resilience, s2s only)
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_FB_S1 value="' + ap.fallback.s1 + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_FB_S2 value="' + ap.fallback.s2 + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_FB_H1 value="' + ap.fallback.h1 + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_FB_H2 value="' + ap.fallback.h2 + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_FB_H3 value="' + ap.fallback.h3 + '"');
+        e.push('/container/envs/add list=' + prefix + '-env key=AWG_FB_H4 value="' + ap.fallback.h4 + '"');
+        return e;
+    }
+
     var s2sParams = null;
 
     function ensureS2SParams() {
         if (!s2sParams) {
-            s2sParams = generateAWGParams();
+            s2sParams = generateS2SParams();
             document.getElementById('s2s-awg-port').value = s2sParams.port;
             showS2SParams();
         }
@@ -3153,7 +3257,7 @@
     }
 
     function regenerateS2SParams() {
-        s2sParams = generateAWGParams();
+        s2sParams = generateS2SParams();
         document.getElementById('s2s-awg-port').value = s2sParams.port;
         showS2SParams();
     }
@@ -3481,6 +3585,10 @@
         lines.push('H2 = ' + p.h2);
         lines.push('H3 = ' + p.h3);
         lines.push('H4 = ' + p.h4);
+        if (p.cps) {
+            for (var k = 0; k < p.cps.length; k++)
+                lines.push('I' + (k + 1) + ' = ' + p.cps[k]);
+        }
         lines.push('');
         lines.push('[Peer]');
         lines.push('PublicKey = ' + o.serverPub);
@@ -3493,6 +3601,8 @@
     function buildServerCommands(endpoint, awgParams, tunnelCidr, storageServer, storageClient, prefix, serverLAN, clientLAN, netMode, clientNum, dnsServer) {
         var serverKey = generateWgKeyPair();
         var clientKey = generateWgKeyPair();
+        // CPS templates for the client side (v1.5). Server ignores inbound CPS.
+        awgParams.cps = generateCPSTemplates(randomInt(2, 3));
         var net = getTunnelNetwork(prefix);
         var tun = parseSlash24(tunnelCidr);
         var vethIP = net.vethAddr.replace(/\/.*/, '');
@@ -3643,6 +3753,7 @@
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_H4 value="' + awgParams.h4 + '"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_SERVER_PUB value="' + serverKey.publicKey + '"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_CLIENT_PUB value="' + clientKey.publicKey + '"');
+        lc = lc.concat(cpsEnvLines(prefix, awgParams.cps));
         if (dnsServer) lc.push('/container/envs/add list=' + prefix + '-env key=AWG_DNS value="' + dnsServer + '"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_CONFIG_URL value="' + shareURL + '"');
         lc.push('');
@@ -3691,6 +3802,8 @@
         var wgPort = urlParams.wgPort;
         var serverWgPubKey = urlParams.serverWgPubKey;
         var awgParams = {jc:urlParams.jc,jmin:urlParams.jmin,jmax:urlParams.jmax,s1:urlParams.s1,s2:urlParams.s2,h1:urlParams.h1,h2:urlParams.h2,h3:urlParams.h3,h4:urlParams.h4};
+        // Fresh CPS templates for this client (v1.5); not carried in the URL.
+        awgParams.cps = generateCPSTemplates(randomInt(2, 3));
 
         var clientKey = generateWgKeyPair();
 
@@ -3765,6 +3878,7 @@
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_H4 value="' + awgParams.h4 + '"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_SERVER_PUB value="' + serverWgPubKey + '"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_CLIENT_PUB value="' + clientKey.publicKey + '"');
+        lc = lc.concat(cpsEnvLines(prefix, awgParams.cps));
         if (dnsServer) lc.push('/container/envs/add list=' + prefix + '-env key=AWG_DNS value="' + dnsServer + '"');
         var nextURL = buildShareableURL(awgParams, serverWgPubKey, endpoint, awgPort, wgPort, tunnelCidr, prefix, clientNum + 1, netMode, urlParams.serverLAN);
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_CONFIG_URL value="' + nextURL + '"');
@@ -3976,15 +4090,7 @@
         la.push('# 4. Container environment variables');
         la.push('/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value=":51820"');
         la.push('/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + endpointB + ':' + awgParams.port + '"');
-        la.push('/container/envs/add list=' + prefix + '-env key=AWG_JC value="' + awgParams.jc + '"');
-        la.push('/container/envs/add list=' + prefix + '-env key=AWG_JMIN value="' + awgParams.jmin + '"');
-        la.push('/container/envs/add list=' + prefix + '-env key=AWG_JMAX value="' + awgParams.jmax + '"');
-        la.push('/container/envs/add list=' + prefix + '-env key=AWG_S1 value="' + awgParams.s1 + '"');
-        la.push('/container/envs/add list=' + prefix + '-env key=AWG_S2 value="' + awgParams.s2 + '"');
-        la.push('/container/envs/add list=' + prefix + '-env key=AWG_H1 value="' + awgParams.h1 + '"');
-        la.push('/container/envs/add list=' + prefix + '-env key=AWG_H2 value="' + awgParams.h2 + '"');
-        la.push('/container/envs/add list=' + prefix + '-env key=AWG_H3 value="' + awgParams.h3 + '"');
-        la.push('/container/envs/add list=' + prefix + '-env key=AWG_H4 value="' + awgParams.h4 + '"');
+        la = la.concat(s2sObfEnvLines(prefix, awgParams));
         la.push('/container/envs/add list=' + prefix + '-env key=AWG_SERVER_PUB value="' + keyB.publicKey + '"');
         la.push('/container/envs/add list=' + prefix + '-env key=AWG_CLIENT_PUB value="' + keyA.publicKey + '"');
         if (dnsServer) la.push('/container/envs/add list=' + prefix + '-env key=AWG_DNS value="' + dnsServer + '"');
@@ -4051,15 +4157,7 @@
         lb.push('/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value=":' + awgParams.port + '"');
         lb.push('/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + net.vethGw + ':' + wgPort + '"');
         lb.push('/container/envs/add list=' + prefix + '-env key=AWG_MODE value="reverse"');
-        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_JC value="' + awgParams.jc + '"');
-        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_JMIN value="' + awgParams.jmin + '"');
-        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_JMAX value="' + awgParams.jmax + '"');
-        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_S1 value="' + awgParams.s1 + '"');
-        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_S2 value="' + awgParams.s2 + '"');
-        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_H1 value="' + awgParams.h1 + '"');
-        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_H2 value="' + awgParams.h2 + '"');
-        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_H3 value="' + awgParams.h3 + '"');
-        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_H4 value="' + awgParams.h4 + '"');
+        lb = lb.concat(s2sObfEnvLines(prefix, awgParams));
         lb.push('/container/envs/add list=' + prefix + '-env key=AWG_SERVER_PUB value="' + keyB.publicKey + '"');
         lb.push('/container/envs/add list=' + prefix + '-env key=AWG_CLIENT_PUB value="' + keyA.publicKey + '"');
         lb.push('');
@@ -4172,7 +4270,15 @@
         lines.push('  :if ($minor <= 20) do={ :set suffix "-7.20-Docker" }');
         lines.push('  :local file ""');
         lines.push('  :if ($arch = "arm64") do={ :set file ("awg-proxy-arm64" . $suffix . ".tar.gz") }');
-        lines.push('  :if ($arch = "arm") do={ :set file ("awg-proxy-arm" . $suffix . ".tar.gz") }');
+        lines.push('  :if ($arch = "arm") do={');
+        lines.push('    :set file ("awg-proxy-arm" . $suffix . ".tar.gz")');
+        lines.push('    :local rbModel ""');
+        lines.push('    :do { :set rbModel [/system/routerboard/get model] } on-error={}');
+        lines.push('    :local bName [/system/resource/get board-name]');
+        lines.push('    :if ($rbModel~"E50UG" || $rbModel~"E60iUGS" || $bName~"^hEX") do={');
+        lines.push('      :set file ("awg-proxy-armv5" . $suffix . ".tar.gz")');
+        lines.push('    }');
+        lines.push('  }');
         lines.push('  :if ($arch ~ "x86") do={ :set file ("awg-proxy-amd64" . $suffix . ".tar.gz") }');
         lines.push('  :if ($file = "") do={ :error "Unsupported architecture: $arch" }');
         lines.push('  :local url "' + REPO.dl + '$file"');

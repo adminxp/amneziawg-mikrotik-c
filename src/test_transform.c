@@ -451,6 +451,59 @@ static void test_config_validate_rejects_overlapping_hranges(void) {
     ASSERT(err != NULL);
 }
 
+/* Dual-profile snapshot/apply: inbound classification follows the active
+ * profile, and switching profiles lets a packet crafted for the other one
+ * decode (site-to-site fallback mechanism). */
+static void test_dual_profile_switch(void) {
+    awg_config_t cfg = make_test_config(); /* primary: s1=20, h1=1234567890 */
+    config_snapshot_profile(&cfg, &cfg.profiles[0]);
+
+    awg_profile_t *fb = &cfg.profiles[1];
+    memset(fb, 0, sizeof(*fb));
+    fb->s1 = 30; fb->s2 = 25; fb->s3 = 0; fb->s4 = 0;
+    fb->h1 = (hrange_t){1000000001, 1000000001};
+    fb->h2 = (hrange_t){1000000002, 1000000002};
+    fb->h3 = (hrange_t){1000000003, 1000000003};
+    fb->h4 = (hrange_t){1000000004, 1000000004};
+    config_compute_profile(fb);
+    cfg.profile_count = 2;
+    cfg.active_profile = 0;
+
+    /* Init obfuscated with the fallback profile (30-byte pad + fallback H1) */
+    uint8_t fbinit[64 + WG_INIT_SIZE];
+    int fbn = fb->s1 + WG_INIT_SIZE;
+    memset(fbinit, 0, sizeof(fbinit));
+    write32_le(fbinit + fb->s1, fb->h1.min);
+    fill_seq(fbinit + fb->s1 + 4, WG_INIT_SIZE - 4);
+
+    /* Active = primary: fallback init is not recognized */
+    int out_len;
+    ASSERT(transform_inbound(fbinit, fbn, &cfg, &out_len) == NULL);
+
+    /* Switch to fallback: same packet now decodes to a WG init */
+    config_apply_profile(&cfg, 1);
+    ASSERT_EQ(cfg.active_profile, 1);
+    memset(fbinit, 0, sizeof(fbinit));
+    write32_le(fbinit + fb->s1, fb->h1.min);
+    fill_seq(fbinit + fb->s1 + 4, WG_INIT_SIZE - 4);
+    uint8_t *out = transform_inbound(fbinit, fbn, &cfg, &out_len);
+    ASSERT(out != NULL);
+    ASSERT_EQ(out_len, WG_INIT_SIZE);
+    ASSERT_EQ(read32_le(out), (uint32_t)WG_HANDSHAKE_INIT);
+
+    /* Switch back to primary: a primary-format init decodes again */
+    config_apply_profile(&cfg, 0);
+    ASSERT_EQ(cfg.active_profile, 0);
+    uint8_t prinit[64 + WG_INIT_SIZE];
+    int prn = cfg.profiles[0].s1 + WG_INIT_SIZE;
+    memset(prinit, 0, sizeof(prinit));
+    write32_le(prinit + cfg.profiles[0].s1, cfg.profiles[0].h1.min);
+    fill_seq(prinit + cfg.profiles[0].s1 + 4, WG_INIT_SIZE - 4);
+    out = transform_inbound(prinit, prn, &cfg, &out_len);
+    ASSERT(out != NULL);
+    ASSERT_EQ(read32_le(out), (uint32_t)WG_HANDSHAKE_INIT);
+}
+
 /* 21. Outbound cookie with S3 */
 static void test_outbound_cookie_with_s3(void) {
     awg_config_t cfg = make_test_config();
@@ -1198,6 +1251,7 @@ int main(void) {
     RUN_TEST(config_validate_accepts_safe_limits);
     RUN_TEST(config_validate_rejects_unsafe_padding);
     RUN_TEST(config_validate_rejects_overlapping_hranges);
+    RUN_TEST(dual_profile_switch);
     RUN_TEST(outbound_cookie_with_s3);
     RUN_TEST(outbound_transport_with_s4);
     RUN_TEST(inbound_scanning_s3);

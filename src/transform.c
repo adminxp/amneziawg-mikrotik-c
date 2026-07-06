@@ -11,35 +11,84 @@ static int hrange_overlaps(const hrange_t *a, const hrange_t *b) {
     return a->min <= b->max && b->min <= a->max;
 }
 
-int config_validate(const awg_config_t *cfg, const char **err_msg) {
-    if (cfg->s1 < 0 || cfg->s1 > AWG_PACKET_BUF_SIZE - WG_INIT_SIZE) {
+int config_validate_profile(const awg_profile_t *pr, const char **err_msg) {
+    if (pr->s1 < 0 || pr->s1 > AWG_PACKET_BUF_SIZE - WG_INIT_SIZE) {
         *err_msg = "AWG_S1: must be between 0 and 1352";
         return -1;
     }
-    if (cfg->s2 < 0 || cfg->s2 > AWG_PACKET_BUF_SIZE - WG_RESP_SIZE) {
+    if (pr->s2 < 0 || pr->s2 > AWG_PACKET_BUF_SIZE - WG_RESP_SIZE) {
         *err_msg = "AWG_S2: must be between 0 and 1408";
         return -1;
     }
-    if (cfg->s3 < 0 || cfg->s3 > AWG_PACKET_BUF_SIZE - WG_COOKIE_SIZE) {
+    if (pr->s3 < 0 || pr->s3 > AWG_PACKET_BUF_SIZE - WG_COOKIE_SIZE) {
         *err_msg = "AWG_S3: must be between 0 and 1436";
         return -1;
     }
-    if (cfg->s4 < 0 || cfg->s4 > AWG_PACKET_HEADROOM) {
+    if (pr->s4 < 0 || pr->s4 > AWG_PACKET_HEADROOM) {
         *err_msg = "AWG_S4: must be between 0 and 256";
         return -1;
     }
-    if (hrange_overlaps(&cfg->h1, &cfg->h2) ||
-        hrange_overlaps(&cfg->h1, &cfg->h3) ||
-        hrange_overlaps(&cfg->h1, &cfg->h4) ||
-        hrange_overlaps(&cfg->h2, &cfg->h3) ||
-        hrange_overlaps(&cfg->h2, &cfg->h4) ||
-        hrange_overlaps(&cfg->h3, &cfg->h4)) {
+    if (hrange_overlaps(&pr->h1, &pr->h2) ||
+        hrange_overlaps(&pr->h1, &pr->h3) ||
+        hrange_overlaps(&pr->h1, &pr->h4) ||
+        hrange_overlaps(&pr->h2, &pr->h3) ||
+        hrange_overlaps(&pr->h2, &pr->h4) ||
+        hrange_overlaps(&pr->h3, &pr->h4)) {
         *err_msg = "AWG_H1..AWG_H4: ranges must not overlap";
         return -1;
     }
 
     *err_msg = NULL;
     return 0;
+}
+
+int config_validate(const awg_config_t *cfg, const char **err_msg) {
+    awg_profile_t pr = {
+        .s1 = cfg->s1, .s2 = cfg->s2, .s3 = cfg->s3, .s4 = cfg->s4,
+        .h1 = cfg->h1, .h2 = cfg->h2, .h3 = cfg->h3, .h4 = cfg->h4,
+    };
+    return config_validate_profile(&pr, err_msg);
+}
+
+void config_compute_profile(awg_profile_t *pr) {
+    pr->h4_fixed = pr->h4.min;
+    pr->h4_noop = (pr->h4.min == WG_TRANSPORT_DATA &&
+                   pr->h4.max == WG_TRANSPORT_DATA && pr->s4 == 0);
+    pr->init_total = pr->s1 + WG_INIT_SIZE;
+    pr->resp_total = pr->s2 + WG_RESP_SIZE;
+    pr->cookie_total = pr->s3 + WG_COOKIE_SIZE;
+
+    int tmin = pr->s4 + WG_TRANSPORT_MIN;
+    pr->transport_size_ambiguous =
+        (pr->init_total >= tmin) ||
+        (pr->resp_total >= tmin) ||
+        (pr->cookie_total >= tmin);
+}
+
+void config_snapshot_profile(const awg_config_t *cfg, awg_profile_t *pr) {
+    pr->s1 = cfg->s1; pr->s2 = cfg->s2; pr->s3 = cfg->s3; pr->s4 = cfg->s4;
+    pr->h1 = cfg->h1; pr->h2 = cfg->h2; pr->h3 = cfg->h3; pr->h4 = cfg->h4;
+    for (int i = 0; i < 5; i++) pr->cps[i] = cfg->cps[i];
+    pr->h4_fixed = cfg->h4_fixed;
+    pr->h4_noop = cfg->h4_noop;
+    pr->init_total = cfg->init_total;
+    pr->resp_total = cfg->resp_total;
+    pr->cookie_total = cfg->cookie_total;
+    pr->transport_size_ambiguous = cfg->transport_size_ambiguous;
+}
+
+void config_apply_profile(awg_config_t *cfg, int idx) {
+    const awg_profile_t *pr = &cfg->profiles[idx];
+    cfg->s1 = pr->s1; cfg->s2 = pr->s2; cfg->s3 = pr->s3; cfg->s4 = pr->s4;
+    cfg->h1 = pr->h1; cfg->h2 = pr->h2; cfg->h3 = pr->h3; cfg->h4 = pr->h4;
+    for (int i = 0; i < 5; i++) cfg->cps[i] = pr->cps[i];
+    cfg->h4_fixed = pr->h4_fixed;
+    cfg->h4_noop = pr->h4_noop;
+    cfg->init_total = pr->init_total;
+    cfg->resp_total = pr->resp_total;
+    cfg->cookie_total = pr->cookie_total;
+    cfg->transport_size_ambiguous = pr->transport_size_ambiguous;
+    cfg->active_profile = idx;
 }
 
 void config_compute(awg_config_t *cfg) {
@@ -52,18 +101,17 @@ void config_compute(awg_config_t *cfg) {
     for (int i = 0; i < cfg->server_peer_count; i++)
         compute_mac1_key(cfg->server_peer_pubs[i], cfg->server_peer_mac1keys[i]);
 
-    cfg->h4_fixed = cfg->h4.min;
-    cfg->h4_noop = (cfg->h4.min == WG_TRANSPORT_DATA &&
-                    cfg->h4.max == WG_TRANSPORT_DATA && cfg->s4 == 0);
-    cfg->init_total = cfg->s1 + WG_INIT_SIZE;
-    cfg->resp_total = cfg->s2 + WG_RESP_SIZE;
-    cfg->cookie_total = cfg->s3 + WG_COOKIE_SIZE;
-
-    int tmin = cfg->s4 + WG_TRANSPORT_MIN;
-    cfg->transport_size_ambiguous =
-        (cfg->init_total >= tmin) ||
-        (cfg->resp_total >= tmin) ||
-        (cfg->cookie_total >= tmin);
+    awg_profile_t pr = {
+        .s1 = cfg->s1, .s2 = cfg->s2, .s3 = cfg->s3, .s4 = cfg->s4,
+        .h1 = cfg->h1, .h2 = cfg->h2, .h3 = cfg->h3, .h4 = cfg->h4,
+    };
+    config_compute_profile(&pr);
+    cfg->h4_fixed = pr.h4_fixed;
+    cfg->h4_noop = pr.h4_noop;
+    cfg->init_total = pr.init_total;
+    cfg->resp_total = pr.resp_total;
+    cfg->cookie_total = pr.cookie_total;
+    cfg->transport_size_ambiguous = pr.transport_size_ambiguous;
 
     if (cfg->mode == AWG_MODE_NORMAL) {
         cfg->mac1key_out = cfg->has_server_pub ? cfg->mac1key_server : NULL;

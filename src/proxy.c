@@ -36,6 +36,14 @@ static inline uint32_t pick_h4(proxy_t *p) {
     return v;
 }
 
+/* Switch the active obfuscation profile and rebuild the H4 ring for its range.
+ * Only called while the tunnel is down (initiator) or on a fresh handshake
+ * (responder), so no transport is in flight during the swap. */
+static void switch_profile(proxy_t *p, int idx) {
+    config_apply_profile(p->cfg, idx);
+    fill_h4_ring(p);
+}
+
 static int checked_mul_size(size_t a, size_t b, size_t *out) {
     if (a != 0 && b > SIZE_MAX / a)
         return -1;
@@ -786,6 +794,21 @@ static void *c2s_thread_reverse(void *arg) {
 
             int out_len;
             uint8_t *out = transform_inbound(pkt, n, cfg, &out_len);
+            if (!out && cfg->profile_count > 1) {
+                /* Backward compat: the peer may be using the other profile
+                 * (e.g. an old v1 site talking to this v2 config). Try it; if a
+                 * handshake decodes, adopt that profile for this connection. */
+                int prev = cfg->active_profile;
+                config_apply_profile(cfg, prev ^ 1);
+                out = transform_inbound(pkt, n, cfg, &out_len);
+                if (out) {
+                    fill_h4_ring(p);
+                    log_info(cfg->active_profile ? "c2s: peer uses v1 fallback profile, switched"
+                                                 : "c2s: peer uses primary profile, switched");
+                } else {
+                    config_apply_profile(cfg, prev); /* revert: just junk */
+                }
+            }
             if (!out) continue; /* junk packet, drop */
 
             /* Server mode: record sender_index from init/response for routing */
@@ -1286,6 +1309,16 @@ int proxy_run(proxy_t *p) {
     int inactive_count = 0;
     int remote_silent_count = 0;
 
+    /* Fallback probing (initiator side of a dual-profile s2s config): after
+     * fb_after seconds of the client sending but the remote staying silent,
+     * switch to the other profile and reconnect. Biased to the primary — we
+     * only leave it once it demonstrably fails, and lock onto whichever
+     * profile the remote answers on. */
+    int fb_enabled = (cfg->profile_count > 1 && cfg->mode == AWG_MODE_NORMAL);
+    int fb_checks = cfg->fb_after > 0 ? cfg->fb_after / 5 : 4;
+    if (fb_checks < 1) fb_checks = 1;
+    int fb_silent_count = 0;
+
     /* Epoll for signal + timer only */
     int epfd = epoll_create1(EPOLL_CLOEXEC);
     if (epfd < 0) {
@@ -1326,6 +1359,28 @@ int proxy_run(proxy_t *p) {
                 read(p->timer_fd, &expirations, sizeof(expirations));
                 int had_activity = atomic_exchange_explicit(&p->last_active, 0, memory_order_relaxed);
                 int had_remote_rx = atomic_exchange_explicit(&p->last_remote_rx, 0, memory_order_relaxed);
+
+                if (fb_enabled) {
+                    if (had_remote_rx) {
+                        fb_silent_count = 0; /* current profile works, stay on it */
+                    } else if (had_activity) {
+                        /* Client sending, remote silent — the other side may be
+                         * on a different profile. Probe by switching. */
+                        if (++fb_silent_count >= fb_checks) {
+                            switch_profile(p, cfg->active_profile ^ 1);
+                            log_info(cfg->active_profile ? "fallback: remote silent, trying v1 fallback profile"
+                                                         : "fallback: remote silent, trying primary profile");
+                            fb_silent_count = 0;
+                            remote_silent_count = 0;
+                            int rfd2 = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
+                            if (rfd2 >= 0) {
+                                atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
+                                shutdown(rfd2, SHUT_RDWR);
+                            }
+                        }
+                    }
+                }
+
                 if (had_activity) {
                     inactive_count = 0;
                     if (!had_remote_rx) {

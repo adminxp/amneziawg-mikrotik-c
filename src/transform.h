@@ -60,6 +60,24 @@ typedef struct {
     int static_used;
 } cps_template_t;
 
+/* Obfuscation profile — the subset of the config that differs between AWG
+ * versions. The proxy keeps up to two (primary + v1 fallback) and can switch
+ * the active one at runtime for site-to-site backward compatibility. All
+ * profiles share the same S4 (padding stays 0 when fallback is enabled), so
+ * switching never changes the packet buffer layout. */
+typedef struct {
+    int s1, s2, s3, s4;
+    hrange_t h1, h2, h3, h4;
+    cps_template_t *cps[5]; /* I1-I5, NULL if not configured */
+    /* Derived (filled by config_compute_profile) */
+    uint32_t h4_fixed;
+    int h4_noop;
+    int init_total;
+    int resp_total;
+    int cookie_total;
+    int transport_size_ambiguous;
+} awg_profile_t;
+
 /* Config struct */
 #define AWG_MAX_SERVER_PEERS 256
 
@@ -100,6 +118,15 @@ typedef struct {
     int no_gro;         /* disable UDP GRO (AWG_NO_GRO=1) */
 
     int mode;           /* 0=normal, 1=reverse, 2=server */
+
+    /* Dual-profile fallback (site-to-site backward compat; normal/reverse only).
+     * The active profile's fields are mirrored into the flat fields above; the
+     * hot path always reads the flat fields. Switching happens only while the
+     * tunnel is down or during a handshake, never mid-stream. */
+    awg_profile_t profiles[2]; /* [0]=primary, [1]=v1 fallback */
+    int profile_count;         /* 1 = no fallback, 2 = fallback enabled */
+    int active_profile;        /* index currently mirrored into the flat fields */
+    int fb_after;              /* initiator: seconds of remote silence before probing the other profile */
 } awg_config_t;
 
 #define AWG_MODE_NORMAL  0
@@ -109,8 +136,21 @@ typedef struct {
 /* Compute MAC1 keys and fast-path flags. Call after setting all config fields. */
 void config_compute(awg_config_t *cfg);
 
+/* Compute the derived fast-path flags of a single profile from its base fields. */
+void config_compute_profile(awg_profile_t *pr);
+
+/* Snapshot the active (flat) profile fields of cfg into pr. */
+void config_snapshot_profile(const awg_config_t *cfg, awg_profile_t *pr);
+
+/* Mirror profiles[idx] into the flat fields and set active_profile = idx.
+ * Shared fields (keys, mac1) are untouched. Refill the H4 ring after this. */
+void config_apply_profile(awg_config_t *cfg, int idx);
+
 /* Validate config values that participate in buffer sizing and layout. */
 int config_validate(const awg_config_t *cfg, const char **err_msg);
+
+/* Same validation for a standalone profile (used for the fallback profile). */
+int config_validate_profile(const awg_profile_t *pr, const char **err_msg);
 
 /* Transform outbound WG->AWG. Returns output pointer and length.
  * buf has dataoff bytes of headroom before the packet data.

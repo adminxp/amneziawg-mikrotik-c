@@ -27,6 +27,7 @@
   - [Insufficient disk space](#insufficient-disk-space)
   - [not allowed by device-mode](#not-allowed-by-device-mode)
   - [child spawn failed / could not load next layer](#child-spawn-failed--could-not-load-next-layer)
+  - [exited with signal 4 (Illegal instruction)](#exited-with-signal-4-illegal-instruction)
   - [Список RU-адресов не загружается после перезагрузки](#список-ru-адресов-не-загружается-после-перезагрузки)
   - [Handshake не проходит после восстановления из бэкапа](#handshake-не-проходит-после-восстановления-из-бэкапа)
 - [Сборка из исходников](#сборка-из-исходников)
@@ -96,7 +97,7 @@ proxy1c (normal) ──AWG──┘
   - **RouterOS 7.21+**: стандартные образы `awg-proxy-{arch}.tar.gz` (OCI-формат)
   - **RouterOS 7.20 и ниже**: образы `awg-proxy-{arch}-7.20-Docker.tar.gz` (Docker-формат)
   - Конфигуратор определяет версию автоматически
-- Архитектура: ARM64, ARM (v7) или x86_64 ([проверить устройство](https://help.mikrotik.com/docs/spaces/ROS/pages/84901929/Container))
+- Архитектура: ARM64, ARM (v7), ARM (v5: hEX refresh / hEX S 2025) или x86_64 ([проверить устройство](https://help.mikrotik.com/docs/spaces/ROS/pages/84901929/Container))
 - Минимум 256 КБ свободного места на диске (или USB-накопитель)
 - Минимум 16 МБ свободной оперативной памяти (RAM)
 
@@ -117,6 +118,8 @@ proxy1c (normal) ──AWG──┘
 ### 2. Загрузка образа
 
 Скачайте `awg-proxy-{arch}.tar.gz` со страницы [Releases](https://github.com/timbrs/amneziawg-mikrotik-c/releases) и загрузите на роутер через Winbox или SCP. Для RouterOS 7.20 и ниже используйте файлы с суффиксом `-7.20-Docker` (Docker-формат).
+
+> **hEX refresh (E50UG) и hEX S 2025 (E60iUGS):** несмотря на `architecture-name: arm`, CPU EN7562CT исполняет только arm32v5-образы ([ограничение RouterOS](https://help.mikrotik.com/docs/spaces/ROS/pages/84901929/Container)) — используйте `awg-proxy-armv5.tar.gz`, иначе контейнер упадёт с `exited with signal 4 (Illegal instruction)`. Конфигуратор определяет эти устройства автоматически.
 
 Или скачайте прямо на роутер (замените URL на актуальный):
 
@@ -469,6 +472,10 @@ ping 192.168.11.X
 | `AWG_S4` | Нет | `0` | Паддинг transport data (v2) |
 | `AWG_I1`--`AWG_I5` | Нет | -- | CPS-шаблоны (v1.5/v2) |
 | `AWG_MODE` | Нет | `normal` | Режим работы: `normal`, `reverse`, `server` |
+| `AWG_FB_H1`--`AWG_FB_H4` | Нет | -- | Резервный (v1) профиль обфускации: типы сообщений. Включает fallback (только `normal`/`reverse`); требует `AWG_S4=0` |
+| `AWG_FB_S1`, `AWG_FB_S2` | Да** | -- | Паддинг init/response для резервного профиля |
+| `AWG_FB_S3` | Нет | `0` | Паддинг cookie reply для резервного профиля |
+| `AWG_FB_AFTER` | Нет | `20` | Секунд тишины от сервера до пробы другого профиля (инициатор) |
 | `AWG_SRC_PORT` | Нет | auto | Исходящий порт к серверу |
 | `AWG_TIMEOUT` | Нет | `180` | Таймаут бездействия (сек) |
 | `AWG_LOG_LEVEL` | Нет | `info` | Уровень логирования |
@@ -481,7 +488,11 @@ ping 192.168.11.X
 
 `*` В `server` режиме должен быть задан либо legacy `AWG_CLIENT_PUB`, либо явный direct-peer список `AWG_CLIENT_PUBS` / `AWG_CLIENT_PUBS_FILE`.
 
+`**` Обязательны только если включён резервный профиль (задан `AWG_FB_H1`).
+
 Версия протокола определяется автоматически: **v2** если заданы S3/S4 или H в виде диапазонов, **v1.5** если заданы CPS-шаблоны (I1-I5), иначе **v1**.
+
+**Резервный профиль (site-to-site, обратная совместимость / устойчивость к DPI).** Основной профиль (`AWG_S*`, `AWG_H*`, `AWG_I*`) может быть v2, а `AWG_FB_*` задаёт второй, v1-профиль (фиксированные H, без S3/S4/CPS). Инициатор (`normal`) работает на основном профиле и, если сервер молчит дольше `AWG_FB_AFTER` секунд, редко переключается на резервный и обратно, пока не найдёт рабочий. Отвечающая сторона (`reverse`) принимает оба профиля и отвечает тем, которым пришёл handshake. Конфигуратор для сценария site-to-site генерирует основной+резервный профили одинаковыми на обеих сторонах: если основную обфускацию начинают блокировать, туннель автоматически откатывается на резервную. Требует `AWG_S4=0`; в режиме `server` не поддерживается.
 
 ### Подробное описание переменных
 
@@ -826,6 +837,10 @@ DSTNAT-трафик идёт через `forward` chain, а не `input`. Есл
 ```
 Перезапустите контейнеры и проверьте логи — они покажут ошибки DNS-резолва, connect, отправку handshake и junk-пакетов.
 
+**5. Резервный профиль (fallback)**
+
+Конфиги site-to-site из конфигуратора содержат основной (v2) и резервный (v1) профили обфускации. Если основная обфускация блокируется, инициатор через `AWG_FB_AFTER` секунд молчания сервера сам переключается на резервный профиль — в логах видно `fallback: remote silent, trying v1 fallback profile` (инициатор) и `c2s: peer uses v1 fallback profile, switched` (отвечающая сторона). Стартовая строка `config: v1 fallback enabled` подтверждает, что резервный профиль задан. Оба конца должны быть сгенерированы одним конфигуратором, иначе их профили не совпадут.
+
 **Нет рукопожатия** -- убедитесь, что все параметры AWG (Jc, Jmin, Jmax, S1, S2, H1--H4) точно совпадают с сервером. Проверьте `AWG_REMOTE`, `AWG_SERVER_PUB` и `AWG_CLIENT_PUB`. Для диагностики установите `AWG_LOG_LEVEL=debug` -- в логах будет видно отправку handshake init и junk-пакетов. Если в логах `remote read error (Connection refused)` -- сервер недоступен или неправильный порт. На ARM64 попробуйте `AWG_NO_GRO=1` -- если ядро не поддерживает GRO, прокси может зависнуть в ожидании ответа.
 
 **Нет трафика после рукопожатия** -- проверьте правило NAT (`/ip/firewall/nat/print`), маршрутизацию и `endpoint-address` пира (должен быть `172.18.0.2`).
@@ -923,6 +938,26 @@ DSTNAT-трафик идёт через `forward` chain, а не `input`. Есл
    ```routeros
    /container add file=awg-proxy-arm.tar.gz ...
    ```
+
+### exited with signal 4 (Illegal instruction)
+
+Контейнер сразу падает с ошибкой:
+
+```
+*** error: exited with signal 4 (Illegal instruction)
+```
+
+Причина: образ собран для более новой архитектуры CPU, чем у роутера. Типичный случай -- **hEX refresh (E50UG)** и **hEX S 2025 (E60iUGS)**: их CPU EN7562CT показывает `architecture-name: arm`, но исполняет только arm32v5-образы ([ограничение RouterOS](https://help.mikrotik.com/docs/spaces/ROS/pages/84901929/Container)), а стандартный `awg-proxy-arm.tar.gz` собран под ARMv7.
+
+Решение -- используйте armv5-образ:
+
+```routeros
+/container/remove [find where comment=awg-proxy]
+/tool/fetch url="https://github.com/timbrs/amneziawg-mikrotik-c/releases/latest/download/awg-proxy-armv5.tar.gz" dst-path=awg-proxy-armv5.tar.gz
+/container/add file=awg-proxy-armv5.tar.gz ... # остальные параметры как раньше
+```
+
+Для RouterOS 7.20 и ниже -- `awg-proxy-armv5-7.20-Docker.tar.gz`. Свежие конфиги из конфигуратора определяют эти устройства автоматически.
 
 ### Список RU-адресов не загружается после перезагрузки
 

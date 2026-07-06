@@ -63,6 +63,16 @@ static void fatal(const char *msg) {
     _exit(1);
 }
 
+static const char *fb_required(const char *name) {
+    const char *v = getenv(name);
+    if (!v || !v[0]) {
+        const char *parts[] = { name, " is required when AWG_FB_H1 is set" };
+        log_msgn("FATAL: ", parts, 2);
+        _exit(1);
+    }
+    return v;
+}
+
 static int is_pub_sep(char c) {
     return c == ',' || c == ';' || c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
@@ -255,6 +265,45 @@ int main(void) {
     /* Compute derived fields */
     config_compute(cfg);
 
+    /* --- Dual-profile fallback (site-to-site backward compatibility) ---
+     * Primary profile = the AWG_* config above (typically v2). Optional v1
+     * fallback in AWG_FB_*: an initiator probes it when the remote stays
+     * silent, a responder adopts it when a peer handshakes with it. */
+    cfg->profile_count = 1;
+    cfg->active_profile = 0;
+    cfg->fb_after = 20;
+    if ((v = getenv("AWG_FB_AFTER")) && v[0]) {
+        cfg->fb_after = parse_int_str(v);
+        if (cfg->fb_after < 5) cfg->fb_after = 5;
+    }
+    config_snapshot_profile(cfg, &cfg->profiles[0]);
+
+    v = getenv("AWG_FB_H1");
+    if (v && v[0]) {
+        if (cfg->mode == AWG_MODE_SERVER)
+            fatal("AWG_FB_* fallback is not supported in server mode");
+        if (cfg->s4 != 0)
+            fatal("AWG_FB_* fallback requires AWG_S4=0");
+        awg_profile_t *fb = &cfg->profiles[1];
+        memset(fb, 0, sizeof(*fb));
+        fb->s1 = parse_int_str(fb_required("AWG_FB_S1"));
+        fb->s2 = parse_int_str(fb_required("AWG_FB_S2"));
+        fb->s3 = 0;
+        if ((v = getenv("AWG_FB_S3")) && v[0]) fb->s3 = parse_int_str(v);
+        fb->s4 = 0;
+        if (parse_hrange(fb_required("AWG_FB_H1"), &fb->h1) < 0) fatal("AWG_FB_H1: invalid range");
+        if (parse_hrange(fb_required("AWG_FB_H2"), &fb->h2) < 0) fatal("AWG_FB_H2: invalid range");
+        if (parse_hrange(fb_required("AWG_FB_H3"), &fb->h3) < 0) fatal("AWG_FB_H3: invalid range");
+        if (parse_hrange(fb_required("AWG_FB_H4"), &fb->h4) < 0) fatal("AWG_FB_H4: invalid range");
+        /* fb->cps left NULL: v1 fallback carries no CPS templates */
+        config_compute_profile(fb);
+        {
+            const char *fberr = NULL;
+            if (config_validate_profile(fb, &fberr) < 0) fatal(fberr);
+        }
+        cfg->profile_count = 2;
+    }
+
     /* Timeout */
     cfg->timeout = 180;
     if ((v = getenv("AWG_TIMEOUT")) && v[0])
@@ -353,6 +402,32 @@ int main(void) {
         const char *parts[] = { "config: H1=", h1_str, " H2=", h2_str,
             " H3=", h3_str, " H4=", h4_str };
         log_infon(parts, 8);
+    }
+    {
+        awg_profile_t *pr0 = &cfg->profiles[0];
+        int any = pr0->cps[0] || pr0->cps[1] || pr0->cps[2] || pr0->cps[3] || pr0->cps[4];
+        if (any) {
+            const char *parts[] = { "config: CPS I1-I5:",
+                pr0->cps[0] ? " I1" : "", pr0->cps[1] ? " I2" : "",
+                pr0->cps[2] ? " I3" : "", pr0->cps[3] ? " I4" : "",
+                pr0->cps[4] ? " I5" : "" };
+            log_infon(parts, 6);
+        } else {
+            log_info("config: CPS I1-I5: none");
+        }
+    }
+    if (cfg->profile_count > 1) {
+        awg_profile_t *fb = &cfg->profiles[1];
+        char ab[12], s1b[12], s2b[12];
+        const char *parts[] = { "config: v1 fallback enabled, probe after ",
+            u32_to_str(ab, cfg->fb_after), "s: FB_S1=", u32_to_str(s1b, fb->s1),
+            " FB_S2=", u32_to_str(s2b, fb->s2) };
+        log_infon(parts, 6);
+        char h1b[12], h2b[12], h3b[12], h4b[12];
+        const char *hparts[] = { "config: FB_H1=", u32_to_str(h1b, fb->h1.min),
+            " FB_H2=", u32_to_str(h2b, fb->h2.min), " FB_H3=", u32_to_str(h3b, fb->h3.min),
+            " FB_H4=", u32_to_str(h4b, fb->h4.min) };
+        log_infon(hparts, 8);
     }
     if (cfg->no_gro)
         log_info("config: UDP GRO disabled (AWG_NO_GRO=1)");

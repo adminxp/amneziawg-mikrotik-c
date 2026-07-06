@@ -1200,6 +1200,130 @@ static void test_throughput_benchmark(void) {
     close(server_fd);
 }
 
+/* ---- Scenario 10: Site-to-site profile fallback (initiator) ---- */
+
+/* Primary (v2) profile — deliberately distinct sizes/types from the v1
+ * fallback so the mock server can tell which profile obfuscated each init. */
+#define FB_PRI_S1 25
+#define FB_PRI_S2 15
+#define FB_PRI_H1 2000000001u
+#define FB_PRI_H2 2000000002u
+#define FB_PRI_H3 2000000003u
+#define FB_PRI_H4 2000000004u
+
+static pid_t start_proxy_fallback(int listen_port, int remote_port) {
+    int src_port = find_free_port();
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char lbuf[32], rbuf[64], sp[8];
+        char jc[8], jmin[8], jmax[8];
+        char s1[8], s2[8], h1[16], h2[16], h3[16], h4[16];
+        char fs1[8], fs2[8], fh1[16], fh2[16], fh3[16], fh4[16];
+
+        snprintf(lbuf, sizeof(lbuf), ":%d", listen_port);
+        snprintf(rbuf, sizeof(rbuf), "127.0.0.1:%d", remote_port);
+
+        setenv("AWG_LISTEN", lbuf, 1);
+        setenv("AWG_REMOTE", rbuf, 1);
+        setenv("AWG_MODE", "normal", 1);
+        setenv("AWG_JC", itoa_buf(TEST_JC, jc), 1);
+        setenv("AWG_JMIN", itoa_buf(TEST_JMIN, jmin), 1);
+        setenv("AWG_JMAX", itoa_buf(TEST_JMAX, jmax), 1);
+        /* Primary profile */
+        setenv("AWG_S1", itoa_buf(FB_PRI_S1, s1), 1);
+        setenv("AWG_S2", itoa_buf(FB_PRI_S2, s2), 1);
+        setenv("AWG_H1", utoa_buf(FB_PRI_H1, h1), 1);
+        setenv("AWG_H2", utoa_buf(FB_PRI_H2, h2), 1);
+        setenv("AWG_H3", utoa_buf(FB_PRI_H3, h3), 1);
+        setenv("AWG_H4", utoa_buf(FB_PRI_H4, h4), 1);
+        /* v1 fallback profile (reuses the TEST_* constants) */
+        setenv("AWG_FB_S1", itoa_buf(TEST_S1, fs1), 1);
+        setenv("AWG_FB_S2", itoa_buf(TEST_S2, fs2), 1);
+        setenv("AWG_FB_H1", utoa_buf(TEST_H1, fh1), 1);
+        setenv("AWG_FB_H2", utoa_buf(TEST_H2, fh2), 1);
+        setenv("AWG_FB_H3", utoa_buf(TEST_H3, fh3), 1);
+        setenv("AWG_FB_H4", utoa_buf(TEST_H4, fh4), 1);
+        setenv("AWG_FB_AFTER", "5", 1);
+        setenv("AWG_SERVER_PUB", DUMMY_SERVER_PUB, 1);
+        setenv("AWG_CLIENT_PUB", DUMMY_CLIENT_PUB, 1);
+        setenv("AWG_LOG_LEVEL", "error", 1);
+        setenv("AWG_TIMEOUT", "60", 1);
+        setenv("AWG_NO_GRO", "1", 1);
+        setenv("AWG_SRC_PORT", itoa_buf(src_port, sp), 1);
+
+        execl(PROXY_BINARY, "awg-proxy", NULL);
+        _exit(127);
+    }
+    usleep(200000);
+    return pid;
+}
+
+static void test_s2s_fallback(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0 && remote_port > 0);
+
+    int server_fd = make_udp_socket(remote_port);
+    ASSERT(server_fd >= 0);
+
+    pid_t proxy = start_proxy_fallback(listen_port, remote_port);
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    /* Simulate WireGuard retransmitting handshake inits while the remote stays
+     * silent (as an old v1 peer would when it can't decode the v2 obfuscation).
+     * Primary (v2) inits must appear first; after fb_after seconds of silence
+     * the proxy must switch to the v1 fallback profile. */
+    int primary_seen = 0, fallback_seen = 0;
+    int primary_first = 0, fallback_after_primary = 0;
+    uint8_t rbuf[2048];
+    int64_t start = now_us();
+    int64_t last_send = 0;
+    uint32_t si = 0x7000;
+
+    while ((now_us() - start) < 12000000) { /* run for 12s */
+        int64_t nowt = now_us();
+        if (nowt - last_send >= 500000) { /* resend init every 500ms */
+            uint8_t init_buf[WG_INIT_SIZE];
+            make_wg_init(init_buf, si++);
+            sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+                   (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+            last_send = nowt;
+        }
+        int n = recv_one(server_fd, rbuf, sizeof(rbuf), 100);
+        if (n == FB_PRI_S1 + WG_INIT_SIZE) {
+            uint32_t h;
+            memcpy(&h, rbuf + FB_PRI_S1, 4);
+            if (h == FB_PRI_H1) {
+                primary_seen++;
+                if (!fallback_seen) primary_first = 1;
+            }
+        } else if (n == TEST_S1 + WG_INIT_SIZE) {
+            uint32_t h;
+            memcpy(&h, rbuf + TEST_S1, 4);
+            if (h == TEST_H1) {
+                fallback_seen++;
+                if (primary_seen) fallback_after_primary = 1;
+            }
+        }
+    }
+
+    fprintf(stderr, "          (primary inits=%d, fallback inits=%d, order primary->fallback=%s)\n",
+            primary_seen, fallback_seen,
+            (primary_first && fallback_after_primary) ? "yes" : "no");
+    ASSERT(primary_seen > 0);       /* started on the primary profile */
+    ASSERT(fallback_seen > 0);      /* switched to fallback after silence */
+    ASSERT(fallback_after_primary); /* primary was tried before the fallback */
+
+    stop_proxy(proxy);
+    close(client_fd);
+    close(server_fd);
+}
+
 /* ---- Main ---- */
 
 int main(void) {
@@ -1213,5 +1337,6 @@ int main(void) {
     RUN_TEST(gso_connected);
     RUN_TEST(gro_bidirectional);
     RUN_TEST(throughput_benchmark);
+    RUN_TEST(s2s_fallback);
     TEST_MAIN_END();
 }
