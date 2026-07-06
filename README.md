@@ -279,6 +279,8 @@ services:
 
 > В server mode `AWG_CLIENT_PUBS` / `AWG_CLIENT_PUBS_FILE` — это новый явный список **реальных публичных ключей клиентов**, который нужен для прямых AmneziaWG 2.0 клиентов. `AWG_CLIENT_PUB` остаётся как legacy single-peer / proxy-only fallback. Для старого сценария `proxy → server → WG` placeholder по-прежнему работает, потому что normal-клиентский прокси пересчитает входящий MAC1 ещё раз. Для прямого клиента этого пересчёта нет, поэтому одного placeholder уже недостаточно.
 
+> Если скачать образ из ghcr.io не получается, соберите его локально: склонируйте репозиторий, выполните `docker build -t awg-proxy .` и укажите в compose `image: awg-proxy`.
+
 ```bash
 docker compose up -d
 ```
