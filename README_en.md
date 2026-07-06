@@ -71,7 +71,7 @@ Compatible with AWG v1 and v2 -- the version is detected automatically based on 
    - Install the **container** package from [mikrotik.com](https://mikrotik.com/download) (System → Packages), upload it to the router and reboot
    - Enable device-mode:
      ```routeros
-     /system/device-mode/update container=yes fetch=yes
+     /system/device-mode/update container=yes fetch=yes bandwidth-test=yes scheduler=yes
      ```
      The router will ask for confirmation (press Reset/Mode button or wait for reboot)
 1. Export a `.conf` file from AmneziaVPN (see [Getting AWG Parameters](#getting-awg-parameters))
@@ -104,10 +104,10 @@ Done. The configurator works offline; no data is sent to any server.
 Install the container package from [mikrotik.com](https://mikrotik.com/download), upload it to the router, and reboot. Then:
 
 ```routeros
-/system/device-mode/update container=yes fetch=yes
+/system/device-mode/update container=yes fetch=yes bandwidth-test=yes scheduler=yes
 ```
 
-`fetch=yes` is required to download the image directly on the router via `/tool/fetch`. If you plan to upload the file manually via Winbox/SCP, `fetch=yes` is not required.
+`fetch=yes` is required to download the image directly on the router via `/tool/fetch`. If you plan to upload the file manually via Winbox/SCP, `fetch=yes` is not required. `scheduler=yes` is required for RU list auto-updates (the "non-RU traffic through tunnel" scenario), `bandwidth-test=yes` -- for speed testing via `/tool/bandwidth-test`.
 
 The router will ask for confirmation (button press or reboot, depending on the model).
 
@@ -863,10 +863,11 @@ If using the configurator -- select the appropriate drive in the "Container stor
 
 ### not allowed by device-mode
 
-The `not allowed by device-mode` error occurs in two cases:
+The `not allowed by device-mode` error occurs in three cases:
 
 - When creating a container -- container support is not enabled (`container=no`)
 - When downloading an image via `/tool/fetch` -- fetch is not enabled (`fetch=no`)
+- When creating a scheduler (`/system/scheduler/add`) -- scheduler is not enabled (`scheduler=no`); without it the RU list never auto-updates and timeout entries silently expire after 30 days
 
 Check the current state:
 
@@ -877,7 +878,7 @@ Check the current state:
 Then enable the required features:
 
 ```routeros
-/system/device-mode/update container=yes fetch=yes
+/system/device-mode/update container=yes fetch=yes bandwidth-test=yes scheduler=yes
 ```
 
 The router will ask for confirmation -- press the Reset or Mode button on the device (depends on model) within a few minutes, or wait for automatic reboot. After reboot, retry the installation.

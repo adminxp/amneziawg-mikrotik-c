@@ -72,7 +72,7 @@ proxy1c (normal) ──AWG──┘
    - Установите пакет **container** с [mikrotik.com](https://mikrotik.com/download) (System → Packages), загрузите на роутер и перезагрузите
    - Включите device-mode:
      ```routeros
-     /system/device-mode/update container=yes fetch=yes
+     /system/device-mode/update container=yes fetch=yes bandwidth-test=yes scheduler=yes
      ```
      Роутер попросит подтверждение (кнопка Reset/Mode или перезагрузка)
 1. Экспортируйте `.conf`-файл из AmneziaVPN (см. [Получение параметров AWG](#получение-параметров-awg))
@@ -107,10 +107,10 @@ proxy1c (normal) ──AWG──┘
 Установите пакет container с [mikrotik.com](https://mikrotik.com/download), загрузите на роутер и перезагрузитесь. Затем:
 
 ```routeros
-/system/device-mode/update container=yes fetch=yes
+/system/device-mode/update container=yes fetch=yes bandwidth-test=yes scheduler=yes
 ```
 
-`fetch=yes` нужен для скачивания образа командой `/tool/fetch` прямо на роутере. Если планируете загружать файл вручную через Winbox/SCP, `fetch=yes` не обязателен.
+`fetch=yes` нужен для скачивания образа командой `/tool/fetch` прямо на роутере. Если планируете загружать файл вручную через Winbox/SCP, `fetch=yes` не обязателен. `scheduler=yes` нужен для автообновления RU-списка (сценарий «не-РФ трафик в туннель»), `bandwidth-test=yes` — для замера скорости через `/tool/bandwidth-test`.
 
 Роутер попросит подтверждение (кнопка или перезагрузка, зависит от модели).
 
@@ -872,10 +872,11 @@ DSTNAT-трафик идёт через `forward` chain, а не `input`. Есл
 
 ### not allowed by device-mode
 
-Ошибка `not allowed by device-mode` возникает в двух случаях:
+Ошибка `not allowed by device-mode` возникает в трёх случаях:
 
 - При создании контейнера -- не включена поддержка контейнеров (`container=no`)
 - При скачивании образа через `/tool/fetch` -- не включён fetch (`fetch=no`)
+- При создании планировщика (`/system/scheduler/add`) -- не включён scheduler (`scheduler=no`); без него RU-список не обновляется автоматически, и записи с timeout молча исчезают через 30 дней
 
 Проверьте текущее состояние:
 
@@ -886,7 +887,7 @@ DSTNAT-трафик идёт через `forward` chain, а не `input`. Есл
 Затем включите нужные возможности:
 
 ```routeros
-/system/device-mode/update container=yes fetch=yes
+/system/device-mode/update container=yes fetch=yes bandwidth-test=yes scheduler=yes
 ```
 
 Роутер попросит подтверждение -- нажмите кнопку Reset или Mode на корпусе (зависит от модели) в течение нескольких минут, либо дождитесь автоматической перезагрузки. После перезагрузки повторите установку.
