@@ -3,8 +3,10 @@
 #include <string.h>
 #include <time.h>
 
-static const char alphanum[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-#define ALPHANUM_LEN 62
+/* <rc N> is letters only upstream (device/obf_randchars.go: chars52) — digits
+ * here would give the I-packets a different byte profile than a real client. */
+static const char chars52[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+#define CHARS52_LEN 52
 
 static int hex_val(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -107,6 +109,22 @@ int cps_parse(const char *s, cps_template_t *tmpl) {
         case 'c':
             seg->kind = CPS_COUNTER;
             break;
+        case 'd':
+            /* AWG 3.0 tags from device/obf.go. I-packets are generated with an
+             * empty source, so <d> and <ds> contribute nothing — skip them
+             * rather than reject the template. <dz N> is different: its
+             * ObfuscatedLen ignores the source and it emits N bytes holding the
+             * source length, i.e. N zero bytes. */
+            if (inner_len > 1 && s[inner_start + 1] == 'z') {
+                int p = skip_spaces(s, inner_start + 2, end);
+                int size = parse_int(s + p, end - p);
+                if (size <= 0) return -1;
+                seg->kind = CPS_ZEROS;
+                seg->size = size;
+                break;
+            }
+            i = end + 1;
+            continue;
         default:
             return -1;
         }
@@ -125,6 +143,7 @@ int cps_max_size(const cps_template_t *tmpl) {
         switch (seg->kind) {
         case CPS_STATIC: total += seg->data_len; break;
         case CPS_RANDOM: case CPS_RANDOM_CHARS: case CPS_RANDOM_DIGITS:
+        case CPS_ZEROS:
             total += seg->size; break;
         case CPS_TIMESTAMP: case CPS_COUNTER:
             total += 4; break;
@@ -154,7 +173,12 @@ int cps_generate(const cps_template_t *tmpl, uint32_t counter, uint8_t *buf, int
         case CPS_RANDOM_CHARS:
             if (off + seg->size > bufsize) return off;
             for (int j = 0; j < seg->size; j++)
-                buf[off + j] = alphanum[fastrand_intn(&rng, ALPHANUM_LEN)];
+                buf[off + j] = chars52[fastrand_intn(&rng, CHARS52_LEN)];
+            off += seg->size;
+            break;
+        case CPS_ZEROS:
+            if (off + seg->size > bufsize) return off;
+            memset(buf + off, 0, seg->size);
             off += seg->size;
             break;
         case CPS_RANDOM_DIGITS:
@@ -165,8 +189,12 @@ int cps_generate(const cps_template_t *tmpl, uint32_t counter, uint8_t *buf, int
             break;
         case CPS_TIMESTAMP: {
             if (off + 4 > bufsize) return off;
+            /* Big-endian, as in device/obf_timestamp.go */
             uint32_t ts = (uint32_t)time(NULL);
-            memcpy(buf + off, &ts, 4);
+            buf[off]     = (uint8_t)(ts >> 24);
+            buf[off + 1] = (uint8_t)(ts >> 16);
+            buf[off + 2] = (uint8_t)(ts >> 8);
+            buf[off + 3] = (uint8_t)ts;
             off += 4;
             break;
         }

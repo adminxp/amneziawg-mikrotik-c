@@ -47,6 +47,29 @@ static int parse_hrange(const char *s, hrange_t *r) {
     return 0;
 }
 
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode a 32-byte key given as 64 hex chars (UAPI form) or 44 base64 chars
+ * (.conf form). Returns 0 on success. */
+static int decode_key32(const char *s, uint8_t out[32]) {
+    int len = slen(s);
+    if (len == 64) {
+        for (int i = 0; i < 32; i++) {
+            int hi = hex_nibble(s[i * 2]);
+            int lo = hex_nibble(s[i * 2 + 1]);
+            if (hi < 0 || lo < 0) return -1;
+            out[i] = (uint8_t)((hi << 4) | lo);
+        }
+        return 0;
+    }
+    return base64_decode(s, len, out, 32) == 32 ? 0 : -1;
+}
+
 static const char *getenv_required(const char *name, int *err_count) {
     const char *v = getenv(name);
     if (!v || !v[0]) {
@@ -63,14 +86,39 @@ static void fatal(const char *msg) {
     _exit(1);
 }
 
-static const char *fb_required(const char *name) {
-    const char *v = getenv(name);
+/* Profile-chain env names: stage 0 = AWG_*, 1 = AWG_FB_*, 2 = AWG_FB2_*, ... */
+static const char *fb_name(char *buf, int stage, const char *suffix) {
+    int i = 0;
+    if (stage == 0) {
+        for (const char *b = "AWG_"; *b; b++) buf[i++] = *b;
+    } else {
+        for (const char *b = "AWG_FB"; *b; b++) buf[i++] = *b;
+        if (stage > 1) buf[i++] = (char)('0' + stage);
+        buf[i++] = '_';
+    }
+    while (*suffix) buf[i++] = *suffix++;
+    buf[i] = '\0';
+    return buf;
+}
+
+static const char *fb_required(char *buf, int stage, const char *suffix) {
+    char h1buf[32];
+    const char *v = getenv(fb_name(buf, stage, suffix));
     if (!v || !v[0]) {
-        const char *parts[] = { name, " is required when AWG_FB_H1 is set" };
-        log_msgn("FATAL: ", parts, 2);
+        const char *parts[] = { buf, " is required when ",
+                                fb_name(h1buf, stage, "H1"), " is set" };
+        log_msgn("FATAL: ", parts, 4);
         _exit(1);
     }
     return v;
+}
+
+static void fb_hrange(char *buf, int stage, const char *suffix, hrange_t *r) {
+    if (parse_hrange(fb_required(buf, stage, suffix), r) < 0) {
+        const char *parts[] = { buf, ": invalid range" };
+        log_msgn("FATAL: ", parts, 2);
+        _exit(1);
+    }
 }
 
 static int is_pub_sep(char c) {
@@ -159,8 +207,91 @@ static void load_server_peer_file(awg_config_t *cfg, const char *path) {
 
 static proxy_t g_proxy;
 static awg_config_t g_config;
-/* CPS templates storage */
-static cps_template_t g_cps_storage[5];
+/* CPS templates storage, one set per profile-chain stage */
+static cps_template_t g_cps_storage[AWG_MAX_PROFILES][5];
+
+/* Load I1-I5 for one chain stage into pr->cps. */
+static void load_cps_stage(int stage, awg_profile_t *pr) {
+    static const char *suf[5] = { "I1", "I2", "I3", "I4", "I5" };
+    char nb[32];
+
+    for (int i = 0; i < 5; i++) {
+        const char *name = fb_name(nb, stage, suf[i]);
+        const char *v = getenv(name);
+        if (!v || !v[0]) continue;
+        if (cps_parse(v, &g_cps_storage[stage][i]) < 0) {
+            const char *eparts[] = { name, ": invalid CPS template" };
+            log_msgn("FATAL: ", eparts, 2);
+            _exit(1);
+        }
+        pr->cps[i] = &g_cps_storage[stage][i];
+    }
+}
+
+/* Parse one fallback stage (>=1). Returns 0 if the stage is not configured. */
+static int parse_fb_stage(awg_config_t *cfg, int stage, awg_profile_t *fb) {
+    char nb[32];
+    const char *v;
+
+    if (!(v = getenv(fb_name(nb, stage, "H1"))) || !v[0])
+        return 0;
+
+    memset(fb, 0, sizeof(*fb));
+    fb->s1 = parse_int_str(fb_required(nb, stage, "S1"));
+    fb->s2 = parse_int_str(fb_required(nb, stage, "S2"));
+    if ((v = getenv(fb_name(nb, stage, "S3"))) && v[0]) fb->s3 = parse_int_str(v);
+    if ((v = getenv(fb_name(nb, stage, "S4"))) && v[0]) fb->s4 = parse_int_str(v);
+    if ((v = getenv(fb_name(nb, stage, "HP"))) && v[0]) fb->hp_on = parse_int_str(v) != 0;
+    if (fb->hp_on && !cfg->hp_key_set) {
+        const char *parts[] = { fb_name(nb, stage, "HP"),
+                                "=1 requires AWG_HEADER_PROTECTION_KEY" };
+        log_msgn("FATAL: ", parts, 2);
+        _exit(1);
+    }
+    fb_hrange(nb, stage, "H1", &fb->h1);
+    fb_hrange(nb, stage, "H2", &fb->h2);
+    fb_hrange(nb, stage, "H3", &fb->h3);
+    fb_hrange(nb, stage, "H4", &fb->h4);
+    load_cps_stage(stage, fb);
+
+    config_compute_profile(fb);
+    {
+        const char *fberr = NULL;
+        if (config_validate_profile(fb, &fberr) < 0) fatal(fberr);
+    }
+    return 1;
+}
+
+/* AWG 3.0 sender-side timing parameters. The proxy forwards packets as they
+ * arrive and never paces them, so these are accepted (a v3 .conf carries over
+ * unchanged and nothing crashes on unknown keys) and reported as not applied. */
+static void report_unemulated_env(void) {
+    static const char *names[] = {
+        "AWG_REKEY_AFTER", "AWG_REKEY_TIMEOUT", "AWG_KEEPALIVE_TIMEOUT",
+        "AWG_MAX_HANDSHAKE_ATTEMPTS", "AWG_CONTENT_PADDING",
+    };
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        const char *v = getenv(names[i]);
+        if (v && v[0])
+            log_info3(names[i], ": accepted but not emulated — the proxy relays "
+                      "packets as they arrive: ", v);
+    }
+
+    /* RejectAfterTime is enforced by the *receiver*: if the server rejects a
+     * keypair before MikroTik finishes rekeying (rekey starts at 120s, old
+     * keypair lives to 180s), the tunnel breaks periodically. */
+    const char *v = getenv("AWG_REJECT_AFTER");
+    if (v && v[0]) {
+        hrange_t r;
+        if (parse_hrange(v, &r) == 0 && r.min < 150 && g_log_level >= LOG_ERROR) {
+            const char *parts[] = { "AWG_REJECT_AFTER=", v,
+                " has a lower bound below 150s: the peer may start rejecting a "
+                "keypair while MikroTik still considers it live (rekey begins "
+                "at 120s and takes up to ~15s), so expect periodic drops" };
+            log_msgn("WARN: ", parts, 3);
+        }
+    }
+}
 
 int main(void) {
     int errs = 0;
@@ -242,67 +373,44 @@ int main(void) {
     if ((v = getenv("AWG_S3")) && v[0]) cfg->s3 = parse_int_str(v);
     if ((v = getenv("AWG_S4")) && v[0]) cfg->s4 = parse_int_str(v);
 
+    /* AWG 3.0 header protection key — the single thing that distinguishes v3
+     * on the wire. Absent (or all-zero) key means v2 semantics byte for byte,
+     * exactly as in amneziawg-go. */
+    if ((v = getenv("AWG_HEADER_PROTECTION_KEY")) && v[0]) {
+        if (decode_key32(v, cfg->hp_key) < 0)
+            fatal("AWG_HEADER_PROTECTION_KEY: must be 44 base64 or 64 hex chars (32 bytes)");
+        static const uint8_t zero32[32] = {0};
+        cfg->hp_key_set = memcmp(cfg->hp_key, zero32, 32) != 0;
+        cfg->hp_on = cfg->hp_key_set;
+    }
+
     {
         const char *cfg_err = NULL;
         if (config_validate(cfg, &cfg_err) < 0)
             fatal(cfg_err);
     }
 
-    /* CPS templates I1-I5 */
-    const char *inames[] = { "AWG_I1", "AWG_I2", "AWG_I3", "AWG_I4", "AWG_I5" };
-    for (int i = 0; i < 5; i++) {
-        v = getenv(inames[i]);
-        if (v && v[0]) {
-            if (cps_parse(v, &g_cps_storage[i]) < 0) {
-                const char *eparts[] = { inames[i], ": invalid CPS template" };
-                log_msgn("FATAL: ", eparts, 2);
-                _exit(1);
-            }
-            cfg->cps[i] = &g_cps_storage[i];
-        }
-    }
-
-    /* Compute derived fields */
+    /* Compute derived fields; also mirrors the flat fields into profiles[0] */
+    load_cps_stage(0, &cfg->profiles[0]);
+    for (int i = 0; i < 5; i++) cfg->cps[i] = cfg->profiles[0].cps[i];
     config_compute(cfg);
 
-    /* --- Dual-profile fallback (site-to-site backward compatibility) ---
-     * Primary profile = the AWG_* config above (typically v2). Optional v1
-     * fallback in AWG_FB_*: an initiator probes it when the remote stays
-     * silent, a responder adopts it when a peer handshakes with it. */
-    cfg->profile_count = 1;
-    cfg->active_profile = 0;
+    /* --- Profile fallback chain (v3 → v2 → v1.5 → v1) ---
+     * Primary profile = the AWG_* config above. Optional stages in AWG_FB_*,
+     * AWG_FB2_*, AWG_FB3_*: an initiator probes the next stage when the remote
+     * stays silent, a responder adopts the stage a peer handshakes with. */
     cfg->fb_after = 20;
     if ((v = getenv("AWG_FB_AFTER")) && v[0]) {
         cfg->fb_after = parse_int_str(v);
         if (cfg->fb_after < 5) cfg->fb_after = 5;
     }
-    config_snapshot_profile(cfg, &cfg->profiles[0]);
 
-    v = getenv("AWG_FB_H1");
-    if (v && v[0]) {
-        if (cfg->mode == AWG_MODE_SERVER)
-            fatal("AWG_FB_* fallback is not supported in server mode");
-        if (cfg->s4 != 0)
-            fatal("AWG_FB_* fallback requires AWG_S4=0");
-        awg_profile_t *fb = &cfg->profiles[1];
-        memset(fb, 0, sizeof(*fb));
-        fb->s1 = parse_int_str(fb_required("AWG_FB_S1"));
-        fb->s2 = parse_int_str(fb_required("AWG_FB_S2"));
-        fb->s3 = 0;
-        if ((v = getenv("AWG_FB_S3")) && v[0]) fb->s3 = parse_int_str(v);
-        fb->s4 = 0;
-        if (parse_hrange(fb_required("AWG_FB_H1"), &fb->h1) < 0) fatal("AWG_FB_H1: invalid range");
-        if (parse_hrange(fb_required("AWG_FB_H2"), &fb->h2) < 0) fatal("AWG_FB_H2: invalid range");
-        if (parse_hrange(fb_required("AWG_FB_H3"), &fb->h3) < 0) fatal("AWG_FB_H3: invalid range");
-        if (parse_hrange(fb_required("AWG_FB_H4"), &fb->h4) < 0) fatal("AWG_FB_H4: invalid range");
-        /* fb->cps left NULL: v1 fallback carries no CPS templates */
-        config_compute_profile(fb);
-        {
-            const char *fberr = NULL;
-            if (config_validate_profile(fb, &fberr) < 0) fatal(fberr);
-        }
-        cfg->profile_count = 2;
+    for (int stage = 1; stage < AWG_MAX_PROFILES; stage++) {
+        if (!parse_fb_stage(cfg, stage, &cfg->profiles[stage]))
+            break;
+        cfg->profile_count = stage + 1;
     }
+    config_compute_max_s4(cfg);
 
     /* Timeout */
     cfg->timeout = 180;
@@ -314,6 +422,15 @@ int main(void) {
     if ((v = getenv("AWG_DNS_REFRESH")) && v[0])
         cfg->dns_refresh = parse_int_str(v);
     if (cfg->dns_refresh < 0) cfg->dns_refresh = 0;
+
+    /* Happy Eyeballs head start for IPv4 (RFC 8305 uses 250 ms) — only ever
+     * consulted when AWG_REMOTE resolves to both an A and an AAAA record. */
+    cfg->he_delay = 250;
+    if ((v = getenv("AWG_HE_DELAY")) && v[0]) {
+        cfg->he_delay = parse_int_str(v);
+        if (cfg->he_delay < 0) cfg->he_delay = 0;
+        if (cfg->he_delay > 5000) cfg->he_delay = 5000;
+    }
 
     /* Log level */
     cfg->log_level = LOG_INFO;
@@ -377,7 +494,9 @@ int main(void) {
 
     /* Determine protocol mode */
     const char *mode = "v1";
-    if (cfg->s3 > 0 || cfg->s4 > 0 ||
+    if (cfg->hp_key_set) {
+        mode = "v3";
+    } else if (cfg->s3 > 0 || cfg->s4 > 0 ||
         cfg->h1.min != cfg->h1.max || cfg->h2.min != cfg->h2.max ||
         cfg->h3.min != cfg->h3.max || cfg->h4.min != cfg->h4.max) {
         mode = "v2";
@@ -433,19 +552,31 @@ int main(void) {
             log_info("config: CPS I1-I5: none");
         }
     }
+    if (cfg->hp_key_set)
+        log_info("config: AWG 3.0 header protection enabled (ChaCha20 over the packet header)");
     if (cfg->profile_count > 1) {
-        awg_profile_t *fb = &cfg->profiles[1];
-        char ab[12], s1b[12], s2b[12];
-        const char *parts[] = { "config: v1 fallback enabled, probe after ",
-            u32_to_str(ab, cfg->fb_after), "s: FB_S1=", u32_to_str(s1b, fb->s1),
-            " FB_S2=", u32_to_str(s2b, fb->s2) };
-        log_infon(parts, 6);
-        char h1b[12], h2b[12], h3b[12], h4b[12];
-        const char *hparts[] = { "config: FB_H1=", u32_to_str(h1b, fb->h1.min),
-            " FB_H2=", u32_to_str(h2b, fb->h2.min), " FB_H3=", u32_to_str(h3b, fb->h3.min),
-            " FB_H4=", u32_to_str(h4b, fb->h4.min) };
-        log_infon(hparts, 8);
+        char ab[12], cb[12];
+        const char *parts[] = { "config: fallback chain of ",
+            u32_to_str(cb, cfg->profile_count), " profiles, probe after ",
+            u32_to_str(ab, cfg->fb_after), "s" };
+        log_infon(parts, 5);
+        for (int i = 1; i < cfg->profile_count; i++) {
+            awg_profile_t *fb = &cfg->profiles[i];
+            char ib[12], s1b[12], s2b[12], s3b[12], s4b[12];
+            const char *sparts[] = { "config: FB stage ", u32_to_str(ib, i),
+                ": S1=", u32_to_str(s1b, fb->s1), " S2=", u32_to_str(s2b, fb->s2),
+                " S3=", u32_to_str(s3b, fb->s3), " S4=", u32_to_str(s4b, fb->s4),
+                fb->hp_on ? " HP=on" : " HP=off" };
+            log_infon(sparts, 11);
+            char h1b[12], h2b[12], h3b[12], h4b[12];
+            const char *hparts[] = { "config: FB stage ", u32_to_str(ib, i),
+                ": H1=", u32_to_str(h1b, fb->h1.min),
+                " H2=", u32_to_str(h2b, fb->h2.min), " H3=", u32_to_str(h3b, fb->h3.min),
+                " H4=", u32_to_str(h4b, fb->h4.min) };
+            log_infon(hparts, 10);
+        }
     }
+    report_unemulated_env();
     if (cfg->no_gro)
         log_info("config: UDP GRO disabled (AWG_NO_GRO=1)");
     if (cfg->no_df)

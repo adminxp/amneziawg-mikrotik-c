@@ -24,6 +24,7 @@
 
 #include "test.h"
 #include "transform.h"
+#include "chacha20.h"
 
 /* AWG parameters matching env vars passed to proxy */
 #define TEST_JC   2
@@ -39,6 +40,18 @@
 /* Non-zero keys to exercise MAC1 recompute path. NOT real keys. */
 #define DUMMY_SERVER_PUB "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="  /* 32 x 0x01 */
 #define DUMMY_CLIENT_PUB "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="  /* 32 x 0x02 */
+
+/* AWG 3.0 scenario: every padding must be >= 12 (the ChaCha20 nonce). */
+#define TEST_V3_S1 20
+#define TEST_V3_S2 15
+#define TEST_V3_S3 18
+#define TEST_V3_S4 14
+#define TEST_HP_KEY_HEX \
+    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+static const uint8_t TEST_HP_KEY[32] = {
+    0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+    0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1a,0x1b,0x1c,0x1d,0x1e,0x1f,
+};
 
 #define BURST_COUNT     10000
 #define MULTI_PER_CLIENT 2500
@@ -74,6 +87,26 @@ static int make_udp_socket(int port) {
         .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
         .sin_port = htons(port)
     };
+    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) { close(fd); return -1; }
+    return fd;
+}
+
+/* IPv6 loopback mock endpoint. Returns -1 when the host has no ::1 at all,
+ * which the IPv6 scenarios treat as "skip", not "fail". */
+static int make_udp_socket6(int port) {
+    int fd = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt));
+    int bufsize = 8 * 1024 * 1024;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    struct sockaddr_in6 a;
+    memset(&a, 0, sizeof(a));
+    a.sin6_family = AF_INET6;
+    a.sin6_addr = in6addr_loopback;
+    a.sin6_port = htons(port);
     if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) { close(fd); return -1; }
     return fd;
 }
@@ -129,22 +162,26 @@ static long get_rss_kb(pid_t pid) {
     return rss;
 }
 
-static pid_t start_proxy(const char *mode, int listen_port, int remote_port) {
+/* remote_str is passed to AWG_REMOTE verbatim, so IPv6 scenarios can hand in
+ * "[::1]:port" or a dual-stack name. he_delay may be NULL to keep the default. */
+static pid_t start_proxy_remote(const char *mode, int listen_port,
+                                const char *remote_str, const char *he_delay) {
     /* Find a free port for proxy's source to avoid auto_src_port reconnect race */
     int src_port = find_free_port();
 
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        char lbuf[32], rbuf[64], sp[8];
+        char lbuf[32], sp[8];
         char jc[8], jmin[8], jmax[8], s1[8], s2[8];
         char h1[16], h2[16], h3[16], h4[16];
 
         snprintf(lbuf, sizeof(lbuf), ":%d", listen_port);
-        snprintf(rbuf, sizeof(rbuf), "127.0.0.1:%d", remote_port);
 
         setenv("AWG_LISTEN", lbuf, 1);
-        setenv("AWG_REMOTE", rbuf, 1);
+        setenv("AWG_REMOTE", remote_str, 1);
+        if (he_delay) setenv("AWG_HE_DELAY", he_delay, 1);
+        else unsetenv("AWG_HE_DELAY");
         setenv("AWG_MODE", mode, 1);
         setenv("AWG_JC", itoa_buf(TEST_JC, jc), 1);
         setenv("AWG_JMIN", itoa_buf(TEST_JMIN, jmin), 1);
@@ -167,6 +204,12 @@ static pid_t start_proxy(const char *mode, int listen_port, int remote_port) {
     }
     usleep(200000); /* 200ms for proxy startup */
     return pid;
+}
+
+static pid_t start_proxy(const char *mode, int listen_port, int remote_port) {
+    char rbuf[64];
+    snprintf(rbuf, sizeof(rbuf), "127.0.0.1:%d", remote_port);
+    return start_proxy_remote(mode, listen_port, rbuf, NULL);
 }
 
 static pid_t start_proxy_with_gro(const char *mode, int listen_port, int remote_port) {
@@ -199,6 +242,48 @@ static pid_t start_proxy_with_gro(const char *mode, int listen_port, int remote_
         setenv("AWG_TIMEOUT", "30", 1);
         /* GRO enabled — no AWG_NO_GRO */
         unsetenv("AWG_NO_GRO");
+        setenv("AWG_SRC_PORT", itoa_buf(src_port, sp), 1);
+
+        execl(PROXY_BINARY, "awg-proxy", NULL);
+        _exit(127);
+    }
+    usleep(200000);
+    return pid;
+}
+
+/* AWG 3.0 proxy: same profile plus S3/S4 and a header protection key. */
+static pid_t start_proxy_v3(const char *mode, int listen_port, int remote_port) {
+    int src_port = find_free_port();
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char lbuf[32], rbuf[64], sp[8];
+        char jc[8], jmin[8], jmax[8], s1[8], s2[8], s3[8], s4[8];
+        char h1[16], h2[16], h3[16], h4[16];
+
+        snprintf(lbuf, sizeof(lbuf), ":%d", listen_port);
+        snprintf(rbuf, sizeof(rbuf), "127.0.0.1:%d", remote_port);
+
+        setenv("AWG_LISTEN", lbuf, 1);
+        setenv("AWG_REMOTE", rbuf, 1);
+        setenv("AWG_MODE", mode, 1);
+        setenv("AWG_JC", itoa_buf(TEST_JC, jc), 1);
+        setenv("AWG_JMIN", itoa_buf(TEST_JMIN, jmin), 1);
+        setenv("AWG_JMAX", itoa_buf(TEST_JMAX, jmax), 1);
+        setenv("AWG_S1", itoa_buf(TEST_V3_S1, s1), 1);
+        setenv("AWG_S2", itoa_buf(TEST_V3_S2, s2), 1);
+        setenv("AWG_S3", itoa_buf(TEST_V3_S3, s3), 1);
+        setenv("AWG_S4", itoa_buf(TEST_V3_S4, s4), 1);
+        setenv("AWG_H1", utoa_buf(TEST_H1, h1), 1);
+        setenv("AWG_H2", utoa_buf(TEST_H2, h2), 1);
+        setenv("AWG_H3", utoa_buf(TEST_H3, h3), 1);
+        setenv("AWG_H4", utoa_buf(TEST_H4, h4), 1);
+        setenv("AWG_HEADER_PROTECTION_KEY", TEST_HP_KEY_HEX, 1);
+        setenv("AWG_SERVER_PUB", DUMMY_SERVER_PUB, 1);
+        setenv("AWG_CLIENT_PUB", DUMMY_CLIENT_PUB, 1);
+        setenv("AWG_LOG_LEVEL", "error", 1);
+        setenv("AWG_TIMEOUT", "30", 1);
+        setenv("AWG_NO_GRO", "1", 1);
         setenv("AWG_SRC_PORT", itoa_buf(src_port, sp), 1);
 
         execl(PROXY_BINARY, "awg-proxy", NULL);
@@ -1326,6 +1411,310 @@ static void test_s2s_fallback(void) {
 
 /* ---- Main ---- */
 
+/* ---- Scenario 11: AWG 3.0 header protection end to end ---- */
+
+/* Recover the message type of a received v3 datagram: nonce is the first 12
+ * bytes, the type is the first 4 keystream bytes XOR'd into the message. */
+static uint32_t v3_unmask_type(const uint8_t *pkt, int pad) {
+    uint8_t ks[CHACHA20_BLOCK_SIZE];
+    uint32_t onwire, mask;
+    chacha20_block(TEST_HP_KEY, pkt, 0, ks);
+    memcpy(&onwire, pkt + pad, 4);
+    memcpy(&mask, ks, 4);
+    return onwire ^ mask;
+}
+
+/* Build what a real AWG 3.0 peer would put on the wire for a transport packet. */
+static int make_awg_v3_transport(uint8_t *buf, uint32_t receiver_index,
+                                 uint64_t counter, int msg_size) {
+    for (int i = 0; i < TEST_V3_S4; i++)
+        buf[i] = (uint8_t)(counter * 31 + i * 7 + 3);
+    uint8_t *msg = buf + TEST_V3_S4;
+    memset(msg, 0, (size_t)msg_size);
+    uint32_t t = TEST_H4;
+    memcpy(msg, &t, 4);
+    memcpy(msg + 4, &receiver_index, 4);
+    memcpy(msg + 8, &counter, 8);
+    for (int i = 16; i < msg_size; i++)
+        msg[i] = (uint8_t)(i ^ (counter & 0xFF));
+    chacha20_xor(TEST_HP_KEY, buf, msg, AWG_HP_TRANSPORT_HDR);
+    return TEST_V3_S4 + msg_size;
+}
+
+static void test_v3_header_protection(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0);
+    ASSERT(remote_port > 0);
+
+    int server_fd = make_udp_socket(remote_port);
+    ASSERT(server_fd >= 0);
+
+    pid_t proxy = start_proxy_v3("normal", listen_port, remote_port);
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    /* c2s handshake: the init must arrive padded, and its type must only be
+     * readable after ChaCha20 — not in the clear. */
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, 0x3000);
+    sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+           (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+
+    usleep(200000);
+    uint8_t rbuf[2048];
+    int init_received = 0;
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+    for (int i = 0; i < TEST_JC + 5; i++) {
+        struct pollfd pfd = { .fd = server_fd, .events = POLLIN };
+        if (poll(&pfd, 1, 500) <= 0) break;
+        fromlen = sizeof(from);
+        int n = (int)recvfrom(server_fd, rbuf, sizeof(rbuf), 0,
+                              (struct sockaddr *)&from, &fromlen);
+        if (n != TEST_V3_S1 + WG_INIT_SIZE) continue;
+        uint32_t clear;
+        memcpy(&clear, rbuf + TEST_V3_S1, 4);
+        ASSERT(clear != TEST_H1); /* header must be encrypted on the wire */
+        if (v3_unmask_type(rbuf, TEST_V3_S1) == TEST_H1) { init_received = 1; break; }
+    }
+    ASSERT(init_received);
+    drain_socket(server_fd);
+
+    /* c2s transport: burst, check loss and that every packet is protected */
+    async_recv_t srv_recv;
+    pthread_t srv_thread;
+    async_recv_start(&srv_recv, &srv_thread, server_fd);
+
+    uint8_t transport[200];
+    const int v3_burst = BURST_COUNT / 2;
+    for (int i = 0; i < v3_burst; i++) {
+        make_wg_transport(transport, 0x4000, (uint64_t)i, 200);
+        sendto(client_fd, transport, 200, 0,
+               (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+        if ((i + 1) % 64 == 0) usleep(100);
+    }
+    usleep(500000);
+    int received = async_recv_stop(&srv_recv, srv_thread);
+    double loss = 100.0 * (v3_burst - received) / v3_burst;
+    fprintf(stderr, "          (c2s sent=%d, recv=%d, loss=%.2f%%)\n",
+            v3_burst, received, loss);
+    ASSERT(received >= v3_burst * 99 / 100);
+    drain_socket(server_fd);
+
+    /* s2c: a genuine AWG 3.0 transport packet must come back out as plain WG */
+    uint8_t awg[TEST_V3_S4 + 200];
+    int awg_len = make_awg_v3_transport(awg, 0x3000, 77, 200);
+    sendto(server_fd, awg, (size_t)awg_len, 0, (struct sockaddr *)&from, fromlen);
+
+    int got_wg = 0;
+    for (int i = 0; i < 5; i++) {
+        int n = recv_one(client_fd, rbuf, sizeof(rbuf), 1000);
+        if (n != 200) continue;
+        uint32_t t;
+        memcpy(&t, rbuf, 4);
+        if (t != WG_TRANSPORT_DATA) continue;
+        uint32_t ridx;
+        uint64_t ctr;
+        memcpy(&ridx, rbuf + 4, 4);
+        memcpy(&ctr, rbuf + 8, 8);
+        ASSERT_EQ(ridx, 0x3000u);
+        ASSERT_EQ(ctr, 77u);
+        for (int j = 16; j < 200; j++)
+            ASSERT_EQ(rbuf[j], (uint8_t)(j ^ 77));
+        got_wg = 1;
+        break;
+    }
+    ASSERT(got_wg);
+
+    stop_proxy(proxy);
+    close(client_fd);
+    close(server_fd);
+}
+
+/* ---- Scenario 12: IPv6 remote leg ---- */
+
+/* Wait for the transformed handshake init on an already-bound mock server.
+ * Junk and CPS packets precede it, so the size + H1 pair is the marker. */
+static int await_awg_init(int fd, struct sockaddr_storage *from, socklen_t *fromlen,
+                          int tries, int timeout_ms) {
+    uint8_t rbuf[2048];
+    for (int i = 0; i < tries; i++) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+        if (poll(&pfd, 1, timeout_ms) <= 0) break;
+        *fromlen = sizeof(*from);
+        int n = (int)recvfrom(fd, rbuf, sizeof(rbuf), 0,
+                              (struct sockaddr *)from, fromlen);
+        if (n != TEST_S1 + WG_INIT_SIZE) continue;
+        uint32_t h;
+        memcpy(&h, rbuf + TEST_S1, 4);
+        if (h == TEST_H1) return 1;
+    }
+    return 0;
+}
+
+static void test_ipv6_remote(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0);
+    ASSERT(remote_port > 0);
+
+    int server_fd = make_udp_socket6(remote_port);
+    if (server_fd < 0) {
+        fprintf(stderr, "          (no IPv6 loopback on this host, skipped)\n");
+        return;
+    }
+
+    char rbuf_env[64];
+    snprintf(rbuf_env, sizeof(rbuf_env), "[::1]:%d", remote_port);
+    pid_t proxy = start_proxy_remote("normal", listen_port, rbuf_env, NULL);
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    /* Handshake over the v6 leg */
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, 0x6000);
+    sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+           (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+
+    struct sockaddr_storage from;
+    socklen_t fromlen = sizeof(from);
+    int init_received = await_awg_init(server_fd, &from, &fromlen, TEST_JC + 5, 1000);
+    ASSERT(init_received);
+    ASSERT_EQ(from.ss_family, AF_INET6);
+    drain_socket(server_fd);
+
+    /* c2s transport over IPv6 */
+    async_recv_t srv_recv;
+    pthread_t srv_thread;
+    async_recv_start(&srv_recv, &srv_thread, server_fd);
+
+    const int burst = BURST_COUNT / 4;
+    uint8_t transport[200];
+    for (int i = 0; i < burst; i++) {
+        make_wg_transport(transport, 0x6001, (uint64_t)i, 200);
+        sendto(client_fd, transport, 200, 0,
+               (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+        if ((i + 1) % 64 == 0) usleep(100);
+    }
+    usleep(500000);
+    int received = async_recv_stop(&srv_recv, srv_thread);
+    fprintf(stderr, "          (c2s over IPv6: sent=%d, recv=%d)\n", burst, received);
+    ASSERT(received >= burst * 99 / 100);
+
+    /* s2c: an AWG transport packet from the v6 server must reach the client */
+    uint8_t awg[200];
+    make_awg_transport(awg, 0x6000, 4242, 200);
+    sendto(server_fd, awg, sizeof(awg), 0, (struct sockaddr *)&from, fromlen);
+
+    uint8_t rbuf[2048];
+    int got_wg = 0;
+    for (int i = 0; i < 5; i++) {
+        int n = recv_one(client_fd, rbuf, sizeof(rbuf), 1000);
+        if (n != 200) continue;
+        uint32_t t;
+        memcpy(&t, rbuf, 4);
+        if (t != WG_TRANSPORT_DATA) continue;
+        uint64_t ctr;
+        memcpy(&ctr, rbuf + 8, 8);
+        ASSERT_EQ(ctr, 4242u);
+        got_wg = 1;
+        break;
+    }
+    ASSERT(got_wg);
+
+    stop_proxy(proxy);
+    close(client_fd);
+    close(server_fd);
+}
+
+/* ---- Scenario 13: Happy Eyeballs — IPv4 black hole, IPv6 answers ---- */
+
+static void test_happy_eyeballs(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0);
+    ASSERT(remote_port > 0);
+
+    /* "localhost" carries both an A and an AAAA record in every stock
+     * /etc/hosts, which is exactly the dual-stack name the probe is for. */
+    int v6_fd = make_udp_socket6(remote_port);
+    if (v6_fd < 0) {
+        fprintf(stderr, "          (no IPv6 loopback on this host, skipped)\n");
+        return;
+    }
+    /* Bound but never answering: a real black hole rather than an ICMP reject,
+     * so the probe has to reach its timeout instead of an error. */
+    int v4_blackhole = make_udp_socket(remote_port);
+    ASSERT(v4_blackhole >= 0);
+
+    char rbuf_env[64];
+    snprintf(rbuf_env, sizeof(rbuf_env), "localhost:%d", remote_port);
+    pid_t proxy = start_proxy_remote("normal", listen_port, rbuf_env, "200");
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, 0x7100);
+    int64_t t0 = now_us();
+    sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+           (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+
+    /* The replayed init must show up on the IPv6 socket well inside the
+     * handshake retry interval — the point of the probe is not to wait for a
+     * timeout. Allow generous slack for a loaded CI box. */
+    struct sockaddr_storage from;
+    socklen_t fromlen = sizeof(from);
+    int init_received = await_awg_init(v6_fd, &from, &fromlen, TEST_JC + 5, 2000);
+    int64_t elapsed_ms = (now_us() - t0) / 1000;
+    fprintf(stderr, "          (IPv6 init after %lldms)\n", (long long)elapsed_ms);
+    ASSERT(init_received);
+    ASSERT_EQ(from.ss_family, AF_INET6);
+    /* Must track AWG_HE_DELAY, not some poll tick that happens to be close.
+     * WireGuard's own retry is 5s away, so a regression to "wait for the next
+     * retransmit" would sail past this bound. */
+    ASSERT(elapsed_ms < 1000);
+
+    /* Answer over IPv6 so the probe locks onto that family... */
+    uint8_t awg[200];
+    make_awg_transport(awg, 0x7100, 1, 200);
+    sendto(v6_fd, awg, sizeof(awg), 0, (struct sockaddr *)&from, fromlen);
+    usleep(300000);
+    drain_socket(v6_fd);
+    drain_socket(v4_blackhole);
+
+    /* ...and everything after the switch must go there, not to the v4 hole. */
+    uint8_t transport[200];
+    for (int i = 0; i < 200; i++) {
+        make_wg_transport(transport, 0x7101, (uint64_t)i, 200);
+        sendto(client_fd, transport, 200, 0,
+               (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+    }
+    usleep(400000);
+
+    int on_v6 = 0, on_v4 = 0;
+    uint8_t buf[2048];
+    while (recvfrom(v6_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL) > 0) on_v6++;
+    while (recvfrom(v4_blackhole, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL) > 0) on_v4++;
+    fprintf(stderr, "          (after switch: v6=%d, v4=%d)\n", on_v6, on_v4);
+    ASSERT(on_v6 >= 200 * 99 / 100);
+    ASSERT_EQ(on_v4, 0);
+
+    stop_proxy(proxy);
+    close(client_fd);
+    close(v6_fd);
+    close(v4_blackhole);
+}
+
 int main(void) {
     fprintf(stderr, "=== stress tests ===\n");
     RUN_TEST(normal_burst);
@@ -1338,5 +1727,8 @@ int main(void) {
     RUN_TEST(gro_bidirectional);
     RUN_TEST(throughput_benchmark);
     RUN_TEST(s2s_fallback);
+    RUN_TEST(v3_header_protection);
+    RUN_TEST(ipv6_remote);
+    RUN_TEST(happy_eyeballs);
     TEST_MAIN_END();
 }

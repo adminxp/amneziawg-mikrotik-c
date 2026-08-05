@@ -9,39 +9,74 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <time.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/signalfd.h>
 #include <sys/timerfd.h>
 
 /* ---- Helpers ---- */
 
-static void fill_h4_ring(proxy_t *p) {
-    if (p->cfg->h4.min == p->cfg->h4.max) {
-        uint32_t v = p->cfg->h4.min;
+/* One H4 ring per profile: server mode picks H4 per client, so the rings must
+ * not be rebuilt behind each other's back. */
+static void fill_h4_ring(proxy_t *p, int prof) {
+    const hrange_t *h4 = &p->cfg->profiles[prof].h4;
+    uint32_t *ring = p->h4_ring[prof];
+
+    if (h4->min == h4->max) {
+        uint32_t v = h4->min;
         for (int i = 0; i < H4_RING_SIZE; i++)
-            p->h4_ring[i] = v;
+            ring[i] = v;
         return;
     }
     for (int i = 0; i < H4_RING_SIZE; i++)
-        p->h4_ring[i] = hrange_pick(&p->cfg->h4, fastrand_u64(&p->rng));
+        ring[i] = hrange_pick(h4, fastrand_u64(&p->rng));
 }
 
-static inline uint32_t pick_h4(proxy_t *p) {
-    uint32_t v = p->h4_ring[p->h4_idx];
-    p->h4_idx = (p->h4_idx + 1) & (H4_RING_SIZE - 1);
-    if (p->h4_idx == 0)
-        fill_h4_ring(p);
+static void fill_h4_rings(proxy_t *p) {
+    for (int i = 0; i < p->cfg->profile_count; i++)
+        fill_h4_ring(p, i);
+}
+
+static inline uint32_t pick_h4_prof(proxy_t *p, int prof) {
+    uint16_t idx = p->h4_idx[prof];
+    uint32_t v = p->h4_ring[prof][idx];
+    idx = (uint16_t)((idx + 1) & (H4_RING_SIZE - 1));
+    p->h4_idx[prof] = idx;
+    if (idx == 0)
+        fill_h4_ring(p, prof);
     return v;
 }
 
-/* Switch the active obfuscation profile and rebuild the H4 ring for its range.
- * Only called while the tunnel is down (initiator) or on a fresh handshake
- * (responder), so no transport is in flight during the swap. */
+static inline uint32_t pick_h4(proxy_t *p) {
+    return pick_h4_prof(p, p->cfg->active_profile);
+}
+
+/* Switch the active obfuscation profile. Only called while the tunnel is down
+ * (initiator) or on a fresh handshake (responder), so no transport is in
+ * flight during the swap. Server mode never uses this — it tracks the profile
+ * per client instead. */
 static void switch_profile(proxy_t *p, int idx) {
     config_apply_profile(p->cfg, idx);
-    fill_h4_ring(p);
+}
+
+/* --- Per-source profile cache (server mode with a fallback chain) --- */
+
+static inline int profile_for_addr(proxy_t *p, const struct sockaddr_in *a) {
+    if (p->cfg->profile_count == 1) return 0;
+    uint32_t k = prof_cache_key(a);
+    prof_cache_entry_t *e = &p->prof_cache[(k ^ (k >> 16)) & PROF_CACHE_MASK];
+    return e->key == k ? e->prof : p->cfg->active_profile;
+}
+
+static inline void profile_remember(proxy_t *p, const struct sockaddr_in *a, int prof) {
+    uint32_t k = prof_cache_key(a);
+    prof_cache_entry_t *e = &p->prof_cache[(k ^ (k >> 16)) & PROF_CACHE_MASK];
+    e->key = k;
+    e->prof = (uint8_t)prof;
 }
 
 static int checked_mul_size(size_t a, size_t b, size_t *out) {
@@ -60,17 +95,66 @@ static int junk_layout_sizes(const awg_config_t *cfg,
     return 0;
 }
 
-static int resolve_addr(const char *host, uint16_t port, struct sockaddr_in *addr) {
-    memset(addr, 0, sizeof(*addr));
-    addr->sin_family = AF_INET;
-    addr->sin_port = htons(port);
+/* Address bytes only — the port never participates: the caller always
+ * overwrites it with the configured one. */
+static int sa_addr_eq(const struct sockaddr *a, const struct sockaddr *b) {
+    if (a->sa_family != b->sa_family) return 0;
+    if (a->sa_family == AF_INET)
+        return ((const struct sockaddr_in *)a)->sin_addr.s_addr ==
+               ((const struct sockaddr_in *)b)->sin_addr.s_addr;
+    if (a->sa_family == AF_INET6)
+        return memcmp(&((const struct sockaddr_in6 *)a)->sin6_addr,
+                      &((const struct sockaddr_in6 *)b)->sin6_addr,
+                      sizeof(struct in6_addr)) == 0;
+    return 0;
+}
 
-    if (inet_pton(AF_INET, host, &addr->sin_addr) == 1)
+static void sa_set_port(struct sockaddr_storage *ss, uint16_t port) {
+    if (ss->ss_family == AF_INET6)
+        ((struct sockaddr_in6 *)ss)->sin6_port = htons(port);
+    else
+        ((struct sockaddr_in *)ss)->sin_port = htons(port);
+}
+
+/* Printable address of a resolved endpoint. buf must hold INET6_ADDRSTRLEN. */
+static const char *sa_str(const struct sockaddr *sa, char *buf, size_t buflen) {
+    const void *src = (sa->sa_family == AF_INET6)
+        ? (const void *)&((const struct sockaddr_in6 *)sa)->sin6_addr
+        : (const void *)&((const struct sockaddr_in *)sa)->sin_addr;
+    const char *r = inet_ntop(sa->sa_family, src, buf, (socklen_t)buflen);
+    return r ? r : "?";
+}
+
+/* Resolve host into one A and one AAAA endpoint. Either may come back empty
+ * (len == 0); returns -1 only when neither family produced a record. Both are
+ * kept so the caller can run the Happy Eyeballs probe over them. */
+static int resolve_addr(const char *host, uint16_t port,
+                        awg_addr_t *v4, awg_addr_t *v6) {
+    memset(v4, 0, sizeof(*v4));
+    memset(v6, 0, sizeof(*v6));
+
+    struct sockaddr_in lit4;
+    struct sockaddr_in6 lit6;
+    if (inet_pton(AF_INET, host, &lit4.sin_addr) == 1) {
+        struct sockaddr_in *sa = (struct sockaddr_in *)&v4->sa;
+        sa->sin_family = AF_INET;
+        sa->sin_addr = lit4.sin_addr;
+        sa->sin_port = htons(port);
+        v4->len = sizeof(*sa);
         return 0;
+    }
+    if (inet_pton(AF_INET6, host, &lit6.sin6_addr) == 1) {
+        struct sockaddr_in6 *sa = (struct sockaddr_in6 *)&v6->sa;
+        sa->sin6_family = AF_INET6;
+        sa->sin6_addr = lit6.sin6_addr;
+        sa->sin6_port = htons(port);
+        v6->len = sizeof(*sa);
+        return 0;
+    }
 
     log_info2("resolving ", host);
 
-    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM };
+    struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM };
     struct addrinfo *res;
     int gai_err = getaddrinfo(host, NULL, &hints, &res);
     if (gai_err != 0) {
@@ -78,60 +162,86 @@ static int resolve_addr(const char *host, uint16_t port, struct sockaddr_in *add
         if (g_log_level >= LOG_ERROR) log_msgn("ERROR: ", parts, 4);
         return -1;
     }
-    memcpy(addr, res->ai_addr, sizeof(*addr));
-    addr->sin_port = htons(port);
 
-    char ipbuf[INET_ADDRSTRLEN];
-    if (inet_ntop(AF_INET, &addr->sin_addr, ipbuf, sizeof(ipbuf))) {
-        const char *parts[] = { "resolved ", host, " -> ", ipbuf };
-        log_infon(parts, 4);
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        awg_addr_t *slot = (ai->ai_family == AF_INET6) ? v6 :
+                           (ai->ai_family == AF_INET)  ? v4 : NULL;
+        if (!slot || slot->len || ai->ai_addrlen > sizeof(slot->sa)) continue;
+        memcpy(&slot->sa, ai->ai_addr, ai->ai_addrlen);
+        slot->len = (socklen_t)ai->ai_addrlen;
+        sa_set_port(&slot->sa, port);
+    }
+    freeaddrinfo(res);
+
+    if (!v4->len && !v6->len) {
+        log_error2("resolve produced no usable record for ", host);
+        return -1;
     }
 
-    freeaddrinfo(res);
+    if (g_log_level >= LOG_INFO) {
+        char b4[INET6_ADDRSTRLEN], b6[INET6_ADDRSTRLEN];
+        const char *parts[] = { "resolved ", host, " -> ",
+            v4->len ? sa_str((struct sockaddr *)&v4->sa, b4, sizeof(b4)) : "(no A)",
+            " / ",
+            v6->len ? sa_str((struct sockaddr *)&v6->sa, b6, sizeof(b6)) : "(no AAAA)" };
+        log_infon(parts, 6);
+    }
     return 0;
 }
 
-int resolve_addr_check(const char *host, const struct in_addr *cur) {
-    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM };
+int resolve_addr_check(const char *host, const struct sockaddr *cur) {
+    struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM };
     struct addrinfo *res;
     if (getaddrinfo(host, NULL, &hints, &res) != 0)
         return -1;
     int found = 0;
-    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        struct sockaddr_in sa;
-        memcpy(&sa, ai->ai_addr, sizeof(sa));
-        if (sa.sin_addr.s_addr == cur->s_addr) { found = 1; break; }
-    }
+    for (struct addrinfo *ai = res; ai && !found; ai = ai->ai_next)
+        found = sa_addr_eq(ai->ai_addr, cur);
     freeaddrinfo(res);
     return found ? 0 : 1;
 }
 
-static int parse_host_port(const char *s, char *host, int hostmax, uint16_t *port) {
-    const char *colon = NULL;
-    int len = 0;
-    while (s[len]) len++;
-    for (int i = len - 1; i >= 0; i--) {
-        if (s[i] == ':') { colon = s + i; break; }
-    }
-    if (!colon) return -1;
+int parse_host_port(const char *s, char *host, int hostmax, uint16_t *port) {
+    const char *hstart = s, *hend = NULL, *colon;
 
-    int hlen = (int)(colon - s);
+    if (*s == '[') {
+        /* [2001:db8::1]:443 — the only unambiguous IPv6 form */
+        hstart = s + 1;
+        for (const char *q = hstart; *q; q++)
+            if (*q == ']') { hend = q; break; }
+        if (!hend || hend[1] != ':') return -1;
+        colon = hend + 1;
+    } else {
+        /* A bare IPv6 literal has no room for a port, and splitting it on the
+         * last colon would silently produce a wrong host. Reject it outright. */
+        struct in6_addr tmp;
+        if (inet_pton(AF_INET6, s, &tmp) == 1) return -1;
+        for (const char *q = s; *q; q++)
+            if (*q == ':') hend = q;
+        if (!hend) return -1;
+        colon = hend;
+    }
+
+    int hlen = (int)(hend - hstart);
     if (hlen >= hostmax) return -1;
-    memcpy(host, s, hlen);
+    memcpy(host, hstart, (size_t)hlen);
     host[hlen] = '\0';
 
-    *port = 0;
-    for (const char *p = colon + 1; *p; p++) {
-        if (*p < '0' || *p > '9') return -1;
-        *port = *port * 10 + (*p - '0');
+    if (!colon[1]) return -1;
+    uint32_t v = 0;
+    for (const char *q = colon + 1; *q; q++) {
+        if (*q < '0' || *q > '9') return -1;
+        v = v * 10 + (uint32_t)(*q - '0');
+        if (v > 65535) return -1;
     }
+    *port = (uint16_t)v;
     return 0;
 }
 
-static int create_udp_socket(int blocking) {
+static int create_udp_socket(int family, int blocking) {
     int flags = SOCK_DGRAM | SOCK_CLOEXEC;
     if (!blocking) flags |= SOCK_NONBLOCK;
-    return socket(AF_INET, flags, 0);
+    return socket(family, flags, 0);
 }
 
 static void set_socket_buffers(int fd, int size) {
@@ -139,10 +249,16 @@ static void set_socket_buffers(int fd, int size) {
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
 }
 
-static void set_df_off(int fd) {
-    int val = IP_PMTUDISC_DONT;
-    if (setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &val, sizeof(val)) < 0)
-        log_error2("IP_MTU_DISCOVER dont failed: ", strerror(errno));
+/* IPv6 has no DF bit — a v6 router never fragments — so there the sockopt only
+ * stops the local stack from honouring PMTU replies and from setting
+ * IPV6_DONTFRAG on the send path. Kept symmetric so AWG_NO_DF means the same
+ * thing on both families. */
+static void set_df_off(int fd, int family) {
+    int val = (family == AF_INET6) ? IPV6_PMTUDISC_DONT : IP_PMTUDISC_DONT;
+    int level = (family == AF_INET6) ? IPPROTO_IPV6 : IPPROTO_IP;
+    int opt = (family == AF_INET6) ? IPV6_MTU_DISCOVER : IP_MTU_DISCOVER;
+    if (setsockopt(fd, level, opt, &val, sizeof(val)) < 0)
+        log_error2("MTU_DISCOVER dont failed: ", strerror(errno));
 }
 
 static void set_busy_poll(int fd, int usec) {
@@ -180,43 +296,229 @@ static void log_socket_buffers(int fd, const awg_config_t *cfg, const char *labe
     log_infon(parts, 8);
 }
 
-static int dial_remote(proxy_t *p, int blocking) {
-    if (resolve_addr(p->remote_host, p->remote_port, &p->remote_addr) < 0)
-        return -1;
+/* Warn once per connection when the tunnel actually runs over IPv6: the 40-byte
+ * IPv6 header pushes a full-size WireGuard packet past 1500 at the MTU that is
+ * safe over IPv4. The proxy cannot fix this — the MTU belongs to the router's
+ * wireguard interface — so it just states the ceiling. */
+static void log_ipv6_mtu_hint(const proxy_t *p) {
+    if (g_log_level < LOG_ERROR) return;
+    char mb[12];
+    const char *parts[] = { "remote is IPv6: set the WireGuard interface MTU to ",
+        u32_to_str(mb, (uint32_t)awg_max_wg_mtu(p->cfg->max_s4, 1)),
+        " or lower — the 40-byte IPv6 header makes a full-size packet exceed "
+        "1500 bytes and it will be dropped or fragmented" };
+    log_msgn("WARN: ", parts, 3);
+}
 
-    int fd = create_udp_socket(blocking);
+/* Open and connect one socket to a resolved endpoint. */
+static int dial_one(proxy_t *p, const awg_addr_t *a, int blocking) {
+    int family = a->sa.ss_family;
+    int fd = create_udp_socket(family, blocking);
     if (fd < 0) return -1;
 
+    /* The probe holds two sockets at once; without V6ONLY the v6 one may also
+     * claim the v4 wildcard and collide with its sibling on the same port. */
+    if (family == AF_INET6) {
+        int on = 1;
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on));
+    }
+
     if (p->local_port > 0) {
-        struct sockaddr_in local = { .sin_family = AF_INET, .sin_port = htons(p->local_port) };
+        struct sockaddr_storage local;
+        socklen_t local_len;
+        memset(&local, 0, sizeof(local));
+        if (family == AF_INET6) {
+            struct sockaddr_in6 *l6 = (struct sockaddr_in6 *)&local;
+            l6->sin6_family = AF_INET6;
+            l6->sin6_port = htons(p->local_port);
+            local_len = sizeof(*l6);
+        } else {
+            struct sockaddr_in *l4 = (struct sockaddr_in *)&local;
+            l4->sin_family = AF_INET;
+            l4->sin_port = htons(p->local_port);
+            local_len = sizeof(*l4);
+        }
         int opt = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        if (bind(fd, (struct sockaddr *)&local, sizeof(local)) < 0) {
+        if (bind(fd, (struct sockaddr *)&local, local_len) < 0) {
             log_error2("bind failed: ", strerror(errno));
             close(fd);
             return -1;
         }
     }
 
-    if (connect(fd, (struct sockaddr *)&p->remote_addr, sizeof(p->remote_addr)) < 0) {
+    if (connect(fd, (struct sockaddr *)&a->sa, a->len) < 0) {
         log_error2("connect failed: ", strerror(errno));
         close(fd);
         return -1;
     }
 
     if (g_log_level >= LOG_INFO) {
-        char ipbuf[INET_ADDRSTRLEN], pbuf[12];
-        inet_ntop(AF_INET, &p->remote_addr.sin_addr, ipbuf, sizeof(ipbuf));
-        const char *parts[] = { "connected to ", ipbuf, ":",
-                                u32_to_str(pbuf, ntohs(p->remote_addr.sin_port)) };
+        char ipbuf[INET6_ADDRSTRLEN], pbuf[12];
+        const char *parts[] = { "connected to ",
+            sa_str((struct sockaddr *)&a->sa, ipbuf, sizeof(ipbuf)), " port ",
+            u32_to_str(pbuf, p->remote_port) };
         log_infon(parts, 4);
     }
 
     set_socket_buffers(fd, p->cfg->socket_buf);
     set_busy_poll(fd, p->cfg->busy_poll);
     if (p->cfg->no_df)
-        set_df_off(fd);
+        set_df_off(fd, family);
     return fd;
+}
+
+/* Resolve and connect. When the name carries both an A and an AAAA record the
+ * second socket is opened too and left for he_probe() to arbitrate; the primary
+ * (returned) socket is always the IPv4 one, matching what every previous
+ * release did — IPv6 only takes over once it demonstrably answers. */
+static int dial_remote(proxy_t *p, int blocking) {
+    awg_addr_t v4, v6;
+    if (resolve_addr(p->remote_host, p->remote_port, &v4, &v6) < 0)
+        return -1;
+
+    const awg_addr_t *primary = v4.len ? &v4 : &v6;
+    const awg_addr_t *alt     = v4.len ? (v6.len ? &v6 : NULL) : NULL;
+
+    int fd = dial_one(p, primary, blocking);
+    if (fd < 0) {
+        /* A dead IPv4 route must not hide a working IPv6 one. */
+        if (!alt) return -1;
+        fd = dial_one(p, alt, blocking);
+        if (fd < 0) return -1;
+        primary = alt;
+        alt = NULL;
+    }
+    p->remote = *primary;
+
+    atomic_store_explicit(&p->he_sent, 0, memory_order_relaxed);
+    p->he_pkt_len = 0;
+    p->remote_alt.len = 0;
+
+    int fd2 = -1;
+    if (alt) {
+        fd2 = dial_one(p, alt, blocking);
+        if (fd2 >= 0)
+            p->remote_alt = *alt;
+    }
+    atomic_store_explicit(&p->remote_fd2, fd2, memory_order_release);
+
+    if (fd2 < 0 && p->remote.sa.ss_family == AF_INET6)
+        log_ipv6_mtu_hint(p);
+    return fd;
+}
+
+/* ---- Happy Eyeballs (RFC 8305), adapted to UDP ---- */
+
+static uint64_t mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* c2s: keep a copy of the first packet sent after a (re)connect so the probe
+ * has something to replay. Cheap enough for the hot path — the probe socket is
+ * -1 in every single-family config, so this is one predicted branch on a
+ * relaxed load. A handshake init passes replace=1: it is the only packet a
+ * server ever answers, so it displaces whatever transport frame happened to go
+ * out first and restarts the clock. */
+static inline void he_stash(proxy_t *p, const void *data, int len, int replace) {
+    if (atomic_load_explicit(&p->remote_fd2, memory_order_relaxed) < 0) return;
+    if (!replace && atomic_load_explicit(&p->he_sent, memory_order_relaxed)) return;
+    if (len <= 0 || len > (int)sizeof(p->he_pkt)) return;
+    atomic_store_explicit(&p->he_sent, 0, memory_order_relaxed);
+    memcpy(p->he_pkt, data, (size_t)len);
+    p->he_pkt_len = len;
+    p->he_sent_ms = mono_ms();
+    atomic_store_explicit(&p->he_sent, 1, memory_order_release);
+    if (p->he_evfd >= 0) {
+        uint64_t one = 1;
+        (void)!write(p->he_evfd, &one, sizeof(one));
+    }
+}
+
+/* Settle on one family and drop the loser. Runs in the s2c thread before it
+ * starts reading, so remote_fd is swapped while nothing is mid-recv on it. */
+static void he_finish(proxy_t *p, int use_alt) {
+    int fd2 = atomic_load_explicit(&p->remote_fd2, memory_order_acquire);
+    if (fd2 < 0) return;
+    atomic_store_explicit(&p->remote_fd2, -1, memory_order_release);
+
+    if (use_alt) {
+        int old = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
+        p->remote = p->remote_alt;
+        atomic_store_explicit(&p->remote_fd, fd2, memory_order_release);
+        if (old >= 0) close(old);
+        log_info("happy eyeballs: IPv6 answered first, using it");
+    } else {
+        close(fd2);
+    }
+    p->remote_alt.len = 0;
+
+    if (p->remote.sa.ss_family == AF_INET6)
+        log_ipv6_mtu_hint(p);
+}
+
+/* UDP has no handshake, so the only liveness signal is a packet coming back.
+ * Both sockets are watched with poll(), which merely peeks — the winning
+ * datagram stays queued for the normal read path. IPv4 gets a head start of
+ * he_delay ms; after that the first outbound packet is replayed over IPv6.
+ * Replaying is safe: both copies carry the same TAI64N, so a server that
+ * received both rejects the second as a replay and answers exactly once. */
+static void he_probe(proxy_t *p) {
+    int fd  = atomic_load_explicit(&p->remote_fd,  memory_order_acquire);
+    int fd2 = atomic_load_explicit(&p->remote_fd2, memory_order_acquire);
+    if (fd < 0 || fd2 < 0) return;
+
+    struct pollfd pfd[3] = {
+        { fd, POLLIN, 0 }, { fd2, POLLIN, 0 }, { p->he_evfd, POLLIN, 0 }
+    };
+    nfds_t nfds = (p->he_evfd >= 0) ? 3 : 2;
+    int dup_done = 0, use_alt = 0;
+
+    while (!atomic_load_explicit(&p->stopped, memory_order_relaxed) &&
+           !atomic_load_explicit(&p->reconnect_needed, memory_order_relaxed)) {
+        /* Without the eventfd there is nothing to wake us when c2s sends, so
+         * fall back to re-checking every he_delay. */
+        int wait = (nfds == 3) ? 1000 : (p->cfg->he_delay > 0 ? p->cfg->he_delay : 1000);
+        if (!dup_done && atomic_load_explicit(&p->he_sent, memory_order_acquire)) {
+            int64_t left = (int64_t)p->cfg->he_delay -
+                           (int64_t)(mono_ms() - p->he_sent_ms);
+            wait = left > 0 ? (int)left : 0;
+        }
+
+        int r = poll(pfd, nfds, wait);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (r > 0 && pfd[2].revents) {
+            /* c2s just stashed a packet — drain and recompute the deadline
+             * from its timestamp rather than treating this as a winner. */
+            uint64_t v;
+            (void)!read(p->he_evfd, &v, sizeof(v));
+            pfd[2].revents = 0;
+            r--;
+        }
+        if (r > 0) {
+            /* A readable socket wins outright; a bare POLLERR (ICMP
+             * unreachable) only proves the other family should be preferred. */
+            if (pfd[0].revents & POLLIN)      use_alt = 0;
+            else if (pfd[1].revents & POLLIN) use_alt = 1;
+            else                              use_alt = (pfd[0].revents != 0);
+            break;
+        }
+        if (!dup_done && atomic_load_explicit(&p->he_sent, memory_order_acquire) &&
+            (int64_t)(mono_ms() - p->he_sent_ms) >= (int64_t)p->cfg->he_delay) {
+            if (p->he_pkt_len > 0)
+                send(fd2, p->he_pkt, (size_t)p->he_pkt_len,
+                     MSG_DONTWAIT | MSG_NOSIGNAL);
+            dup_done = 1;
+            log_info("happy eyeballs: IPv4 silent, probing IPv6");
+        }
+    }
+
+    he_finish(p, use_alt);
 }
 
 /* ---- GRO/GSO ---- */
@@ -224,6 +526,29 @@ static int dial_remote(proxy_t *p, int blocking) {
 static int enable_gro(int fd) {
     int val = 1;
     return setsockopt(fd, IPPROTO_UDP, UDP_GRO, &val, sizeof(val)) == 0;
+}
+
+/* Giving up on GRO has to clear the sockopt too: the kernel keeps coalescing
+ * while UDP_GRO is set, and the recvmmsg fallback has no way to split a merged
+ * buffer, so it would forward several packets glued into one. */
+static void disable_gro(int fd) {
+    int val = 0;
+    setsockopt(fd, IPPROTO_UDP, UDP_GRO, &val, sizeof(val));
+}
+
+/* Segment size of a coalesced read, 0 when the kernel did not coalesce.
+ * On receive the kernel reports it as UDP_GRO holding an int
+ * (udp_cmsg_recv()); UDP_SEGMENT is the send-side GSO type and never appears
+ * here. */
+int gro_seg_size(const struct msghdr *hdr) {
+    for (struct cmsghdr *cm = CMSG_FIRSTHDR(hdr); cm; cm = CMSG_NXTHDR((struct msghdr *)hdr, cm)) {
+        if (cm->cmsg_level == IPPROTO_UDP && cm->cmsg_type == UDP_GRO) {
+            int ss;
+            memcpy(&ss, CMSG_DATA(cm), sizeof(ss));
+            return ss;
+        }
+    }
+    return 0;
 }
 
 static void init_gro_state(proxy_t *p) {
@@ -260,16 +585,7 @@ static int recv_gro(proxy_t *p, int fd, int *seg_size) {
         return (int)n;
     }
 
-    *seg_size = 0;
-    /* Parse cmsg for UDP_GRO segment size */
-    for (struct cmsghdr *cm = CMSG_FIRSTHDR(&p->gro_hdr); cm; cm = CMSG_NXTHDR(&p->gro_hdr, cm)) {
-        if (cm->cmsg_level == IPPROTO_UDP && cm->cmsg_type == UDP_SEGMENT) {
-            uint16_t ss;
-            memcpy(&ss, CMSG_DATA(cm), sizeof(ss));
-            *seg_size = ss;
-            break;
-        }
-    }
+    *seg_size = gro_seg_size(&p->gro_hdr);
 
     return (int)n;
 }
@@ -330,6 +646,10 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
     p->cfg = cfg;
     p->listen_fd = -1;
     atomic_store_explicit(&p->remote_fd, -1, memory_order_relaxed);
+    atomic_store_explicit(&p->remote_fd2, -1, memory_order_relaxed);
+    /* Only ever used by the Happy Eyeballs probe; a failure here just costs
+     * timing precision, so it is not fatal. */
+    p->he_evfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     p->signal_fd = -1;
     p->timer_fd = -1;
     p->gso_ok = 1;
@@ -372,6 +692,10 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
         seed = (uint64_t)(uintptr_t)p ^ 0xDEADBEEFCAFEULL;
     }
     fastrand_init(&p->rng, seed);
+    /* The two directions must never emit the same padding bytes at the same
+     * time, so they run independent streams from independent seeds. */
+    fastrand_init(&p->rng_c2s, seed ^ 0x9E3779B97F4A7C15ULL);
+    fastrand_init(&p->rng_s2c, seed ^ 0xBF58476D1CE4E5B9ULL);
 
     /* Pre-allocate junk buffers */
     if (cfg->jc > 0 && cfg->jmax > 0) {
@@ -384,12 +708,17 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
         if (!p->junk_buf || !p->junk_sizes) return -1;
     }
 
-    /* Init H4 ring */
-    fill_h4_ring(p);
+    /* Init H4 rings */
+    fill_h4_rings(p);
 
-    /* Init batch I/O structures — invariant fields set once */
-    int c2s_headroom = (cfg->mode == AWG_MODE_NORMAL) ? cfg->s4 : 0;
-    int s2c_headroom = (cfg->mode == AWG_MODE_NORMAL) ? 0 : cfg->s4;
+    /* Init batch I/O structures — invariant fields set once.
+     * Headroom is sized from the largest S4 in the fallback chain, so a
+     * profile switch never changes the buffer layout: transform_outbound
+     * returns buf + headroom - s4 and simply leaves the surplus unused. */
+    int c2s_headroom = (cfg->mode == AWG_MODE_NORMAL) ? cfg->max_s4 : 0;
+    int s2c_headroom = (cfg->mode == AWG_MODE_NORMAL) ? 0 : cfg->max_s4;
+    p->c2s_headroom = c2s_headroom;
+    p->s2c_headroom = s2c_headroom;
     for (int i = 0; i < BATCH_SIZE; i++) {
         /* recv_c2s: listen socket */
         p->recv_c2s.iovecs[i].iov_base = p->recv_c2s.bufs[i] + c2s_headroom;
@@ -429,15 +758,11 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
         p->recv_s2c.msgs[i].msg_hdr.msg_iovlen = 1;
     }
 
-    /* Pre-fill S4 headroom with random data */
-    if (c2s_headroom > 0) {
-        for (int i = 0; i < BATCH_SIZE; i++)
-            fastrand_fill(&p->rng, p->recv_c2s.bufs[i], c2s_headroom);
-    }
-    if (s2c_headroom > 0) {
-        for (int i = 0; i < BATCH_SIZE; i++)
-            fastrand_fill(&p->rng, p->recv_s2c.bufs[i], s2c_headroom);
-    }
+    /* S4 padding is generated fresh for every packet in the send paths. A
+     * pre-filled pool would give a DPI only BATCH_SIZE distinct prefixes for
+     * the container's whole lifetime, and under v3 the first 12 bytes are the
+     * ChaCha20 nonce — reuse there is a far stronger signal than the one it
+     * would save. Two xorshift64 calls per packet is ~20 cycles. */
 
     /* Init GRO state */
     init_gro_state(p);
@@ -476,7 +801,7 @@ static void send_junk_and_cps_to(proxy_t *p, int fd, struct sockaddr_in *addr) {
         if (junk_layout_sizes(cfg, &junk_bytes, &junk_sizes_bytes) < 0)
             return;
         (void)junk_sizes_bytes;
-        fastrand_fill(&p->rng, p->junk_buf, junk_bytes);
+        fastrand_fill(&p->rng_s2c, p->junk_buf, junk_bytes);
         int njunk = generate_junk(cfg, p->junk_buf, p->junk_sizes);
         size_t off = 0;
         for (int i = 0; i < njunk; i++) {
@@ -502,7 +827,7 @@ static void send_junk_and_cps(proxy_t *p, int fd) {
         if (junk_layout_sizes(cfg, &junk_bytes, &junk_sizes_bytes) < 0)
             return;
         (void)junk_sizes_bytes;
-        fastrand_fill(&p->rng, p->junk_buf, junk_bytes);
+        fastrand_fill(&p->rng_c2s, p->junk_buf, junk_bytes);
         int njunk = generate_junk(cfg, p->junk_buf, p->junk_sizes);
         size_t off = 0;
         for (int i = 0; i < njunk; i++) {
@@ -538,6 +863,14 @@ static void send_batch_gso(proxy_t *p, int fd, struct mmsghdr *msgs,
     }
 }
 
+/* Every c2s → remote flush goes through here, so the Happy Eyeballs probe gets
+ * its copy without the per-packet fast path knowing anything about it. */
+static inline void send_batch_remote(proxy_t *p, int fd, struct mmsghdr *msgs,
+                                     struct iovec *iovecs, int nsend) {
+    he_stash(p, iovecs[0].iov_base, (int)iovecs[0].iov_len, 0);
+    send_batch_gso(p, fd, msgs, iovecs, nsend, NULL);
+}
+
 /* ---- c2s thread ---- */
 
 /* ---- c2s: normal mode ---- */
@@ -547,34 +880,37 @@ static void *c2s_thread_normal(void *arg) {
     proxy_t *p = (proxy_t *)arg;
     awg_config_t *cfg = p->cfg;
     set_thread_affinity(cfg->cpu_c2s, "c2s");
-    int prefix = cfg->s4;
+    const int prefix = p->c2s_headroom;
     int prev_nrecv = BATCH_SIZE;
     int gro_no_coalesce = 0;
+    int gro_pend_off = 0, gro_pend_total = 0, gro_pend_seg = 0;
 
     while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
         int nrecv;
 
         if (p->gro_enabled_c2s) {
-            /* GRO receive: coalesced packets into gro_buf_c2s */
-            p->gro_hdr_c2s.msg_controllen = sizeof(p->gro_cmsg_c2s);
-            p->gro_hdr_c2s.msg_flags = 0;
-            p->gro_hdr_c2s.msg_namelen = sizeof(struct sockaddr_in);
+            ssize_t total;
+            int seg_size;
 
-            ssize_t total = recvmsg(p->listen_fd, &p->gro_hdr_c2s, 0);
-            if (total <= 0) {
-                if (atomic_load_explicit(&p->stopped, memory_order_relaxed)) break;
-                continue;
-            }
+            /* A 64 KiB read can hold more segments than one batch (the kernel
+             * coalesces up to UDP_GRO_CNT_MAX = 64), so the remainder is kept
+             * and drained on the next turn instead of being dropped. */
+            if (gro_pend_off < gro_pend_total) {
+                total = gro_pend_total;
+                seg_size = gro_pend_seg;
+            } else {
+                p->gro_hdr_c2s.msg_controllen = sizeof(p->gro_cmsg_c2s);
+                p->gro_hdr_c2s.msg_flags = 0;
+                p->gro_hdr_c2s.msg_namelen = sizeof(struct sockaddr_in);
 
-            int seg_size = 0;
-            for (struct cmsghdr *cm = CMSG_FIRSTHDR(&p->gro_hdr_c2s); cm;
-                 cm = CMSG_NXTHDR(&p->gro_hdr_c2s, cm)) {
-                if (cm->cmsg_level == IPPROTO_UDP && cm->cmsg_type == UDP_SEGMENT) {
-                    uint16_t ss;
-                    memcpy(&ss, CMSG_DATA(cm), sizeof(ss));
-                    seg_size = ss;
-                    break;
+                total = recvmsg(p->listen_fd, &p->gro_hdr_c2s, 0);
+                if (total <= 0) {
+                    if (atomic_load_explicit(&p->stopped, memory_order_relaxed)) break;
+                    continue;
                 }
+                seg_size = gro_seg_size(&p->gro_hdr_c2s);
+                gro_pend_off = 0;
+                gro_pend_total = 0;
             }
 
             /* Copy source address for client detection below */
@@ -582,20 +918,35 @@ static void *c2s_thread_normal(void *arg) {
             nrecv = 0;
 
             if (seg_size > 0 && total > seg_size) {
-                gro_no_coalesce = 0;
-                for (int off = 0; off < total && nrecv < BATCH_SIZE; off += seg_size) {
+                int off = gro_pend_off;
+                for (; off < total && nrecv < BATCH_SIZE; off += seg_size) {
                     int plen = (off + seg_size <= total) ? seg_size : (int)(total - off);
                     if (plen > BUF_SIZE) {
-                        log_debug("c2s: dropping oversized GRO segment");
-                        continue;
+                        /* Cannot split a segment this large; give up on GRO
+                         * rather than silently blackhole the direction. */
+                        log_info("c2s: GRO segment larger than the packet buffer, disabling GRO");
+                        p->gro_enabled_c2s = 0;
+                        disable_gro(p->listen_fd);
+                        nrecv = 0;
+                        break;
                     }
                     memcpy(p->recv_c2s.bufs[nrecv] + prefix, p->gro_buf_c2s + off, plen);
                     p->recv_c2s.msgs[nrecv].msg_len = plen;
                     nrecv++;
                 }
+                if (nrecv > 0) gro_no_coalesce = 0;
+                if (off < total) {
+                    gro_pend_off = off;
+                    gro_pend_total = (int)total;
+                    gro_pend_seg = seg_size;
+                } else {
+                    gro_pend_off = gro_pend_total = 0;
+                }
+                if (nrecv == 0) continue;
             } else {
                 if (++gro_no_coalesce >= 8) {
                     p->gro_enabled_c2s = 0;
+                    disable_gro(p->listen_fd);
                     log_info("c2s: GRO not coalescing, falling back to recvmmsg");
                 }
                 if (total > BUF_SIZE) {
@@ -652,8 +1003,11 @@ static void *c2s_thread_normal(void *arg) {
         int remote_fd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
         if (remote_fd < 0) continue;
 
-        /* Build sendmmsg batch */
+        /* Build sendmmsg batch. Both flags are hoisted out of the loop, so a
+         * v2 config pays one predicted branch per packet and no ChaCha20. */
         int nsend = 0;
+        const int s4 = cfg->s4;
+        const int hp = cfg->hp_on;
 
         for (int i = 0; i < nrecv; i++) {
             int n = (int)p->recv_c2s.msgs[i].msg_len;
@@ -670,8 +1024,15 @@ static void *c2s_thread_normal(void *arg) {
                         uint32_t h4 = pick_h4(p);
                         memcpy(data, &h4, 4);
                     }
-                    int total = prefix > 0 ? prefix + n : n;
-                    uint8_t *base = prefix > 0 ? p->recv_c2s.bufs[i] : data;
+                    uint8_t *base = data;
+                    int total = n;
+                    if (s4 > 0) {
+                        base = data - s4;
+                        fastrand_fill(&p->rng_c2s, base, (size_t)s4);
+                        total = s4 + n;
+                    }
+                    if (hp)
+                        chacha20_xor(cfg->hp_key, base, data, AWG_HP_TRANSPORT_HDR);
                     p->send_c2s.iovecs[nsend].iov_base = base;
                     p->send_c2s.iovecs[nsend].iov_len = total;
                     nsend++;
@@ -683,8 +1044,8 @@ static void *c2s_thread_normal(void *arg) {
 
             /* Handshake slow path: flush batch first */
             if (nsend > 0) {
-                send_batch_gso(p, remote_fd, p->send_c2s.msgs,
-                               p->send_c2s.iovecs, nsend, NULL);
+                send_batch_remote(p, remote_fd, p->send_c2s.msgs,
+                                  p->send_c2s.iovecs, nsend);
                 nsend = 0;
             }
 
@@ -703,12 +1064,15 @@ static void *c2s_thread_normal(void *arg) {
 
             int out_len, sendJunk;
             uint8_t *out = transform_outbound(p->recv_c2s.bufs[i], prefix, n,
-                                               cfg, fastrand_u64(&p->rng),
+                                               cfg, fastrand_u64(&p->rng_c2s),
                                                &out_len, &sendJunk);
 
             if (sendJunk) {
                 log_debug("c2s: handshake init, sending junk");
                 send_junk_and_cps(p, remote_fd);
+                /* The handshake init is the packet a server actually answers,
+                 * so it is the one worth replaying on the other family. */
+                he_stash(p, out, out_len, 1);
                 send_packet(remote_fd, out, out_len);
                 if (!atomic_exchange_explicit(&p->fe_init_sent, 1, memory_order_relaxed)) {
                     char nb[12];
@@ -726,8 +1090,8 @@ static void *c2s_thread_normal(void *arg) {
         }
 
         if (nsend > 0) {
-            send_batch_gso(p, remote_fd, p->send_c2s.msgs,
-                           p->send_c2s.iovecs, nsend, NULL);
+            send_batch_remote(p, remote_fd, p->send_c2s.msgs,
+                              p->send_c2s.iovecs, nsend);
         }
     }
 
@@ -742,7 +1106,6 @@ static void *c2s_thread_reverse(void *arg) {
     awg_config_t *cfg = p->cfg;
     int server_mode = (cfg->mode == AWG_MODE_SERVER);
     set_thread_affinity(cfg->cpu_c2s, "c2s");
-    int s4 = cfg->s4;
     int prev_nrecv = BATCH_SIZE;
 
     while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
@@ -781,20 +1144,37 @@ static void *c2s_thread_reverse(void *arg) {
 
         /* Transform inbound (AWG→WG) and forward to WG server */
         int nsend = 0;
+        const int multi = (cfg->profile_count > 1);
 
         for (int i = 0; i < nrecv; i++) {
             int n = (int)p->recv_c2s.msgs[i].msg_len;
             if (n <= 0) continue;
 
             uint8_t *pkt = p->recv_c2s.bufs[i];
+            /* Server mode with a chain: each client keeps its own profile, so
+             * clients on different AWG versions never override each other. */
+            int prof = (multi && server_mode) ? profile_for_addr(p, &p->recv_c2s.addrs[i])
+                                             : cfg->active_profile;
+            const awg_profile_t *pr = &cfg->profiles[prof];
+            const int s4 = pr->s4;
+            awg_hp_ks_t ks = { .valid = 0 };
 
             /* Transport fast-path: strip S4 prefix, restore type */
             if (n >= s4 + WG_TRANSPORT_MIN) {
-                if (!cfg->transport_size_ambiguous ||
-                    (n != cfg->init_total && n != cfg->resp_total && n != cfg->cookie_total)) {
+                if (!pr->transport_size_ambiguous ||
+                    (n != pr->init_total && n != pr->resp_total && n != pr->cookie_total)) {
                     uint32_t h;
                     memcpy(&h, pkt + s4, 4);
-                    if (hrange_contains(&cfg->h4, h)) {
+                    const uint8_t *kstream = NULL;
+                    if (pr->hp_on) {
+                        kstream = hp_recv_ks(cfg, pkt, &ks);
+                        uint32_t mask;
+                        memcpy(&mask, kstream, 4);
+                        h ^= mask;
+                    }
+                    if (hrange_contains(&pr->h4, h)) {
+                        if (kstream)
+                            chacha20_xor_ks(pkt + s4, kstream, AWG_HP_TRANSPORT_HDR);
                         uint32_t wt = WG_TRANSPORT_DATA;
                         memcpy(pkt + s4, &wt, 4);
 
@@ -812,26 +1192,33 @@ static void *c2s_thread_reverse(void *arg) {
 
             /* Handshake slow path: flush batch first */
             if (nsend > 0) {
-                send_batch_gso(p, remote_fd, p->send_c2s.msgs,
-                               p->send_c2s.iovecs, nsend, NULL);
+                send_batch_remote(p, remote_fd, p->send_c2s.msgs,
+                                  p->send_c2s.iovecs, nsend);
                 nsend = 0;
             }
 
             int out_len;
-            uint8_t *out = transform_inbound(pkt, n, cfg, &out_len);
-            if (!out && cfg->profile_count > 1) {
-                /* Backward compat: the peer may be using the other profile
-                 * (e.g. an old v1 site talking to this v2 config). Try it; if a
-                 * handshake decodes, adopt that profile for this connection. */
-                int prev = cfg->active_profile;
-                config_apply_profile(cfg, prev ^ 1);
-                out = transform_inbound(pkt, n, cfg, &out_len);
-                if (out) {
-                    fill_h4_ring(p);
-                    log_info(cfg->active_profile ? "c2s: peer uses v1 fallback profile, switched"
-                                                 : "c2s: peer uses primary profile, switched");
-                } else {
-                    config_apply_profile(cfg, prev); /* revert: just junk */
+            uint8_t *out = transform_inbound_profile(pkt, n, cfg, pr, &ks, &out_len);
+            if (!out && multi) {
+                /* Backward compat: the peer may be on another stage of the
+                 * chain (an old v1/v2 site talking to a v3 config). Walk the
+                 * chain; if something decodes, adopt that stage. The header
+                 * protection keystream is shared — ChaCha20 runs once. */
+                for (int k = 0; k < cfg->profile_count; k++) {
+                    if (k == prof) continue;
+                    out = transform_inbound_profile(pkt, n, cfg, &cfg->profiles[k],
+                                                    &ks, &out_len);
+                    if (!out) continue;
+                    prof = k;
+                    pr = &cfg->profiles[k];
+                    if (server_mode) {
+                        profile_remember(p, &p->recv_c2s.addrs[i], k);
+                        log_debug("c2s: server: client adopted another profile stage");
+                    } else {
+                        switch_profile(p, k);
+                        log_info("c2s: peer uses a different profile stage, switched");
+                    }
+                    break;
                 }
             }
             if (!out) continue; /* junk packet, drop */
@@ -840,16 +1227,13 @@ static void *c2s_thread_reverse(void *arg) {
             if (server_mode && p->recv_c2s.addrs[i].sin_family == AF_INET) {
                 uint32_t msg_type;
                 memcpy(&msg_type, out, 4);
-                if (msg_type == WG_HANDSHAKE_INIT && out_len == WG_INIT_SIZE) {
+                if ((msg_type == WG_HANDSHAKE_INIT && out_len == WG_INIT_SIZE) ||
+                    (msg_type == WG_HANDSHAKE_RESPONSE && out_len == WG_RESP_SIZE)) {
                     uint32_t sender_idx;
                     memcpy(&sender_idx, out + 4, 4);
-                    session_put(p, sender_idx, &p->recv_c2s.addrs[i]);
-                    log_debug("c2s: server: recorded init sender_index");
-                } else if (msg_type == WG_HANDSHAKE_RESPONSE && out_len == WG_RESP_SIZE) {
-                    uint32_t sender_idx;
-                    memcpy(&sender_idx, out + 4, 4);
-                    session_put(p, sender_idx, &p->recv_c2s.addrs[i]);
-                    log_debug("c2s: server: recorded response sender_index");
+                    session_put_prof(p, sender_idx, &p->recv_c2s.addrs[i], prof);
+                    if (multi) profile_remember(p, &p->recv_c2s.addrs[i], prof);
+                    log_debug("c2s: server: recorded handshake sender_index");
                 }
             }
 
@@ -859,8 +1243,8 @@ static void *c2s_thread_reverse(void *arg) {
         }
 
         if (nsend > 0) {
-            send_batch_gso(p, remote_fd, p->send_c2s.msgs,
-                           p->send_c2s.iovecs, nsend, NULL);
+            send_batch_remote(p, remote_fd, p->send_c2s.msgs,
+                              p->send_c2s.iovecs, nsend);
         }
     }
 
@@ -885,6 +1269,7 @@ static inline int process_s2c_pkt_normal(proxy_t *p, uint8_t *pkt, int n,
                                           int *nsend) {
     awg_config_t *cfg = p->cfg;
     int s4 = cfg->s4;
+    awg_hp_ks_t ks = { .valid = 0 };
 
     /* Transport fast-path with precomputed ambiguity check */
     if (n >= s4 + WG_TRANSPORT_MIN) {
@@ -892,7 +1277,16 @@ static inline int process_s2c_pkt_normal(proxy_t *p, uint8_t *pkt, int n,
             (n != cfg->init_total && n != cfg->resp_total && n != cfg->cookie_total)) {
             uint32_t h;
             memcpy(&h, pkt + s4, 4);
+            const uint8_t *kstream = NULL;
+            if (cfg->hp_on) {
+                kstream = hp_recv_ks(cfg, pkt, &ks);
+                uint32_t mask;
+                memcpy(&mask, kstream, 4);
+                h ^= mask;
+            }
             if (hrange_contains(&cfg->h4, h)) {
+                if (kstream)
+                    chacha20_xor_ks(pkt + s4, kstream, AWG_HP_TRANSPORT_HDR);
                 uint32_t wt = WG_TRANSPORT_DATA;
                 memcpy(pkt + s4, &wt, 4);
                 int idx = *nsend;
@@ -909,7 +1303,8 @@ static inline int process_s2c_pkt_normal(proxy_t *p, uint8_t *pkt, int n,
 
     /* Slow path: handshake or unknown */
     int out_len;
-    uint8_t *out = transform_inbound(pkt, n, cfg, &out_len);
+    uint8_t *out = transform_inbound_profile(pkt, n, cfg, config_active_profile(cfg),
+                                             &ks, &out_len);
     if (!out) {
         log_debug("s2c: junk packet dropped");
         return 0;
@@ -999,17 +1394,30 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
         dest_addr = &p->client_addr;
     }
 
+    /* The reply must go out in the profile this client speaks. */
+    int prof = cfg->active_profile;
+    if (server_mode && cfg->profile_count > 1)
+        prof = atomic_load_explicit(&dest_entry->prof, memory_order_relaxed);
+    const awg_profile_t *pr = &cfg->profiles[prof];
+
     /* Transport fast-path */
     if (n >= WG_TRANSPORT_MIN) {
         uint32_t h;
         memcpy(&h, pkt, 4);
         if (h == WG_TRANSPORT_DATA) {
-            if (!cfg->h4_noop) {
-                uint32_t h4 = pick_h4(p);
+            if (!pr->h4_noop) {
+                uint32_t h4 = pick_h4_prof(p, prof);
                 memcpy(pkt, &h4, 4);
             }
-            int total = prefix > 0 ? prefix + n : n;
-            uint8_t *out = prefix > 0 ? base : pkt;
+            uint8_t *out = pkt;
+            int total = n;
+            if (pr->s4 > 0 && prefix >= pr->s4) {
+                out = pkt - pr->s4;
+                fastrand_fill(&p->rng_s2c, out, (size_t)pr->s4);
+                total = pr->s4 + n;
+                if (pr->hp_on)
+                    chacha20_xor(cfg->hp_key, out, pkt, AWG_HP_TRANSPORT_HDR);
+            }
             int idx = *nsend;
             send_iovecs[idx].iov_base = out;
             send_iovecs[idx].iov_len = total;
@@ -1035,10 +1443,10 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
     }
 
     int out_len, sendJunk;
-    uint8_t *out = transform_outbound_with_mac1(base, prefix, n, cfg,
-                                                out_mac1key,
-                                                fastrand_u64(&p->rng),
-                                                &out_len, &sendJunk);
+    uint8_t *out = transform_outbound_profile(base, prefix, n, cfg, pr,
+                                              out_mac1key,
+                                              fastrand_u64(&p->rng_s2c),
+                                              &out_len, &sendJunk);
 
     if (sendJunk) {
         log_debug("s2c: reverse: handshake init, sending junk");
@@ -1061,6 +1469,10 @@ static int do_reconnect(proxy_t *p) {
         close(old_fd);
         atomic_store_explicit(&p->remote_fd, -1, memory_order_release);
     }
+    /* A probe interrupted by reconnect_needed leaves its socket behind. */
+    int old_fd2 = atomic_exchange_explicit(&p->remote_fd2, -1, memory_order_acq_rel);
+    if (old_fd2 >= 0)
+        close(old_fd2);
 
     log_info2("reconnecting to ", p->remote_host);
 
@@ -1095,9 +1507,18 @@ static void *s2c_thread(void *arg) {
     int reconnect_backoff = 1;
     int prev_nrecv = BATCH_SIZE;
 
-    /* Try to enable GRO on initial remote fd */
+    int reverse = (p->cfg->mode != AWG_MODE_NORMAL);
+
+    /* Settle the address family before anything is attached to the socket:
+     * GRO, and later every read, must land on the fd that survives the probe. */
+    he_probe(p);
+
+    /* Try to enable GRO on initial remote fd. Only in normal mode: the
+     * coalesced-read path below is guarded by !reverse, and enabling the
+     * sockopt without a reader that splits by segment size would hand merged
+     * datagrams to recvmmsg as if they were one packet. */
     int remote_fd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
-    if (remote_fd >= 0 && !p->cfg->no_gro) {
+    if (remote_fd >= 0 && !p->cfg->no_gro && !reverse) {
         p->gro_enabled = enable_gro(remote_fd);
         if (p->gro_enabled)
             log_info("s2c: UDP GRO enabled");
@@ -1105,10 +1526,10 @@ static void *s2c_thread(void *arg) {
     if (p->cfg->no_gro)
         log_info("s2c: UDP GRO disabled (AWG_NO_GRO)");
 
-    int reverse = (p->cfg->mode != AWG_MODE_NORMAL);
-    int s2c_headroom = reverse ? p->cfg->s4 : 0;
+    int s2c_headroom = p->s2c_headroom;
     int s2c_buflen = BUF_SIZE + AWG_PACKET_HEADROOM - s2c_headroom;
     int gro_no_coalesce = 0;
+    int gro_pend_off = 0, gro_pend_total = 0, gro_pend_seg = 0;
 
     while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
         remote_fd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
@@ -1127,9 +1548,13 @@ static void *s2c_thread(void *arg) {
                 continue;
             }
             reconnect_backoff = 1;
-            remote_fd = new_fd;
+            /* A fresh connection re-runs the probe: dial_remote() resolved the
+             * name again, so this doubles as the re-resolve-on-failure path. */
+            he_probe(p);
+            remote_fd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
+            if (remote_fd < 0) continue;
             /* Re-enable GRO on new fd */
-            if (!p->cfg->no_gro) {
+            if (!p->cfg->no_gro && !reverse) {
                 p->gro_enabled = enable_gro(remote_fd);
                 if (p->gro_enabled)
                     log_info("s2c: UDP GRO re-enabled");
@@ -1143,17 +1568,27 @@ static void *s2c_thread(void *arg) {
 
         if (p->gro_enabled && !reverse) {
             /* GRO path: normal mode only (reverse uses outbound which needs headroom) */
-            int seg_size;
-            int n = recv_gro(p, remote_fd, &seg_size);
-            if (n <= 0) {
-                int saved_errno = errno;
-                if (n == 0 || (saved_errno != EAGAIN && saved_errno != EWOULDBLOCK && saved_errno != EINTR)) {
-                    if (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
-                        log_info3("remote read error (", strerror(saved_errno), "), will reconnect");
-                        atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
+            int seg_size, n;
+
+            /* Drain any segments left over from the previous read first — one
+             * 64 KiB coalesced read can carry more than BATCH_SIZE of them. */
+            if (gro_pend_off < gro_pend_total) {
+                n = gro_pend_total;
+                seg_size = gro_pend_seg;
+            } else {
+                n = recv_gro(p, remote_fd, &seg_size);
+                if (n <= 0) {
+                    int saved_errno = errno;
+                    if (n == 0 || (saved_errno != EAGAIN && saved_errno != EWOULDBLOCK && saved_errno != EINTR)) {
+                        if (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
+                            log_info3("remote read error (", strerror(saved_errno), "), will reconnect");
+                            atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
+                        }
                     }
+                    continue;
                 }
-                continue;
+                gro_pend_off = 0;
+                gro_pend_total = 0;
             }
 
             atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
@@ -1175,17 +1610,26 @@ static void *s2c_thread(void *arg) {
                 log_debug3("s2c: GRO recv bytes=", u32_to_str(nb, n), u32_to_str(sb, seg_size));
 
                 /* Coalesced: split buffer by seg_size */
-                for (int off = 0; off < n && nsend < BATCH_SIZE; off += seg_size) {
+                int off = gro_pend_off;
+                for (; off < n && nsend < BATCH_SIZE; off += seg_size) {
                     int end = off + seg_size;
                     if (end > n) end = n;
                     int pkt_len = end - off;
                     process_s2c_pkt_normal(p, p->gro_buf + off, pkt_len,
                                            p->send_s2c.iovecs, p->send_s2c.addrs, &nsend);
                 }
+                if (off < n) {
+                    gro_pend_off = off;
+                    gro_pend_total = n;
+                    gro_pend_seg = seg_size;
+                } else {
+                    gro_pend_off = gro_pend_total = 0;
+                }
             } else {
                 /* Single packet — GRO not coalescing */
                 if (++gro_no_coalesce >= 8) {
                     p->gro_enabled = 0;
+                    disable_gro(remote_fd);
                     log_info("GRO not coalescing, falling back to recvmmsg");
                 }
                 process_s2c_pkt_normal(p, p->gro_buf, n,
@@ -1256,8 +1700,9 @@ static void *s2c_thread(void *arg) {
 int proxy_run(proxy_t *p) {
     awg_config_t *cfg = p->cfg;
 
-    /* Create listen socket (blocking for c2s thread) */
-    p->listen_fd = create_udp_socket(1);
+    /* Create listen socket (blocking for c2s thread). The client-facing leg
+     * stays IPv4: the session table and profile cache key on sockaddr_in. */
+    p->listen_fd = create_udp_socket(AF_INET, 1);
     if (p->listen_fd < 0) {
         log_error("socket create failed");
         return -1;
@@ -1273,8 +1718,10 @@ int proxy_run(proxy_t *p) {
     set_socket_buffers(p->listen_fd, cfg->socket_buf);
     set_busy_poll(p->listen_fd, cfg->busy_poll);
     if (cfg->no_df)
-        set_df_off(p->listen_fd);
-    if (!cfg->no_gro) {
+        set_df_off(p->listen_fd, AF_INET);
+    /* Normal mode only — c2s_thread_reverse() reads with recvmmsg and has no
+     * way to split a coalesced buffer back into datagrams. */
+    if (!cfg->no_gro && cfg->mode == AWG_MODE_NORMAL) {
         p->gro_enabled_c2s = enable_gro(p->listen_fd);
         if (p->gro_enabled_c2s)
             log_info("c2s: UDP GRO enabled");
@@ -1351,8 +1798,9 @@ int proxy_run(proxy_t *p) {
      * (round-robin resolvers may return a rotating subset). */
     int dns_checks = 0;
     if (cfg->dns_refresh > 0) {
-        struct in_addr lit;
-        if (inet_pton(AF_INET, p->remote_host, &lit) != 1) {
+        struct in6_addr lit;
+        if (inet_pton(AF_INET, p->remote_host, &lit) != 1 &&
+            inet_pton(AF_INET6, p->remote_host, &lit) != 1) {
             dns_checks = cfg->dns_refresh / 5;
             if (dns_checks < 1) dns_checks = 1;
             log_info("periodic DNS re-resolve enabled");
@@ -1409,9 +1857,15 @@ int proxy_run(proxy_t *p) {
                         /* Client sending, remote silent — the other side may be
                          * on a different profile. Probe by switching. */
                         if (++fb_silent_count >= fb_checks) {
-                            switch_profile(p, cfg->active_profile ^ 1);
-                            log_info(cfg->active_profile ? "fallback: remote silent, trying v1 fallback profile"
-                                                         : "fallback: remote silent, trying primary profile");
+                            int next = cfg->active_profile + 1;
+                            if (next >= cfg->profile_count) next = 0;
+                            switch_profile(p, next);
+                            {
+                                char pb[12];
+                                const char *parts[] = { "fallback: remote silent, trying profile stage ",
+                                                        u32_to_str(pb, next) };
+                                log_infon(parts, 2);
+                            }
                             fb_silent_count = 0;
                             remote_silent_count = 0;
                             int rfd2 = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
@@ -1459,7 +1913,8 @@ int proxy_run(proxy_t *p) {
                     int rfd2 = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
                     if (rfd2 >= 0 &&
                         !atomic_load_explicit(&p->reconnect_needed, memory_order_relaxed)) {
-                        int r = resolve_addr_check(p->remote_host, &p->remote_addr.sin_addr);
+                        int r = resolve_addr_check(p->remote_host,
+                                                   (struct sockaddr *)&p->remote.sa);
                         if (r == 1 && ++dns_miss >= 2) {
                             dns_miss = 0;
                             log_info("DNS changed (current IP gone), triggering reconnect");
@@ -1485,6 +1940,9 @@ join:
     rfd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
     if (rfd >= 0)
         shutdown(rfd, SHUT_RDWR);
+    rfd = atomic_load_explicit(&p->remote_fd2, memory_order_acquire);
+    if (rfd >= 0)
+        shutdown(rfd, SHUT_RDWR);
 
     pthread_join(t_c2s, NULL);
     pthread_join(t_s2c, NULL);
@@ -1492,9 +1950,12 @@ join:
     /* Cleanup */
     rfd = atomic_load_explicit(&p->remote_fd, memory_order_relaxed);
     if (rfd >= 0) close(rfd);
+    rfd = atomic_load_explicit(&p->remote_fd2, memory_order_relaxed);
+    if (rfd >= 0) close(rfd);
     if (p->listen_fd >= 0) close(p->listen_fd);
     if (p->signal_fd >= 0) close(p->signal_fd);
     if (p->timer_fd >= 0) close(p->timer_fd);
+    if (p->he_evfd >= 0) close(p->he_evfd);
     free(p->junk_buf);
     free(p->junk_sizes);
 

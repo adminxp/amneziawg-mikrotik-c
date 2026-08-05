@@ -76,7 +76,7 @@ Compatible with AWG v1 and v2 -- the version is detected automatically based on 
      ```
      The router will ask for confirmation (press Reset/Mode button or wait for reboot)
 1. Export a `.conf` file from AmneziaVPN (see [Getting AWG Parameters](#getting-awg-parameters))
-2. Open the [configurator](https://timbrs.github.io/amneziawg-mikrotik-c/configurator.html)
+2. Open the [configurator](https://timbrs.github.io/amneziawg-mikrotik-c/conf3.0.html)
 3. Paste the `.conf` file contents
 4. Copy the generated commands and run them in MikroTik terminal
 
@@ -336,7 +336,7 @@ Each MikroTik client uses a standard awg-proxy in `normal` mode (default).
    - `Endpoint` = YOUR_VPS_IP:443 (the AWG_LISTEN port on the server)
    - `PublicKey` = WG server public key
 
-2. Open the [configurator](https://timbrs.github.io/amneziawg-mikrotik-c/configurator.html), paste the `.conf` and run the generated commands on MikroTik.
+2. Open the [configurator](https://timbrs.github.io/amneziawg-mikrotik-c/conf3.0.html), paste the `.conf` and run the generated commands on MikroTik.
 
 3. Obfuscation parameters (Jc, S1, S2, H1--H4) must **exactly match** the server parameters.
 
@@ -463,15 +463,20 @@ With 3+ clients, this is easier to automate with a script on the server.
 | `AWG_CLIENT_PUBS_FILE` | No | -- | In `server` mode: path to a file containing real public keys for direct clients |
 | `AWG_S3` | No | `0` | Cookie reply padding (v2) |
 | `AWG_S4` | No | `0` | Transport data padding (v2) |
-| `AWG_I1`--`AWG_I5` | No | -- | CPS templates (v1.5/v2) |
+| `AWG_I1`--`AWG_I5` | No | -- | CPS templates (v1.5/v2/v3) |
+| `AWG_HEADER_PROTECTION_KEY` | No | -- | Header protection key (v3), base64 (44 chars) or hex (64 chars). Setting it enables AmneziaWG 3.0 |
 | `AWG_MODE` | No | `normal` | Operating mode: `normal`, `reverse`, `server` |
-| `AWG_FB_H1`--`AWG_FB_H4` | No | -- | Fallback (v1) obfuscation profile: message types. Enables fallback (`normal`/`reverse` only); requires `AWG_S4=0` |
-| `AWG_FB_S1`, `AWG_FB_S2` | Yes** | -- | Init/response padding for the fallback profile |
-| `AWG_FB_S3` | No | `0` | Cookie reply padding for the fallback profile |
-| `AWG_FB_AFTER` | No | `20` | Seconds of remote silence before probing the other profile (initiator) |
+| `AWG_FB_H1`--`AWG_FB_H4` | No | -- | Fallback chain stage 1: message types. Enables the chain |
+| `AWG_FB_S1`, `AWG_FB_S2` | Yes** | -- | Init/response padding for stage 1 |
+| `AWG_FB_S3`, `AWG_FB_S4` | No | `0` | Cookie reply / transport padding for stage 1 |
+| `AWG_FB_I1`--`AWG_FB_I5` | No | -- | CPS templates for stage 1 |
+| `AWG_FB_HP` | No | `0` | `1` = stage 1 also encrypts the header (needs `AWG_HEADER_PROTECTION_KEY`) |
+| `AWG_FB2_*`, `AWG_FB3_*` | No | -- | Chain stages 2 and 3, same set of keys |
+| `AWG_FB_AFTER` | No | `20` | Seconds of remote silence before probing the next stage (initiator) |
 | `AWG_SRC_PORT` | No | auto | Outgoing port to server: `auto` / number / `random` |
 | `AWG_TIMEOUT` | No | `180` | Inactivity timeout (sec) |
 | `AWG_DNS_REFRESH` | No | `60` | Background DNS re-check interval for a hostname in AWG_REMOTE (sec, `0` = off) |
+| `AWG_HE_DELAY` | No | `250` | Happy Eyeballs: ms of IPv4 head start before probing IPv6 (only when the name has both an A and an AAAA) |
 | `AWG_LOG_LEVEL` | No | `info` | Log level |
 | `AWG_NO_GRO` | No | `0` | Disable UDP GRO |
 | `AWG_NO_DF` | No | `0` | Clear the DF bit on UDP packets (workaround for DPI dropping DF=1) |
@@ -480,14 +485,83 @@ With 3+ clients, this is easier to automate with a script on the server.
 | `AWG_CPU_S2C` | No | `-1` | CPU for server→client thread |
 | `AWG_BUSY_POLL` | No | `0` | SO_BUSY_POLL timeout (μs) |
 | `AWG_DNS` | No | -- | DNS server for hostname resolution in AWG_REMOTE |
+| `AWG_REJECT_AFTER` | No | -- | v3: accepted, not emulated. Logs a WARN when the lower bound is < 150 s |
+| `AWG_CONTENT_PADDING` | No | -- | v3: accepted and ignored (see below) |
+| `AWG_REKEY_AFTER`, `AWG_REKEY_TIMEOUT`, `AWG_KEEPALIVE_TIMEOUT`, `AWG_MAX_HANDSHAKE_ATTEMPTS` | No | -- | v3: accepted and ignored (see below) |
 
 `*` In `server` mode, you must set either the legacy `AWG_CLIENT_PUB` fallback or the explicit direct-peer list via `AWG_CLIENT_PUBS` / `AWG_CLIENT_PUBS_FILE`.
 
 `**` Required only when the fallback profile is enabled (`AWG_FB_H1` is set).
 
-The protocol version is detected automatically: **v2** if S3/S4 are set or H values are ranges, **v1.5** if CPS templates (I1-I5) are set, otherwise **v1**.
+The protocol version is detected automatically: **v3** if `AWG_HEADER_PROTECTION_KEY` is set, otherwise **v2** if S3/S4 are set or H values are ranges, otherwise **v1.5** if CPS templates (I1-I5) are set, otherwise **v1**.
 
-**Fallback profile (site-to-site backward compatibility / DPI resilience).** The primary profile (`AWG_S*`, `AWG_H*`, `AWG_I*`) may be v2, while `AWG_FB_*` defines a second, v1 profile (fixed H, no S3/S4/CPS). The initiator (`normal`) runs on the primary profile and, if the remote stays silent for longer than `AWG_FB_AFTER` seconds, rarely switches to the fallback and back until it finds a working one. The responder (`reverse`) accepts both profiles and replies with whichever one the handshake arrived on. For the site-to-site scenario the configurator generates identical primary+fallback profiles on both sides: if the primary obfuscation starts getting blocked, the tunnel automatically falls back to the secondary. Requires `AWG_S4=0`; not supported in `server` mode.
+### AmneziaWG 3.0
+
+On the wire, 3.0 differs from 2.0 in exactly one way: the packet header is encrypted with ChaCha20 (RFC 8439) under `AWG_HEADER_PROTECTION_KEY`, using the first 12 bytes of the S padding as the nonce. A transport packet has only its 16-byte header encrypted (`Type` + `Receiver` + `Counter`); handshake init/response/cookie reply are encrypted in full. The padding itself stays in the clear. Everything else in 3.0 (junk, `I1`-`I5`, `S1`-`S4`, `H1`-`H4` ranges) has been supported since version 2.
+
+Two practical rules follow:
+
+- **`AWG_S1`--`AWG_S4` must be >= 12**, otherwise the nonce does not fit in the padding. The proxy refuses to start; `amneziawg-go` enforces the same rule (its README says 8 — that is a typo, the code has `HeaderCipherNonceSize = 12`).
+- **Keep `AWG_S4` between 12 and 16.** The outer datagram is IP header + 8 (UDP) + S4 + 16 + `round_up(MTU,16)` + 16. Over IPv4 the header is 20 bytes, so that is `1484 + S4` at the stock MTU of 1420: S4 = 16 gives exactly 1500, S4 = 20 starts fragmenting. **Over IPv6 the header is 40 bytes**, which turns the same numbers into `1504 + S4` — already over the limit at S4 = 0, so there the MTU always has to come down. The ceiling is:
+
+  ```
+  IPv4:  floor((1440 - S4) / 16) * 16      # S4=0 -> 1440,  S4=16 -> 1424
+  IPv6:  floor((1420 - S4) / 16) * 16      # S4=0 -> 1408,  S4=16 -> 1392
+  ```
+
+  This is the same reason `wg-quick` picks 1420 for IPv4 and 1400 for IPv6. The configurator generates S4 in 12--16 and leaves the IPv4 MTU alone; for an IPv6 endpoint, or someone else's `.conf` with a larger S4, it lowers `mtu=` on the WireGuard interface. The proxy itself never changes the MTU — it only logs a WARN with the ceiling once the connection actually runs over IPv6.
+
+With no key set, the proxy behaves **byte for byte** like v2 (`hp_off_matches_v2` in the unit tests; the ChaCha20 branch is never entered). `amneziawg-go` works the same way: a zero key means `cipher == nil`.
+
+**What the proxy does not reproduce from 3.0, and why.** The proxy only sees UDP datagrams and holds no session keys — the Noise handshake runs between MikroTik's WG stack and the server. Therefore:
+
+- `ContentPaddingAddition` is added to the plaintext **before** the AEAD; appending bytes from outside would break the tag. The parameter is optional, and without it AWG 3.0 falls back to the standard padding to a multiple of 16 — exactly what MikroTik's WG stack produces. So our profile on the wire is "AWG 3.0 with ContentPaddingAddition disabled", a legitimate configuration rather than a degradation.
+- Timings (`RekeyAfterTime`, `RekeyTimeout`, `KeepaliveTimeout`, `MaxHandshakeAttempts`) — the proxy forwards packets as they arrive instead of pacing them. All of these are enforced by the sender only; the server never validates them, so the tunnel works.
+- `RejectAfterTime` is a receiver-side policy and cannot be emulated at all. If the server's lower bound is below ~150 s, it will start rejecting packets from a key MikroTik still considers live (rekey starts at 120 s, the old keypair lives until 180 s). The proxy logs a WARN at startup.
+
+All of these variables are accepted so a provider `.conf` carries over intact, and each is logged as not applied. What stays visible to a DPI: packet sizes remain multiples of 16, and the WireGuard rhythm (5 s retries, 10 s keepalive, 120 s rekey) is not disguised.
+
+**Fallback chain (backward compatibility / DPI resilience).** The primary profile (`AWG_S*`, `AWG_H*`, `AWG_I*`, `AWG_HEADER_PROTECTION_KEY`) can be extended to four stages: `AWG_FB_*`, `AWG_FB2_*`, `AWG_FB3_*`. The typical chain is v3 → v2 → v1.5 → v1. The initiator (`normal`) runs on the primary profile and, if the remote stays silent for longer than `AWG_FB_AFTER` seconds, cycles through the remaining stages until one works. The responder (`reverse`) accepts any stage and replies with whichever one the handshake arrived on. In `server` mode the profile is tracked **per client** (a source-address cache plus a field in the session table), so clients on different versions never override each other. A non-zero `AWG_S4` is now allowed: buffer headroom is sized from the largest S4 across all stages.
+
+### IPv6
+
+IPv6 is supported **on the container → AWG server leg only** (`AWG_REMOTE`). Receiving from the WireGuard client (`AWG_LISTEN`) stays IPv4: that is a veth inside the router itself, where a second stack adds nothing, and the session table and profile cache store the client address as a `sockaddr_in`.
+
+**When it is used.** The proxy resolves `AWG_REMOTE` on `AF_UNSPEC` and keeps the first A and the first AAAA record. From there:
+
+- **AAAA only** — runs over IPv6, nothing to decide;
+- **A only** — exactly as before, nothing changes;
+- **both** — the Happy Eyeballs probe (RFC 8305) runs, see below;
+- **an IPv6 literal** in `AWG_REMOTE` (`[2001:db8::1]:443`) — straight to IPv6, no lookup and no probe.
+
+**How the family is chosen.** UDP has no handshake, so the only liveness signal is a packet coming back. With both records present the proxy opens two `connect()`ed sockets and:
+
+1. the first outbound packet goes over IPv4 (the family every previous release used — IPv6 only takes the connection once it proves it works);
+2. if there is no answer within `AWG_HE_DELAY` (250 ms), **the very same** packet is replayed over IPv6. Replaying is safe: both copies carry the same TAI64N, so a server that received both rejects the second as a replay and answers exactly once;
+3. whichever family answers first wins; the loser's socket is closed and behaviour from then on is identical to a single-stack configuration — no steady-state overhead.
+
+The probe waits in `poll()` on the two descriptors and never reads, so the winning datagram is left queued for the normal receive path. A `POLLERR` (ICMP unreachable) on one socket hands the connection to the other family immediately. Every reconnect restarts the probe — and since `dial_remote()` re-resolves the name each time, that doubles as the re-resolve-on-failure path.
+
+**MTU.** The IPv6 header is 20 bytes longer and a full-size packet no longer fits 1500 — formulas and ceilings are in the AmneziaWG 3.0 section above. The proxy does not change the MTU (it belongs to the router's WireGuard interface); it logs this on connect instead:
+
+```
+WARN: remote is IPv6: set the WireGuard interface MTU to 1408 or lower — ...
+```
+
+The configurator sets `mtu=` itself: the "Server is reachable over IPv6" box is ticked automatically as soon as the endpoint is recognised as an IPv6 literal. For a DNS name the box stays off (the browser deliberately does not resolve your server's name — it would go to a third party), but the generated script asks the router itself:
+
+```
+:do {
+  :local a6 [:resolve vpn.example.com type=ipv6]
+  :if ([:len $a6] > 0) do={ /interface/wireguard/set [find name=wg-awg-proxy-1] mtu=1392 }
+} on-error={}
+```
+
+The `type=` parameter of `:resolve` is not present in every RouterOS 7.x build; `on-error={}` makes sure the install does not fail without it and the MTU simply stays at its IPv4 value. In that case tick the box by hand or set `mtu=` yourself.
+
+**What is not covered.** The rest of the RouterOS generation (`/ip/address`, `/ip/route`, `/ip/firewall`, veth, policy routing) stays IPv4. For the "all non-RU traffic" scenario this is not a problem: the routing-loop guard is only needed for IPv4 traffic, and with an IPv6 server it is simply not created — the policy routing never reaches it anyway.
+
+**`AWG_NO_DF` and IPv6.** IPv6 has no DF bit — a transit router there never fragments. On an IPv6 socket the option (`IPV6_MTU_DISCOVER=IPV6_PMTUDISC_DONT`) only affects the local stack: it stops honouring PMTU replies. The symmetry is kept so `AWG_NO_DF=1` means the same thing on both families.
 
 ### Detailed Variable Descriptions
 
@@ -502,12 +576,15 @@ AWG_LISTEN=:51820          # all interfaces, port 51820 (standard)
 AWG_LISTEN=172.18.0.2:9000 # specific address and port
 ```
 
-**`AWG_REMOTE`** -- address and port of the AWG server (`Endpoint` from `[Peer]`). Supports both IP addresses and domain names.
+**`AWG_REMOTE`** -- address and port of the AWG server (`Endpoint` from `[Peer]`). Supports IPv4, IPv6 and domain names. An IPv6 literal **must** be bracketed: the port is separated by a colon and the address itself is full of them, so without brackets the form is ambiguous and is rejected.
 
 ```
-AWG_REMOTE=1.2.3.4:443            # IP + port
+AWG_REMOTE=1.2.3.4:443            # IPv4 + port
+AWG_REMOTE=[2001:db8::1]:443      # IPv6 + port (brackets required)
 AWG_REMOTE=vpn.example.com:51820  # domain + port
 ```
+
+Note that IPv6 is supported **on the server-facing leg only**. `AWG_LISTEN` (receiving from the router's WireGuard client) stays IPv4 — it is a local veth inside the router, where a second stack buys nothing.
 
 **`AWG_JC`**, **`AWG_JMIN`**, **`AWG_JMAX`** -- junk packet parameters. Before each handshake init, `JC` random UDP packets of size between `JMIN` and `JMAX` bytes are sent. The server discards them, but they look like regular traffic to DPI. Values from `.conf` (`Jc`, `Jmin`, `Jmax`).
 
@@ -581,7 +658,9 @@ AWG_S3=0    # default, no padding
 AWG_S4=16   # +16 bytes to each transport data packet
 ```
 
-**`AWG_I1`--`AWG_I5`** -- CPS templates (Constant Packet Size). Up to 5 templates for generating fixed-format packets before handshake. If set without S3/S4/H ranges, the proxy operates in v1.5 mode. Template format is described in the AWG documentation.
+**`AWG_I1`--`AWG_I5`** -- CPS templates (Constant Packet Size). Up to 5 templates for generating fixed-format packets before handshake. If set without S3/S4/H ranges, the proxy operates in v1.5 mode.
+
+Supported tags (matching upstream `device/obf.go`): `<b 0xHEX>` -- static bytes, `<r N>` -- N random bytes, `<rc N>` -- N random letters (52 letters, no digits), `<rd N>` -- N random digits, `<t>` -- unix time as 4 big-endian bytes, `<dz N>` -- N zero bytes, `<d>` and `<ds>` -- accepted and contribute nothing (upstream feeds I-packets an empty source). The `<c>` counter tag is our own extension; upstream will reject it.
 
 ```
 AWG_I1=b:48656c6c6f,r:10,t:4,c:4
@@ -622,11 +701,18 @@ AWG_TIMEOUT=60    # aggressive timeout for unstable connections
 AWG_TIMEOUT=3600  # 1 hour, for stable links
 ```
 
-**`AWG_DNS_REFRESH`** -- background DNS re-check interval in seconds when `AWG_REMOTE` is a hostname (disabled for a literal IP). The proxy periodically re-resolves the hostname and, if the current server IP has disappeared from the A records on two consecutive checks (round-robin DNS protection), reconnects to the new address without waiting for `AWG_TIMEOUT`. Granularity is 5 seconds. The reconnect resets the client session (same as on timeout) -- WireGuard performs a new handshake on its own.
+**`AWG_DNS_REFRESH`** -- background DNS re-check interval in seconds when `AWG_REMOTE` is a hostname (disabled for a literal IP, v4 or v6). The proxy periodically re-resolves the hostname and, if the current server address has disappeared from the records on two consecutive checks (round-robin DNS protection), reconnects to the new address without waiting for `AWG_TIMEOUT`. The lookup runs on `AF_UNSPEC`, and a record only counts as a match when both its family and its address bytes match — otherwise an A record would mask a vanished AAAA on a dual-stack name. Granularity is 5 seconds. The reconnect resets the client session (same as on timeout) -- WireGuard performs a new handshake on its own.
 
 ```
 AWG_DNS_REFRESH=60   # default, check once a minute
 AWG_DNS_REFRESH=0    # disable the background DNS check
+```
+
+**`AWG_HE_DELAY`** -- IPv4 head start in milliseconds before IPv6 is probed (Happy Eyeballs, RFC 8305). Read only when `AWG_REMOTE` is a name carrying both an A and an AAAA record; in any single-stack configuration the variable is never consulted. See the [IPv6](#ipv6) section below.
+
+```
+AWG_HE_DELAY=250   # default, as in RFC 8305
+AWG_HE_DELAY=0     # duplicate the first packet over IPv6 immediately
 ```
 
 **`AWG_LOG_LEVEL`** -- logging level. Controls the verbosity of output in `/container/print` and the router's syslog.
@@ -643,14 +729,14 @@ AWG_LOG_LEVEL=error   # errors only
 AWG_LOG_LEVEL=none    # silence
 ```
 
-**`AWG_NO_GRO`** -- disables UDP GRO (Generic Receive Offload) on the server socket. GRO coalesces multiple incoming UDP packets into a single buffer, reducing the number of system calls. Enabled by default if the kernel supports it. On some platforms (ARM64 on RouterOS) the kernel accepts the setsockopt call, but GRO doesn't actually work -- in this case the proxy hangs waiting for packets. Set `AWG_NO_GRO=1` to force disable.
+**`AWG_NO_GRO`** -- disables UDP GRO (Generic Receive Offload). GRO coalesces multiple incoming UDP packets into a single buffer, reducing the number of system calls; the proxy splits that buffer back apart using the segment size from the `UDP_GRO` cmsg. Enabled by default in `normal` mode only, on both sockets (receive from the client and receive from the server); it is not used in `reverse` and `server` modes. If the kernel coalesces nothing eight times in a row, the proxy clears the socket option itself and falls back to `recvmmsg`. Set `AWG_NO_GRO=1` to force disable.
 
 ```
 AWG_NO_GRO=0   # default, GRO enabled (if kernel supports it)
 AWG_NO_GRO=1   # force disable GRO, use recvmmsg instead
 ```
 
-**`AWG_NO_DF`** -- clears the DF (Don't Fragment) bit on the proxy's outgoing UDP packets (`IP_MTU_DISCOVER=IP_PMTUDISC_DONT` on both sockets). Linux sends UDP with DF=1 by default (Path MTU Discovery); there are reports that some DPI nodes on certain networks handle DF=1 UDP worse than DF=0. This option changes the on-wire IP header, so it is off by default -- enable it only when experiencing connectivity issues: with DF=0 large packets may be fragmented along the path.
+**`AWG_NO_DF`** -- clears the DF (Don't Fragment) bit on the proxy's outgoing UDP packets (`IP_MTU_DISCOVER=IP_PMTUDISC_DONT` on both sockets). Linux sends UDP with DF=1 by default (Path MTU Discovery); there are reports that some DPI nodes on certain networks handle DF=1 UDP worse than DF=0. This option changes the on-wire IP header, so it is off by default -- enable it only when experiencing connectivity issues: with DF=0 large packets may be fragmented along the path. On an IPv6 socket `IPV6_MTU_DISCOVER=IPV6_PMTUDISC_DONT` is used instead, but IPv6 has no DF bit — there it only changes how the local stack reacts to PMTU (see the [IPv6](#ipv6) section).
 
 ```
 AWG_NO_DF=0   # default, DF bit as set by the system (usually DF=1)
@@ -849,7 +935,7 @@ Restart the containers and check logs — they will show DNS resolution errors, 
 
 **5. Fallback profile**
 
-Site-to-site configs from the configurator carry a primary (v2) and a fallback (v1) obfuscation profile. If the primary obfuscation gets blocked, after `AWG_FB_AFTER` seconds of remote silence the initiator switches to the fallback on its own — the logs show `fallback: remote silent, trying v1 fallback profile` (initiator) and `c2s: peer uses v1 fallback profile, switched` (responder). The startup line `config: v1 fallback enabled` confirms the fallback profile is set. Both ends must be generated by the same configurator run, otherwise their profiles won't match.
+Site-to-site and server configs from the configurator carry a primary profile plus a fallback chain. If the primary obfuscation gets blocked, after `AWG_FB_AFTER` seconds of remote silence the initiator moves to the next stage on its own — the logs show `fallback: remote silent, trying profile stage N` (initiator) and `c2s: peer uses a different profile stage, switched` (responder). The startup line `config: fallback chain of N profiles` confirms the chain is set. Both ends must be generated by the same configurator run, otherwise their profiles won't match.
 
 **No handshake** -- make sure all AWG parameters (Jc, Jmin, Jmax, S1, S2, H1--H4) exactly match the server. Verify `AWG_REMOTE`, `AWG_SERVER_PUB`, and `AWG_CLIENT_PUB`. For diagnostics, set `AWG_LOG_LEVEL=debug` -- logs will show handshake init and junk packet sending. If you see `remote read error (Connection refused)` -- the server is unreachable or the port is wrong. On ARM64, try `AWG_NO_GRO=1` -- if the kernel doesn't support GRO, the proxy may hang waiting for a response.
 
@@ -1112,6 +1198,12 @@ make docker-all-7.20-docker
 ```
 
 Artifacts are created in the `builds/` directory.
+
+The configurator has its own jsdom-based checks (dev only — the proxy itself has no dependencies):
+
+```bash
+npm install jsdom && node tests/conf3.0-ipv6.test.js
+```
 
 ## License
 

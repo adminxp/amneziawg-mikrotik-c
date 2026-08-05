@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <time.h>
 #include "test.h"
 #include "transform.h"
 #include "cps.h"
@@ -226,6 +227,64 @@ static void test_generate_cps(void) {
     ASSERT_EQ(counter, 42u);
 }
 
+/* --- AWG 3.0 obf tags and upstream byte-for-byte fidelity --- */
+
+/* <d> and <ds> emit nothing upstream (ObfuscatedLen(0) == 0), so they are
+ * skipped; <dz N> emits N bytes holding the big-endian source length, which is
+ * always 0 for an I-packet. */
+static void test_parse_d_tags(void) {
+    cps_template_t t;
+    uint8_t buf[64];
+
+    ASSERT_EQ(cps_parse("<b 0xAABB><d><ds><r 4>", &t), 0);
+    ASSERT_EQ(t.nseg, 2);
+    ASSERT_EQ(cps_max_size(&t), 6);
+
+    ASSERT_EQ(cps_parse("<b 0xAABB><dz 5>", &t), 0);
+    ASSERT_EQ(t.nseg, 2);
+    ASSERT_EQ(cps_max_size(&t), 7);
+    memset(buf, 0xFF, sizeof(buf));
+    ASSERT_EQ(cps_generate(&t, 1, buf, sizeof(buf)), 7);
+    ASSERT_EQ(buf[0], 0xAA);
+    ASSERT_EQ(buf[1], 0xBB);
+    for (int i = 2; i < 7; i++) ASSERT_EQ(buf[i], 0x00);
+
+    /* <dz> without a size is malformed */
+    ASSERT_EQ(cps_parse("<dz>", &t), -1);
+}
+
+/* Upstream <rc N> draws from 52 letters only (device/obf_randchars.go) */
+static void test_randchars_letters_only(void) {
+    cps_template_t t;
+    uint8_t buf[256];
+
+    ASSERT_EQ(cps_parse("<rc 200>", &t), 0);
+    for (uint32_t c = 0; c < 8; c++) {
+        int n = cps_generate(&t, c, buf, sizeof(buf));
+        ASSERT_EQ(n, 200);
+        for (int i = 0; i < n; i++) {
+            int ok = (buf[i] >= 'a' && buf[i] <= 'z') || (buf[i] >= 'A' && buf[i] <= 'Z');
+            ASSERT(ok);
+        }
+    }
+}
+
+/* Upstream writes the timestamp big-endian (device/obf_timestamp.go) */
+static void test_timestamp_big_endian(void) {
+    cps_template_t t;
+    uint8_t buf[16];
+
+    ASSERT_EQ(cps_parse("<t>", &t), 0);
+    ASSERT_EQ(cps_generate(&t, 0, buf, sizeof(buf)), 4);
+    uint32_t be = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+                  ((uint32_t)buf[2] << 8) | buf[3];
+    uint32_t now = (uint32_t)time(NULL);
+    /* Same second, or one tick later */
+    ASSERT(be == now || be + 1 == now || be == now + 1);
+    /* A plausible 2020s unix time must have a small top byte when big-endian */
+    ASSERT(buf[0] >= 0x60 && buf[0] <= 0x80);
+}
+
 int main(void) {
     fprintf(stderr, "=== cps tests ===\n");
     RUN_TEST(parse_static_bytes);
@@ -247,5 +306,8 @@ int main(void) {
     RUN_TEST(parse_overflow_static);
     RUN_TEST(generate_large_static);
     RUN_TEST(parse_int_overflow);
+    RUN_TEST(parse_d_tags);
+    RUN_TEST(randchars_letters_only);
+    RUN_TEST(timestamp_big_endian);
     TEST_MAIN_END();
 }

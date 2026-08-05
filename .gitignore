@@ -5,3 +5,11 @@
 *.py
 *.png
 *.txt
+
+# Bench harness artifacts: a checked-out upstream clone, the staged proxy
+# binary and whatever a run leaves behind (logs, captures, generated keys).
+__pycache__/
+bench/awg3-interop/src/
+bench/awg3-interop/awg-proxy-test
+bench/awg3-interop/shared/
+bench/awg3-interop/perfshared/
