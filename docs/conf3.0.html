@@ -2931,7 +2931,7 @@
             '/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + net.natSrc,
             '',
             '# 3. WireGuard interface (MikroTik derives the public key automatically)',
-            '/interface/wireguard/add name=wg-' + prefix + ' private-key="' + i.PrivateKey + '" listen-port=' + net.wgPort + wgMtuOpt(i) + ' disabled=yes',
+            '/interface/wireguard/add name=wg-' + prefix + ' private-key="' + i.PrivateKey + '" listen-port=' + randomWgPort() + wgMtuOpt(i) + ' disabled=yes',
             peerAdd,
             '/ip/address/add address=' + i.Address + ' interface=wg-' + prefix,
         ]);
@@ -3008,9 +3008,12 @@
             '  :if ($arch = "arm") do={',
             '    :set file ("awg-proxy-arm" . $suffix . ".tar.gz")',
             '    :local rbModel ""',
-            '    :do { :set rbModel [/system/routerboard/get model] } on-error={}',
+            // /system/routerboard does not exist on CHR: RouterOS fails while parsing
+            // the script, before on-error can catch anything, and the whole block dies.
+            // :parse defers the lookup to runtime, so :do handles the missing menu.
+            '    :do { :set rbModel [[:parse ":return [/system/routerboard/get model]"]] } on-error={}',
             '    :local bName [/system/resource/get board-name]',
-            '    :if ($rbModel~"E50UG" || $rbModel~"E60iUGS" || $bName~"^hEX") do={',
+            '    :if ($rbModel~"E50UG" || $rbModel~"E60iUGS" || $bName~"E50UG" || $bName~"E60iUGS" || $bName~"^hEX") do={',
             '      :set file ("awg-proxy-armv5" . $suffix . ".tar.gz")',
             '    }',
             '  }',
@@ -3166,7 +3169,7 @@
         lines = lines.concat([
             '',
             '# 2. WireGuard interface',
-            '/interface/wireguard/add name=wg-' + prefix + ' private-key="' + i.PrivateKey + '" listen-port=' + net.wgPort + wgMtuOpt(i),
+            '/interface/wireguard/add name=wg-' + prefix + ' private-key="' + i.PrivateKey + '" listen-port=' + randomWgPort() + wgMtuOpt(i),
             peerAdd,
             '/ip/address/add address=' + i.Address + ' interface=wg-' + prefix,
         ]);
@@ -3376,11 +3379,12 @@
         return sel;
     }
 
-    // Deterministically derives a unique /30 veth subnet and WireGuard listen port
-    // from the tunnel name (prefix), so multiple tunnels on the same MikroTik
-    // don't collide. Uses a simple djb2-style hash spread across different bit
-    // ranges: bits 0-3 → 2nd octet (172.16-31.x.x), bits 4-11 → 3rd octet,
-    // bits 12-17 → 4th octet base (0-252, aligned to /30), bits 18+ → WG port.
+    // Deterministically derives a unique /30 veth subnet from the tunnel name
+    // (prefix), so multiple tunnels on the same MikroTik don't collide. It has to
+    // stay deterministic: the uninstall script recomputes the same addresses from
+    // the prefix to clean them up. Uses a simple djb2-style hash spread across
+    // different bit ranges: bits 0-3 → 2nd octet (172.16-31.x.x), bits 4-11 →
+    // 3rd octet, bits 12-17 → 4th octet base (0-252, aligned to /30).
     function getTunnelNetwork(prefix) {
         var h = 0;
         for (var i = 0; i < prefix.length; i++)
@@ -3389,14 +3393,31 @@
         var oct2 = 16 + (h & 0xF);
         var oct3 = (h >>> 4) & 0xFF;
         var oct4base = ((h >>> 12) & 0x3F) * 4;
-        var wgPort = 12000 + ((h >>> 18) % 20000);
         return {
             vethAddr: '172.' + oct2 + '.' + oct3 + '.' + (oct4base + 2) + '/30',
             hostAddr: '172.' + oct2 + '.' + oct3 + '.' + (oct4base + 1) + '/30',
             vethGw:   '172.' + oct2 + '.' + oct3 + '.' + (oct4base + 1),
-            natSrc:   '172.' + oct2 + '.' + oct3 + '.' + oct4base + '/30',
-            wgPort:   wgPort
+            natSrc:   '172.' + oct2 + '.' + oct3 + '.' + oct4base + '/30'
         };
+    }
+
+    // The WG listen-port used to come out of the same hash (bits 18+), but those
+    // bits don't change when only the trailing digit of the prefix does: every
+    // awg-proxy-1..5 got 25343 and every awg-server-1..2 got 25081, so a second
+    // tunnel on the same router could not bind its port. The port is local to the
+    // router and nothing recomputes it from the prefix, so draw it at random.
+    function randomWgPort() {
+        return randomInt(10000, 60000);
+    }
+
+    // Tunnel subnets used to ship as fixed defaults (10.10.10.0/24 for the hub,
+    // 10.0.0.0/30 for site-to-site), so a second tunnel on the same router landed
+    // on addresses the first one already held. Second octet starts at 20 to stay
+    // clear of the usual 10.0.x/10.1.x/10.10.x home LANs. The share link carries
+    // the subnet, so add-client runs still follow the server that issued it.
+    function randomTunnelSubnet(bits) {
+        var base = '10.' + randomInt(20, 250) + '.' + randomInt(0, 255) + '.';
+        return bits === 30 ? base + (randomInt(0, 62) * 4) + '/30' : base + '0/24';
     }
 
     // ============================================================
@@ -3689,6 +3710,9 @@
         if (!s2sParams) {
             s2sParams = generateS2SParams();
             document.getElementById('s2s-awg-port').value = s2sParams.port;
+            // Only on first init, never in regenerate*: a subnet typed by hand must
+            // survive a protocol-level change.
+            document.getElementById('s2s-tunnel-subnet').value = randomTunnelSubnet(30);
             showS2SParams();
         }
         return s2sParams;
@@ -3712,6 +3736,9 @@
         if (!serverParams) {
             serverParams = generateChainParams();
             document.getElementById('srv-awg-port').value = serverParams.port;
+            // Add-client runs overwrite this right after onModeChange() with the
+            // subnet from the share link (see the parseURLParams block on load).
+            document.getElementById('srv-tunnel-subnet').value = randomTunnelSubnet(24);
             showSrvParams();
         }
         return serverParams;
@@ -4057,7 +4084,10 @@
         var tun = parseSlash24(tunnelCidr);
         var vethIP = net.vethAddr.replace(/\/.*/, '');
         var awgPort = awgParams.port;
-        var wgPort = net.wgPort;
+        // Random per-generation port (see randomWgPort). It lives in awgParams and
+        // goes into the share link, so clients added from that link keep pointing
+        // at the same server port.
+        var wgPort = awgParams.wgListenPort || randomWgPort();
         var tunServerIP = tun.ip(1);
         var tunClientIP = tun.ip(clientNum + 1);
 
@@ -4169,13 +4199,16 @@
         lc.push('# 2. Network infrastructure');
         var cnet = getTunnelNetwork(prefix);
         var cvethIP = cnet.vethAddr.replace(/\/.*/, '');
+        // Client-side WG port is purely local (the peer talks to the container over
+        // veth), so nothing has to agree on it.
+        var clientWgPort = randomWgPort();
         lc.push('/interface/veth/add name=veth-' + prefix + ' address=' + cnet.vethAddr + ' gateway=' + cnet.vethGw);
         lc.push('/ip/address/add address=' + cnet.hostAddr + ' interface=veth-' + prefix);
         lc.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + cnet.natSrc);
         lc.push('');
 
         lc.push('# 3. WireGuard client');
-        lc.push('/interface/wireguard/add name=wg-' + prefix + ' private-key="' + clientKey.privateKey + '" listen-port=' + cnet.wgPort + ' disabled=yes');
+        lc.push('/interface/wireguard/add name=wg-' + prefix + ' private-key="' + clientKey.privateKey + '" listen-port=' + clientWgPort + ' disabled=yes');
         lc.push('/interface/wireguard/peers/add interface=wg-' + prefix + ' public-key="' + serverKey.publicKey + '" endpoint-address=' + cvethIP + ' endpoint-port=51820 allowed-address=' + clientAllowed + ' persistent-keepalive=' + randomInt(25, 55));
         lc.push('/ip/address/add address=' + tunClientIP + '/24 interface=wg-' + prefix);
         lc.push('/ip/firewall/filter/add chain=input action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-wg-mgmt');
@@ -4285,6 +4318,8 @@
 
         var cnet = getTunnelNetwork(prefix);
         var cvethIP = cnet.vethAddr.replace(/\/.*/, '');
+        // Local-only port, same reasoning as in buildServerCommands.
+        var clientWgPort = randomWgPort();
         lc.push('# 2. Network infrastructure');
         lc.push('/interface/veth/add name=veth-' + prefix + ' address=' + cnet.vethAddr + ' gateway=' + cnet.vethGw);
         lc.push('/ip/address/add address=' + cnet.hostAddr + ' interface=veth-' + prefix);
@@ -4292,7 +4327,7 @@
         lc.push('');
 
         lc.push('# 3. WireGuard client');
-        lc.push('/interface/wireguard/add name=wg-' + prefix + ' private-key="' + clientKey.privateKey + '" listen-port=' + cnet.wgPort + ' disabled=yes');
+        lc.push('/interface/wireguard/add name=wg-' + prefix + ' private-key="' + clientKey.privateKey + '" listen-port=' + clientWgPort + ' disabled=yes');
         lc.push('/interface/wireguard/peers/add interface=wg-' + prefix + ' public-key="' + serverWgPubKey + '" endpoint-address=' + cvethIP + ' endpoint-port=51820 allowed-address=' + clientAllowed + ' persistent-keepalive=' + randomInt(25, 55));
         lc.push('/ip/address/add address=' + tunClientIP + '/24 interface=wg-' + prefix);
         lc.push('/ip/firewall/filter/add chain=input action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-wg-mgmt');
@@ -4704,9 +4739,11 @@
         lines.push('  :if ($arch = "arm") do={');
         lines.push('    :set file ("awg-proxy-arm" . $suffix . ".tar.gz")');
         lines.push('    :local rbModel ""');
-        lines.push('    :do { :set rbModel [/system/routerboard/get model] } on-error={}');
+        // See the note above: :parse keeps the CHR/x86 parser from choking on
+        // /system/routerboard, which only exists on RouterBOARD hardware.
+        lines.push('    :do { :set rbModel [[:parse ":return [/system/routerboard/get model]"]] } on-error={}');
         lines.push('    :local bName [/system/resource/get board-name]');
-        lines.push('    :if ($rbModel~"E50UG" || $rbModel~"E60iUGS" || $bName~"^hEX") do={');
+        lines.push('    :if ($rbModel~"E50UG" || $rbModel~"E60iUGS" || $bName~"E50UG" || $bName~"E60iUGS" || $bName~"^hEX") do={');
         lines.push('      :set file ("awg-proxy-armv5" . $suffix . ".tar.gz")');
         lines.push('    }');
         lines.push('  }');
@@ -4967,7 +5004,7 @@
         document.getElementById('prefix-custom').value = '';
         document.getElementById('proxy-ip').value = '';
         document.getElementById('s2s-endpoint-b').value = '';
-        document.getElementById('s2s-tunnel-subnet').value = '10.0.0.0/30';
+        document.getElementById('s2s-tunnel-subnet').value = randomTunnelSubnet(30);
         document.getElementById('s2s-storage-a').value = '__auto';
         document.getElementById('s2s-storage-b').value = '__auto';
         document.getElementById('s2s-dns').value = '';

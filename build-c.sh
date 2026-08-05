@@ -7,6 +7,15 @@ VERSION=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo de
 IMAGE=awg-proxy
 DIR=builds
 
+# debian:bookworm-slim no longer lists linux/arm/v5, so that one platform builds
+# from the per-arch repo instead (see the BASE arg in the Dockerfile).
+base_for() {
+  case "$1" in
+    linux/arm/v5) echo "arm32v5/debian:bookworm-slim" ;;
+    *)            echo "debian:bookworm-slim" ;;
+  esac
+}
+
 rm -rf "$DIR"
 mkdir -p "$DIR"
 
@@ -21,6 +30,7 @@ for spec in "arm64:linux/arm64" "arm:linux/arm/v7" "armv5:linux/arm/v5" "amd64:l
   (
     docker buildx build --platform "$platform" \
       --build-arg VERSION="$VERSION" \
+      --build-arg BASE="$(base_for "$platform")" \
       --output "type=local,dest=$DIR/bin-$arch" .
     mv "$DIR/bin-$arch/awg-proxy" "$DIR/$IMAGE-linux-$arch"
     rm -rf "$DIR/bin-$arch"
@@ -38,6 +48,7 @@ for spec in "arm64:linux/arm64" "arm:linux/arm/v7" "armv5:linux/arm/v5" "amd64:l
   (
     docker buildx build --platform "$platform" \
       --build-arg VERSION="$VERSION" \
+      --build-arg BASE="$(base_for "$platform")" \
       --output "type=oci,dest=$DIR/$IMAGE-$arch.tar" \
       -t "$IMAGE:$VERSION-$arch" .
     gzip -f "$DIR/$IMAGE-$arch.tar"

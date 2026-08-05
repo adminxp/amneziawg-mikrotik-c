@@ -41,7 +41,10 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v5
+          # linux/arm/v5 не собирается: debian:bookworm-slim больше не публикуется
+          # для этой платформы. Образ armv5 выпускается локально через build-c.sh
+          # и прикладывается к релизу отдельным архивом.
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}

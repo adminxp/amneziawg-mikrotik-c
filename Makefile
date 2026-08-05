@@ -85,6 +85,7 @@ docker-armv5:
 	@mkdir -p $(BUILD_DIR)
 	docker buildx build --platform linux/arm/v5 \
 		--build-arg VERSION=$(VERSION) \
+		--build-arg BASE=arm32v5/debian:bookworm-slim \
 		--output type=oci,dest=$(BUILD_DIR)/$(IMAGE_NAME)-armv5.tar \
 		-t $(IMAGE_NAME):$(VERSION)-armv5 .
 	gzip -f $(BUILD_DIR)/$(IMAGE_NAME)-armv5.tar

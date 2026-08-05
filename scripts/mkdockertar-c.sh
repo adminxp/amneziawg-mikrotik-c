@@ -21,8 +21,14 @@ BUILD_VERSION="${VERSION:-dev}"
 PLATFORM="linux/$GOARCH"
 if [ -n "$GOARM" ]; then PLATFORM="$PLATFORM/v$GOARM"; fi
 
+# debian:bookworm-slim no longer lists linux/arm/v5 (see the BASE arg in the
+# Dockerfile), so that platform builds from the per-arch repo.
+BASE="debian:bookworm-slim"
+if [ "$PLATFORM" = "linux/arm/v5" ]; then BASE="arm32v5/debian:bookworm-slim"; fi
+
 docker buildx build --platform "$PLATFORM" \
     --build-arg VERSION="$BUILD_VERSION" \
+    --build-arg BASE="$BASE" \
     --output "type=local,dest=$WORK/docker-out" \
     .
 cp "$WORK/docker-out/awg-proxy" "$WORK/awg-proxy"
