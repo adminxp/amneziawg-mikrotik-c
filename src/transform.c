@@ -350,6 +350,27 @@ int config_server_resolve_peer_for_response(const awg_config_t *cfg,
     return -1;
 }
 
+/* Same trick for a handshake the server starts on its own. Such an init has no
+ * receiver_index, so there is nothing to look up in the session table — but its
+ * MAC1 is keyed on the *recipient's* static key, which here is the client's,
+ * and the hub holds every client key. Trying them in turn names the target.
+ * Without this the only fallback is "route it to the sole client", which stops
+ * working the moment a second client exists. */
+int config_server_resolve_peer_for_init(const awg_config_t *cfg,
+                                        const uint8_t *wg_init, int n) {
+    uint8_t mac1[16];
+
+    if (!cfg || !wg_init || n != WG_INIT_SIZE || read32_le(wg_init) != WG_HANDSHAKE_INIT)
+        return -1;
+
+    for (int i = 0; i < cfg->server_peer_count; i++) {
+        blake2s_128mac(cfg->server_peer_mac1keys[i], wg_init, 116, mac1);
+        if (memcmp(mac1, wg_init + 116, 16) == 0)
+            return i;
+    }
+    return -1;
+}
+
 __attribute__((hot))
 uint8_t *transform_inbound_profile(uint8_t *buf, int n, const awg_config_t *cfg,
                                    const awg_profile_t *pr, awg_hp_ks_t *ks,

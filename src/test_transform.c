@@ -871,6 +871,47 @@ static void build_test_response(uint8_t *pkt, const uint8_t mac1key[32], uint32_
     recompute_mac1_response(pkt, mac1key);
 }
 
+static void build_test_init(uint8_t *pkt, const uint8_t mac1key[32], uint32_t sender_index) {
+    memset(pkt, 0, WG_INIT_SIZE);
+    write32_le(pkt, WG_HANDSHAKE_INIT);
+    fill_seq(pkt + 4, WG_INIT_SIZE - 4);
+    memcpy(pkt + 4, &sender_index, 4);
+    recompute_mac1(pkt, mac1key);
+}
+
+/* A handshake the server starts carries no receiver_index, so the only way to
+ * aim it at the right client is its MAC1 — keyed on that client's static key. */
+static void test_server_init_peer_resolution(void) {
+    awg_config_t cfg;
+    make_mac1_config(&cfg, AWG_MODE_SERVER);
+    memset(cfg.client_pub, 0, sizeof(cfg.client_pub));
+    cfg.server_peer_count = 2;
+    fill_test_pub(cfg.server_peer_pubs[0], 0x20);
+    fill_test_pub(cfg.server_peer_pubs[1], 0x40);
+    config_compute(&cfg);
+
+    uint8_t buf[WG_INIT_SIZE];
+
+    build_test_init(buf, cfg.server_peer_mac1keys[0], 0xAAAAAAAAu);
+    ASSERT_EQ(config_server_resolve_peer_for_init(&cfg, buf, WG_INIT_SIZE), 0);
+
+    build_test_init(buf, cfg.server_peer_mac1keys[1], 0xBBBBBBBBu);
+    ASSERT_EQ(config_server_resolve_peer_for_init(&cfg, buf, WG_INIT_SIZE), 1);
+
+    /* A key nobody is configured with must not match anything. */
+    uint8_t stranger_pub[32], stranger_key[32];
+    fill_test_pub(stranger_pub, 0x77);
+    compute_mac1_key(stranger_pub, stranger_key);
+    build_test_init(buf, stranger_key, 0xCCCCCCCCu);
+    ASSERT_EQ(config_server_resolve_peer_for_init(&cfg, buf, WG_INIT_SIZE), -1);
+
+    /* Wrong size or wrong type is not an init. */
+    build_test_init(buf, cfg.server_peer_mac1keys[0], 0xAAAAAAAAu);
+    ASSERT_EQ(config_server_resolve_peer_for_init(&cfg, buf, WG_INIT_SIZE - 1), -1);
+    write32_le(buf, WG_HANDSHAKE_RESPONSE);
+    ASSERT_EQ(config_server_resolve_peer_for_init(&cfg, buf, WG_INIT_SIZE), -1);
+}
+
 static void test_server_response_peer_resolution_single_direct(void) {
     awg_config_t cfg;
     make_mac1_config(&cfg, AWG_MODE_SERVER);
@@ -1833,6 +1874,7 @@ int main(void) {
     RUN_TEST(roundtrip_v2);
     RUN_TEST(v1_backward);
     RUN_TEST(v2_false_positive);
+    RUN_TEST(server_init_peer_resolution);
     RUN_TEST(server_response_peer_resolution_single_direct);
     RUN_TEST(server_response_peer_resolution_two_direct_clients);
     RUN_TEST(server_response_peer_resolution_mixed_direct_and_proxy_fallback);

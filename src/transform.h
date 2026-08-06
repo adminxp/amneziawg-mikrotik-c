@@ -245,6 +245,12 @@ static inline const uint8_t *hp_recv_ks(const awg_config_t *cfg,
 int config_server_resolve_peer_for_response(const awg_config_t *cfg,
                                             const uint8_t *wg_resp, int n);
 
+/* Same for a server-initiated handshake init: its MAC1 is keyed on the
+ * client's static key, so the peer list identifies the target. Returns peer
+ * index or -1. */
+int config_server_resolve_peer_for_init(const awg_config_t *cfg,
+                                        const uint8_t *wg_init, int n);
+
 /* Generate junk packets into pre-allocated buffer.
  * junk_buf: buffer of at least jc*jmax bytes (pre-filled with random).
  * sizes[]: output array of packet sizes (at least jc entries).

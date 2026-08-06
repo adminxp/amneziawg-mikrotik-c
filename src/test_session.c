@@ -253,6 +253,59 @@ static cliaddr_t addr_v6(const char *s, uint16_t port) {
 }
 
 /* 10. A v6 client survives the round trip through the real table */
+/* A server-initiated handshake is aimed by peer, not by receiver_index. */
+static void test_peer_lookup(void) {
+    memset(&g_p, 0, sizeof(g_p));
+    cliaddr_t a = addr_v6("2001:db8::1", 1111);
+    cliaddr_t b = addr_v6("2001:db8::2", 2222);
+    session_entry_t *ea = session_put_prof(&g_p, 0xAAAA, &a, 0);
+    session_entry_t *eb = session_put_prof(&g_p, 0xBBBB, &b, 0);
+    session_set_peer_slot(ea, 0);
+    session_set_peer_slot(eb, 1);
+
+    ASSERT(session_find_by_peer(&g_p, 0) == ea);
+    ASSERT(session_find_by_peer(&g_p, 1) == eb);
+    ASSERT(session_find_by_peer(&g_p, 2) == NULL);
+    ASSERT(session_find_by_peer(&g_p, -1) == NULL);
+    /* Two clients: the old sole-client fallback has nothing to offer here. */
+    ASSERT(session_find_sole_entry(&g_p) == NULL);
+}
+
+/* The address churns on this link, and nothing else ever expires an entry:
+ * without retiring the old one the table permanently looks like two clients. */
+static void test_moved_peer_is_retired(void) {
+    memset(&g_p, 0, sizeof(g_p));
+    cliaddr_t old = addr_v6("2a00:1370:8180:18b::1", 41822);
+    cliaddr_t neu = addr_v6("2a00:1370:8180:18b::2", 41822);
+    session_entry_t *e1 = session_put_prof(&g_p, 0x1111, &old, 0);
+    session_set_peer_slot(e1, 0);
+    session_entry_t *e2 = session_put_prof(&g_p, 0x2222, &neu, 0);
+    session_set_peer_slot(e2, 0);
+    ASSERT(session_find_sole_entry(&g_p) == NULL);   /* выглядит как два клиента */
+
+    session_drop_moved_peer(&g_p, 0, &neu);
+
+    ASSERT(session_get(&g_p, 0x1111) == NULL);       /* старый адрес снят */
+    ASSERT(session_get(&g_p, 0x2222) != NULL);
+    ASSERT(session_find_sole_entry(&g_p) == e2);     /* снова один клиент */
+}
+
+/* A plain rekey keeps the previous session alive for packets still in flight,
+ * so entries at the address the client still uses must survive. */
+static void test_rekey_at_same_address_keeps_both(void) {
+    memset(&g_p, 0, sizeof(g_p));
+    cliaddr_t c = addr_v6("2001:db8::9", 51820);
+    session_entry_t *e1 = session_put_prof(&g_p, 0x3333, &c, 0);
+    session_set_peer_slot(e1, 0);
+    session_entry_t *e2 = session_put_prof(&g_p, 0x4444, &c, 0);
+    session_set_peer_slot(e2, 0);
+
+    session_drop_moved_peer(&g_p, 0, &c);
+
+    ASSERT(session_get(&g_p, 0x3333) != NULL);
+    ASSERT(session_get(&g_p, 0x4444) != NULL);
+}
+
 static void test_real_session_v6(void) {
     memset(&g_p, 0, sizeof(g_p));
     cliaddr_t c6 = addr_v6("2a00:f2a:e08e:3da0::2", 51820);
@@ -323,6 +376,9 @@ int main(void) {
     RUN_TEST(reverse_inbound_init_mac1);
     RUN_TEST(normal_inbound_init_mac1);
     RUN_TEST(server_inbound_init_mac1);
+    RUN_TEST(peer_lookup);
+    RUN_TEST(moved_peer_is_retired);
+    RUN_TEST(rekey_at_same_address_keeps_both);
     RUN_TEST(real_session_v6);
     RUN_TEST(real_session_mixed);
     RUN_TEST(real_session_sole_v6);

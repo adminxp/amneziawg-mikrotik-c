@@ -409,8 +409,15 @@ int state_write_prefer6(const char *path, int prefer6) {
  * the s2c thread touches them — it owns he_probe()/he_finish() and is the sole
  * caller of do_reconnect(), hence of dial_remote(). */
 static void he_learn(proxy_t *p, int prefer6) {
-    if (p->state_written || prefer6 == p->prefer6) return;
+    if (prefer6 == p->prefer6) return;
+    /* The in-memory preference must keep following the latest verdict, even
+     * after the one allowed flash write. Gating it on state_written froze the
+     * dial order for the whole run: a peer that moved to the other family (a
+     * CGNAT IPv4 that stopped accepting inbound while its AAAA stayed valid,
+     * say) had every later reconnect start on the dead family again and lean
+     * on the probe to rescue it. Only the disk write stays once-per-run. */
     p->prefer6 = prefer6;
+    if (p->state_written) return;
     p->state_written = 1;
     if (state_write_prefer6(p->cfg->state_file, prefer6) == 0)
         log_info(prefer6 ? "remembered: dial IPv6 first from now on"
@@ -470,6 +477,12 @@ static int dial_remote(proxy_t *p, int blocking) {
 
 /* ---- Happy Eyeballs (RFC 8305), adapted to UDP ---- */
 
+/* Upper bound on one probe. Three WireGuard handshake retries (5 s apart) fit
+ * inside it, so a family that can answer at all has had several chances before
+ * the probe stops waiting and hands the run to the other socket. Without a
+ * bound the probe blocks the s2c thread until the silence watchdog fires. */
+#define HE_PROBE_MAX_MS 15000u
+
 static uint64_t mono_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -499,7 +512,7 @@ static inline void he_stash(proxy_t *p, const void *data, int len, int replace) 
 
 /* Settle on one family and drop the loser. Runs in the s2c thread before it
  * starts reading, so remote_fd is swapped while nothing is mid-recv on it. */
-static void he_finish(proxy_t *p, int use_alt) {
+static void he_finish(proxy_t *p, int use_alt, int learn) {
     int fd2 = atomic_load_explicit(&p->remote_fd2, memory_order_acquire);
     if (fd2 < 0) return;
     atomic_store_explicit(&p->remote_fd2, -1, memory_order_release);
@@ -520,8 +533,12 @@ static void he_finish(proxy_t *p, int use_alt) {
     if (p->remote.sa.ss_family == AF_INET6)
         log_ipv6_mtu_hint(p, "remote is IPv6");
 
-    /* Both families were on the table and one of them demonstrably answered. */
-    he_learn(p, p->remote.sa.ss_family == AF_INET6);
+    /* Both families were on the table and one of them demonstrably answered.
+     * A probe that merely timed out passes learn=0: nothing answered, so there
+     * is no verdict to remember — switching families there is a retry, not a
+     * measurement. */
+    if (learn)
+        he_learn(p, p->remote.sa.ss_family == AF_INET6);
 }
 
 /* UDP has no handshake, so the only liveness signal is a packet coming back.
@@ -539,17 +556,56 @@ static void he_probe(proxy_t *p) {
         { fd, POLLIN, 0 }, { fd2, POLLIN, 0 }, { p->he_evfd, POLLIN, 0 }
     };
     nfds_t nfds = (p->he_evfd >= 0) ? 3 : 2;
-    int dup_done = 0, use_alt = 0;
+    int use_alt = 0, dup_logged = 0, answered = 0;
+
+    /* The replay is a single UDP datagram, so it can be lost like any other.
+     * Replaying only once meant one drop cost the whole probe: the alt family
+     * was never sounded again and the run stayed pinned to a primary that had
+     * stopped answering until the 180 s silence watchdog forced a reconnect —
+     * which dialled the same dead primary first and repeated the cycle. Keep
+     * re-sending every he_delay, and give the whole probe a deadline. */
+    const uint64_t probe_start = mono_ms();
+    /* The first replay honours he_delay exactly, including 0 — "duplicate the
+     * first packet immediately" is what the knob documents. The repeats need a
+     * floor, because he_delay=0 would otherwise spin the loop resending as fast
+     * as poll() returns. */
+    const int dup_first = p->cfg->he_delay > 0 ? p->cfg->he_delay : 0;
+    const int dup_every = p->cfg->he_delay > 0 ? p->cfg->he_delay : 250;
+    uint64_t last_dup_ms = 0;
+    int replayed = 0;
 
     while (!atomic_load_explicit(&p->stopped, memory_order_relaxed) &&
            !atomic_load_explicit(&p->reconnect_needed, memory_order_relaxed)) {
+        uint64_t now = mono_ms();
+        if (now - probe_start >= HE_PROBE_MAX_MS) {
+            /* Neither family said a word. Hand the run to the alt socket: an
+             * untried path beats one that has already been silent this long,
+             * and the next dial starts there too. Not a verdict — no learn. */
+            use_alt = 1;
+            p->prefer6 = (p->remote_alt.sa.ss_family == AF_INET6);
+            log_info(p->remote_alt.sa.ss_family == AF_INET6
+                         ? "happy eyeballs: both silent, switching to IPv6"
+                         : "happy eyeballs: both silent, switching to IPv4");
+            he_finish(p, use_alt, 0);
+            return;
+        }
+
         /* Without the eventfd there is nothing to wake us when c2s sends, so
          * fall back to re-checking every he_delay. */
-        int wait = (nfds == 3) ? 1000 : (p->cfg->he_delay > 0 ? p->cfg->he_delay : 1000);
-        if (!dup_done && atomic_load_explicit(&p->he_sent, memory_order_acquire)) {
-            int64_t left = (int64_t)p->cfg->he_delay -
-                           (int64_t)(mono_ms() - p->he_sent_ms);
-            wait = left > 0 ? (int)left : 0;
+        int wait = (nfds == 3) ? 1000 : dup_every;
+        if (atomic_load_explicit(&p->he_sent, memory_order_acquire)) {
+            /* First replay is due he_delay after the stash, every repeat
+             * dup_every after the previous replay. */
+            uint64_t since = replayed ? (now - last_dup_ms)
+                                      : (now - p->he_sent_ms);
+            int64_t left = (int64_t)(replayed ? dup_every : dup_first) -
+                           (int64_t)since;
+            if (left < wait) wait = left > 0 ? (int)left : 0;
+        }
+        {   /* Never sleep past the probe deadline. */
+            int64_t to_deadline = (int64_t)HE_PROBE_MAX_MS -
+                                  (int64_t)(now - probe_start);
+            if (to_deadline < wait) wait = to_deadline > 0 ? (int)to_deadline : 0;
         }
 
         int r = poll(pfd, nfds, wait);
@@ -571,21 +627,35 @@ static void he_probe(proxy_t *p) {
             if (pfd[0].revents & POLLIN)      use_alt = 0;
             else if (pfd[1].revents & POLLIN) use_alt = 1;
             else                              use_alt = (pfd[0].revents != 0);
+            answered = 1;
             break;
         }
-        if (!dup_done && atomic_load_explicit(&p->he_sent, memory_order_acquire) &&
-            (int64_t)(mono_ms() - p->he_sent_ms) >= (int64_t)p->cfg->he_delay) {
-            if (p->he_pkt_len > 0)
+        if (atomic_load_explicit(&p->he_sent, memory_order_acquire) &&
+            p->he_pkt_len > 0) {
+            now = mono_ms();
+            uint64_t since = replayed ? (now - last_dup_ms)
+                                      : (now - p->he_sent_ms);
+            if ((int64_t)since >= (int64_t)(replayed ? dup_every : dup_first)) {
                 send(fd2, p->he_pkt, (size_t)p->he_pkt_len,
                      MSG_DONTWAIT | MSG_NOSIGNAL);
-            dup_done = 1;
-            log_info(p->remote.sa.ss_family == AF_INET6
-                         ? "happy eyeballs: IPv6 silent, probing IPv4"
-                         : "happy eyeballs: IPv4 silent, probing IPv6");
+                last_dup_ms = now;
+                replayed = 1;
+                /* One line per probe, not one per retry — the retries are a
+                 * loop now and the log lives in the router's RAM. */
+                if (!dup_logged) {
+                    dup_logged = 1;
+                    log_info(p->remote.sa.ss_family == AF_INET6
+                                 ? "happy eyeballs: IPv6 silent, probing IPv4"
+                                 : "happy eyeballs: IPv4 silent, probing IPv6");
+                }
+            }
         }
     }
 
-    he_finish(p, use_alt);
+    /* Only a socket that actually spoke (or reported an ICMP error, which is
+     * evidence too) is a verdict. A loop cut short by shutdown or reconnect
+     * measured nothing, so it must not teach the dial order anything. */
+    he_finish(p, use_alt, answered);
 }
 
 /* ---- GRO/GSO ---- */
@@ -856,18 +926,64 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
 
 /* ---- Send helpers ---- */
 
+/* A connected UDP socket reports a dead path synchronously, so the send itself
+ * already knows what the silence watchdog would take 180 s to infer. Two cases
+ * matter on a router: the source address the socket was bound to disappeared
+ * (EADDRNOTAVAIL — a DHCPv6 lease that renewed into a different address, which
+ * on this link expires every few minutes), and the route to the peer went away
+ * (ENETUNREACH/EHOSTUNREACH/ENETDOWN). Both are permanent for this socket: no
+ * later send on it can succeed, so every packet until the watchdog fires is
+ * dropped on the floor. ECONNREFUSED/EPERM arrive from ICMP and mean the same
+ * for a peer that is gone. EAGAIN/ENOBUFS/EMSGSIZE are deliberately absent —
+ * they are per-packet and the socket stays usable. */
+static int send_err_is_fatal(int err) {
+    switch (err) {
+    case EADDRNOTAVAIL:
+    case ENETUNREACH:
+    case EHOSTUNREACH:
+    case ENETDOWN:
+    case ECONNREFUSED:
+    case EPERM:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Ask for a reconnect once per broken socket. shutdown() is what makes it
+ * prompt: the s2c thread is parked in a blocking recv on that fd and would not
+ * look at reconnect_needed until something woke it. */
+static void note_remote_send_err(proxy_t *p, int err) {
+    if (!send_err_is_fatal(err)) return;
+    if (atomic_exchange_explicit(&p->reconnect_needed, 1, memory_order_relaxed))
+        return;
+    log_info3("remote send error (", strerror(err), "), will reconnect");
+    int rfd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
+    if (rfd >= 0) shutdown(rfd, SHUT_RDWR);
+}
+
+/* Callers classify the failure with note_remote_send_err(p, errno), so errno
+ * has to survive the logging in between: strerror() and write() are both
+ * allowed to clobber it, and the debug level is exactly the one someone turns
+ * on to diagnose these errors. */
 static int send_packet(int fd, const void *data, int len) {
     int r = (int)send(fd, data, len, MSG_DONTWAIT | MSG_NOSIGNAL);
-    if (r < 0)
-        log_debug2("send_packet failed: ", strerror(errno));
+    if (r < 0) {
+        int err = errno;
+        log_debug2("send_packet failed: ", strerror(err));
+        errno = err;
+    }
     return r;
 }
 
 static int send_packet_to(int fd, const void *data, int len, cliaddr_t *addr) {
     int r = (int)sendto(fd, data, len, MSG_DONTWAIT | MSG_NOSIGNAL,
                         &addr->sa, cliaddr_len(addr));
-    if (r < 0)
-        log_debug2("send_packet_to failed: ", strerror(errno));
+    if (r < 0) {
+        int err = errno;
+        log_debug2("send_packet_to failed: ", strerror(err));
+        errno = err;
+    }
     return r;
 }
 
@@ -895,6 +1011,8 @@ static void send_junk_and_cps_to(proxy_t *p, int fd, cliaddr_t *addr) {
     }
 }
 
+/* Remote-side counterpart of send_junk_and_cps_to(): fd is always the remote
+ * socket here, so a fatal error on it is worth reporting. */
 static void send_junk_and_cps(proxy_t *p, int fd) {
     awg_config_t *cfg = p->cfg;
 
@@ -902,7 +1020,8 @@ static void send_junk_and_cps(proxy_t *p, int fd) {
     int ncps = cps_generate_all(cfg->cps, &p->cps_counter,
                                  p->cps_bufs, p->cps_lens);
     for (int i = 0; i < ncps; i++)
-        send_packet(fd, p->cps_bufs[i], p->cps_lens[i]);
+        if (send_packet(fd, p->cps_bufs[i], p->cps_lens[i]) < 0)
+            note_remote_send_err(p, errno);
 
     /* Junk packets */
     if (cfg->jc > 0 && cfg->jmax > 0) {
@@ -915,7 +1034,8 @@ static void send_junk_and_cps(proxy_t *p, int fd) {
         int njunk = generate_junk(cfg, p->junk_buf, p->junk_sizes);
         size_t off = 0;
         for (int i = 0; i < njunk; i++) {
-            send_packet(fd, p->junk_buf + off, p->junk_sizes[i]);
+            if (send_packet(fd, p->junk_buf + off, p->junk_sizes[i]) < 0)
+                note_remote_send_err(p, errno);
             off += (size_t)p->junk_sizes[i];
         }
     }
@@ -923,28 +1043,36 @@ static void send_junk_and_cps(proxy_t *p, int fd) {
 
 /* ---- Send batch with GSO ---- */
 
-static void send_batch_gso(proxy_t *p, int fd, struct mmsghdr *msgs,
-                           struct iovec *iovecs, int nsend,
-                           cliaddr_t *addr) {
+/* Returns errno of the failing send, or 0 when everything went out. Only the
+ * remote path acts on it (see send_batch_remote) — a failed send to the local
+ * WireGuard interface says nothing about the tunnel. */
+static int send_batch_gso(proxy_t *p, int fd, struct mmsghdr *msgs,
+                          struct iovec *iovecs, int nsend,
+                          cliaddr_t *addr) {
     int sent = 0;
+    int err = 0;
     if (p->gso_ok && nsend > 1) {
         int n = send_gso(fd, iovecs, nsend, addr);
         if (n < 0) {
-            int err = -n;
+            err = -n;
             if (err == ENOPROTOOPT || err == EIO)
                 p->gso_ok = 0;
         } else {
             sent = n;
+            err = 0;
         }
     }
     while (sent < nsend) {
         int r = sendmmsg(fd, msgs + sent, nsend - sent, MSG_NOSIGNAL);
         if (r <= 0) {
-            log_debug2("sendmmsg failed: ", strerror(errno));
+            err = errno;
+            log_debug2("sendmmsg failed: ", strerror(err));
             break;
         }
         sent += r;
+        err = 0;
     }
+    return err;
 }
 
 /* Every c2s → remote flush goes through here, so the Happy Eyeballs probe gets
@@ -952,7 +1080,8 @@ static void send_batch_gso(proxy_t *p, int fd, struct mmsghdr *msgs,
 static inline void send_batch_remote(proxy_t *p, int fd, struct mmsghdr *msgs,
                                      struct iovec *iovecs, int nsend) {
     he_stash(p, iovecs[0].iov_base, (int)iovecs[0].iov_len, 0);
-    send_batch_gso(p, fd, msgs, iovecs, nsend, NULL);
+    int err = send_batch_gso(p, fd, msgs, iovecs, nsend, NULL);
+    if (err) note_remote_send_err(p, err);
 }
 
 /* ---- c2s thread ---- */
@@ -1163,7 +1292,8 @@ static void *c2s_thread_normal(void *arg) {
                 /* The handshake init is the packet a server actually answers,
                  * so it is the one worth replaying on the other family. */
                 he_stash(p, out, out_len, 1);
-                send_packet(remote_fd, out, out_len);
+                if (send_packet(remote_fd, out, out_len) < 0)
+                    note_remote_send_err(p, errno);
                 if (!atomic_exchange_explicit(&p->fe_init_sent, 1, memory_order_relaxed)) {
                     char nb[12];
                     const char *parts[] = { "c2s: AWG handshake init forwarded to remote (size=",
@@ -1436,6 +1566,7 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
     session_entry_t *dest_entry = NULL;
     uint32_t msg_type = 0;
     const uint8_t *out_mac1key = NULL;
+    int init_peer = -1;
     if (server_mode) {
         /* Look up by receiver_index based on packet type */
         if (n < 4) return 0;
@@ -1457,10 +1588,21 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
             memcpy(&recv_idx, pkt + 4, 4);
             dest_entry = session_get_entry(p, recv_idx);
         } else if (msg_type == WG_HANDSHAKE_INIT && n == WG_INIT_SIZE) {
-            /* Server-initiated rekey: no receiver_index, try sole client */
-            dest_entry = session_find_sole_entry(p);
-            if (dest_entry)
-                log_debug("s2c: server: init routed to sole client");
+            /* Server-initiated handshake: no receiver_index to look up. Its
+             * MAC1 is keyed on the client's static key, so the peer list names
+             * the target — the sole-client fallback below only ever worked for
+             * a hub with exactly one client. */
+            init_peer = config_server_resolve_peer_for_init(cfg, pkt, n);
+            if (init_peer >= 0) {
+                dest_entry = session_find_by_peer(p, init_peer);
+                if (dest_entry)
+                    log_debug("s2c: server: init routed by MAC1 to its peer");
+            }
+            if (!dest_entry) {
+                dest_entry = session_find_sole_entry(p);
+                if (dest_entry)
+                    log_debug("s2c: server: init routed to sole client");
+            }
         }
         if (!dest_entry) {
             log_debug("s2c: server: no session for packet, dropping");
@@ -1508,6 +1650,11 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
 
     /* Handshake slow path */
     if (server_mode) {
+        /* A MAC1-resolved init already knows its peer, and knowing it here is
+         * what lets the outgoing MAC1 be recomputed under the right key. */
+        if (init_peer >= 0)
+            session_set_peer_slot(dest_entry, init_peer);
+
         int peer_slot = session_get_peer_slot(dest_entry);
         if (peer_slot >= 0 && peer_slot < cfg->server_peer_count)
             out_mac1key = cfg->server_peer_mac1keys[peer_slot];
@@ -1517,8 +1664,14 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
             if (resolved_peer >= 0) {
                 session_set_peer_slot(dest_entry, resolved_peer);
                 out_mac1key = cfg->server_peer_mac1keys[resolved_peer];
+                peer_slot = resolved_peer;
             }
         }
+
+        /* Every handshake is a fresh statement of where this peer lives, so it
+         * is the moment to retire whatever it left at previous addresses. */
+        if (peer_slot >= 0)
+            session_drop_moved_peer(p, peer_slot, dest_addr);
     }
 
     int out_len, sendJunk;

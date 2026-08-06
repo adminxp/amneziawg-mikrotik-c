@@ -315,6 +315,46 @@ static inline cliaddr_t *session_find_sole_client(proxy_t *p) {
     return entry ? &entry->addr : NULL;
 }
 
+/* First live entry belonging to a peer. Used to aim a server-initiated
+ * handshake once its MAC1 has named the peer. */
+static inline session_entry_t *session_find_by_peer(proxy_t *p, int peer_slot) {
+    if (peer_slot < 0) return NULL;
+    for (int i = 0; i < SESSION_TABLE_SIZE; i++) {
+        if (!atomic_load_explicit(&p->sessions[i].valid, memory_order_acquire))
+            continue;
+        if (atomic_load_explicit(&p->sessions[i].peer_slot, memory_order_relaxed)
+                == peer_slot)
+            return &p->sessions[i];
+    }
+    return NULL;
+}
+
+/* Retire the entries a peer left at addresses it no longer uses.
+ *
+ * Nothing else ever clears this table, and a client that comes back from a new
+ * address (a DHCPv6 lease that renewed into a different one, say) simply adds
+ * entries beside the old ones. Two entries with different addresses stop
+ * looking like one client, so session_find_sole_entry() returns NULL and every
+ * server-initiated handshake is dropped from then on — permanently, since
+ * nothing expires. Once a handshake has identified the peer, its entries at
+ * *other* addresses are provably dead: that client is not there any more.
+ * Entries at the current address are left alone, because a rekey legitimately
+ * keeps the previous session alive for packets still in flight. */
+static inline void session_drop_moved_peer(proxy_t *p, int peer_slot,
+                                           const cliaddr_t *cur) {
+    if (peer_slot < 0 || !cur) return;
+    for (int i = 0; i < SESSION_TABLE_SIZE; i++) {
+        if (!atomic_load_explicit(&p->sessions[i].valid, memory_order_acquire))
+            continue;
+        if (atomic_load_explicit(&p->sessions[i].peer_slot, memory_order_relaxed)
+                != peer_slot)
+            continue;
+        if (cliaddr_eq(&p->sessions[i].addr, cur))
+            continue;
+        atomic_store_explicit(&p->sessions[i].valid, 0, memory_order_release);
+    }
+}
+
 /* Re-check DNS records (A and AAAA) for host: 0 = cur still present,
  * 1 = cur gone, -1 = resolve error. Walks every record to tolerate
  * round-robin DNS; a record matches only when family and address both do. */
