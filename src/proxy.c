@@ -65,14 +65,14 @@ static void switch_profile(proxy_t *p, int idx) {
 
 /* --- Per-source profile cache (server mode with a fallback chain) --- */
 
-static inline int profile_for_addr(proxy_t *p, const struct sockaddr_in *a) {
+static inline int profile_for_addr(proxy_t *p, const cliaddr_t *a) {
     if (p->cfg->profile_count == 1) return 0;
     uint32_t k = prof_cache_key(a);
     prof_cache_entry_t *e = &p->prof_cache[(k ^ (k >> 16)) & PROF_CACHE_MASK];
     return e->key == k ? e->prof : p->cfg->active_profile;
 }
 
-static inline void profile_remember(proxy_t *p, const struct sockaddr_in *a, int prof) {
+static inline void profile_remember(proxy_t *p, const cliaddr_t *a, int prof) {
     uint32_t k = prof_cache_key(a);
     prof_cache_entry_t *e = &p->prof_cache[(k ^ (k >> 16)) & PROF_CACHE_MASK];
     e->key = k;
@@ -300,14 +300,14 @@ static void log_socket_buffers(int fd, const awg_config_t *cfg, const char *labe
  * IPv6 header pushes a full-size WireGuard packet past 1500 at the MTU that is
  * safe over IPv4. The proxy cannot fix this — the MTU belongs to the router's
  * wireguard interface — so it just states the ceiling. */
-static void log_ipv6_mtu_hint(const proxy_t *p) {
+static void log_ipv6_mtu_hint(const proxy_t *p, const char *why) {
     if (g_log_level < LOG_ERROR) return;
     char mb[12];
-    const char *parts[] = { "remote is IPv6: set the WireGuard interface MTU to ",
+    const char *parts[] = { why, ": set the WireGuard interface MTU to ",
         u32_to_str(mb, (uint32_t)awg_max_wg_mtu(p->cfg->max_s4, 1)),
         " or lower — the 40-byte IPv6 header makes a full-size packet exceed "
         "1500 bytes and it will be dropped or fragmented" };
-    log_msgn("WARN: ", parts, 3);
+    log_msgn("WARN: ", parts, 4);
 }
 
 /* Open and connect one socket to a resolved endpoint. */
@@ -368,26 +368,86 @@ static int dial_one(proxy_t *p, const awg_addr_t *a, int blocking) {
     return fd;
 }
 
+/* ---- Learned transport preference ---- */
+
+int state_read_prefer6(const char *path) {
+    if (!path || !path[0]) return 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    char c = 0;
+    ssize_t n = read(fd, &c, 1);
+    close(fd);
+    return n == 1 && c == '6';
+}
+
+int state_write_prefer6(const char *path, int prefer6) {
+    if (!path || !path[0]) return -1;
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return -1;
+    char c = prefer6 ? '6' : '4';
+    ssize_t n = write(fd, &c, 1);
+    close(fd);
+    return n == 1 ? 0 : -1;
+}
+
+/* Record which family actually carried traffic so the next start dials it
+ * first instead of paying the head start on a dead one. Writes at most once
+ * per run, and only when the byte on disk is stale: the router's flash is
+ * small and a flapping link must never turn into a write loop. A write that
+ * fails (read-only root, say) still counts as done — the in-memory preference
+ * keeps steering this run, and retrying every reconnect would be the write
+ * loop this guards against.
+ *
+ * Note what the two values mean. '6' is an optimisation — skip the doomed IPv4
+ * head start. '4' is NOT "IPv6 is disabled": it only restores the stock order,
+ * in which the IPv6 socket is still opened and still probed on every connect
+ * and reconnect. So an IPv6 outage is never learned permanently — the moment
+ * IPv4 goes silent again, IPv6 gets another chance and can win back.
+ *
+ * prefer6/state_written are plain ints on purpose, unlike the atomics around
+ * them: proxy_init() sets them before any thread exists, and from then on only
+ * the s2c thread touches them — it owns he_probe()/he_finish() and is the sole
+ * caller of do_reconnect(), hence of dial_remote(). */
+static void he_learn(proxy_t *p, int prefer6) {
+    if (p->state_written || prefer6 == p->prefer6) return;
+    p->prefer6 = prefer6;
+    p->state_written = 1;
+    if (state_write_prefer6(p->cfg->state_file, prefer6) == 0)
+        log_info(prefer6 ? "remembered: dial IPv6 first from now on"
+                         : "remembered: dial IPv4 first from now on");
+}
+
 /* Resolve and connect. When the name carries both an A and an AAAA record the
  * second socket is opened too and left for he_probe() to arbitrate; the primary
- * (returned) socket is always the IPv4 one, matching what every previous
- * release did — IPv6 only takes over once it demonstrably answers. */
+ * (returned) socket is the IPv4 one, matching what every previous release did —
+ * IPv6 only takes over once it demonstrably answers. The one exception is a
+ * preference learned by an earlier run, which flips the order so a site whose
+ * IPv4 is dead stops paying the probe delay on every single reconnect. */
 static int dial_remote(proxy_t *p, int blocking) {
     awg_addr_t v4, v6;
     if (resolve_addr(p->remote_host, p->remote_port, &v4, &v6) < 0)
         return -1;
 
-    const awg_addr_t *primary = v4.len ? &v4 : &v6;
-    const awg_addr_t *alt     = v4.len ? (v6.len ? &v6 : NULL) : NULL;
+    const awg_addr_t *primary, *alt;
+    if (p->prefer6 && v6.len) {
+        primary = &v6;
+        alt     = v4.len ? &v4 : NULL;
+    } else {
+        primary = v4.len ? &v4 : &v6;
+        alt     = v4.len ? (v6.len ? &v6 : NULL) : NULL;
+    }
 
     int fd = dial_one(p, primary, blocking);
     if (fd < 0) {
-        /* A dead IPv4 route must not hide a working IPv6 one. */
+        /* A dead route on one family must not hide a working other one. */
         if (!alt) return -1;
         fd = dial_one(p, alt, blocking);
         if (fd < 0) return -1;
         primary = alt;
         alt = NULL;
+        /* connect() on UDP fails when there is no route, so this is a real
+         * verdict on the family, not just a slow path. */
+        he_learn(p, primary->sa.ss_family == AF_INET6);
     }
     p->remote = *primary;
 
@@ -404,7 +464,7 @@ static int dial_remote(proxy_t *p, int blocking) {
     atomic_store_explicit(&p->remote_fd2, fd2, memory_order_release);
 
     if (fd2 < 0 && p->remote.sa.ss_family == AF_INET6)
-        log_ipv6_mtu_hint(p);
+        log_ipv6_mtu_hint(p, "remote is IPv6");
     return fd;
 }
 
@@ -449,14 +509,19 @@ static void he_finish(proxy_t *p, int use_alt) {
         p->remote = p->remote_alt;
         atomic_store_explicit(&p->remote_fd, fd2, memory_order_release);
         if (old >= 0) close(old);
-        log_info("happy eyeballs: IPv6 answered first, using it");
+        log_info(p->remote.sa.ss_family == AF_INET6
+                     ? "happy eyeballs: IPv6 answered first, using it"
+                     : "happy eyeballs: IPv4 answered first, using it");
     } else {
         close(fd2);
     }
     p->remote_alt.len = 0;
 
     if (p->remote.sa.ss_family == AF_INET6)
-        log_ipv6_mtu_hint(p);
+        log_ipv6_mtu_hint(p, "remote is IPv6");
+
+    /* Both families were on the table and one of them demonstrably answered. */
+    he_learn(p, p->remote.sa.ss_family == AF_INET6);
 }
 
 /* UDP has no handshake, so the only liveness signal is a packet coming back.
@@ -514,7 +579,9 @@ static void he_probe(proxy_t *p) {
                 send(fd2, p->he_pkt, (size_t)p->he_pkt_len,
                      MSG_DONTWAIT | MSG_NOSIGNAL);
             dup_done = 1;
-            log_info("happy eyeballs: IPv4 silent, probing IPv6");
+            log_info(p->remote.sa.ss_family == AF_INET6
+                         ? "happy eyeballs: IPv6 silent, probing IPv4"
+                         : "happy eyeballs: IPv4 silent, probing IPv6");
         }
     }
 
@@ -570,7 +637,7 @@ static void init_gro_state(proxy_t *p) {
     p->gro_hdr_c2s.msg_control = p->gro_cmsg_c2s;
     p->gro_hdr_c2s.msg_controllen = sizeof(p->gro_cmsg_c2s);
     p->gro_hdr_c2s.msg_name = &p->gro_addr_c2s;
-    p->gro_hdr_c2s.msg_namelen = sizeof(struct sockaddr_in);
+    p->gro_hdr_c2s.msg_namelen = p->cli_len;
 }
 
 /* recv_gro: blocking recvmsg with GRO. Returns total bytes, sets *seg_size.
@@ -593,7 +660,7 @@ static int recv_gro(proxy_t *p, int fd, int *seg_size) {
 /* send_gso: send a prefix of same-size packets via one sendmsg with UDP_SEGMENT.
  * Returns number of packets sent, or negative errno on error. */
 static int send_gso(int fd, struct iovec *iovecs, int count,
-                    struct sockaddr_in *addr) {
+                    cliaddr_t *addr) {
     if (count <= 1) return 0;
 
     /* Find longest prefix of same-size packets */
@@ -629,7 +696,7 @@ static int send_gso(int fd, struct iovec *iovecs, int count,
 
     if (addr) {
         hdr.msg_name = addr;
-        hdr.msg_namelen = sizeof(struct sockaddr_in);
+        hdr.msg_namelen = cliaddr_len(addr);
     }
 
     ssize_t ret = sendmsg(fd, &hdr, MSG_DONTWAIT | MSG_NOSIGNAL);
@@ -659,16 +726,33 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
         return -1;
     }
 
+    /* Which family an earlier run settled on, if any (see he_learn). */
+    p->prefer6 = state_read_prefer6(cfg->state_file);
+    if (p->prefer6)
+        log_info("learned preference: dialing IPv6 first");
+
     /* Parse listen address */
     char host[256];
     uint16_t port;
     if (parse_host_port(listen_str, host, sizeof(host), &port) < 0)
         return -1;
+    /* Family of the client-facing leg. IPv4 unless AWG_LISTEN names an IPv6
+     * host: ":51820" and "0.0.0.0:51820" keep the socket exactly as it always
+     * was, "[::]:51820" opens it to both families, "[2a00:..]:51820" pins it
+     * to one address. parse_host_port has already stripped the brackets. */
     memset(&p->listen_addr, 0, sizeof(p->listen_addr));
-    p->listen_addr.sin_family = AF_INET;
-    p->listen_addr.sin_port = htons(port);
-    if (host[0] && inet_pton(AF_INET, host, &p->listen_addr.sin_addr) != 1)
-        p->listen_addr.sin_addr.s_addr = INADDR_ANY;
+    if (host[0] && inet_pton(AF_INET6, host, &p->listen_addr.v6.sin6_addr) == 1) {
+        p->listen_family = AF_INET6;
+        p->listen_addr.v6.sin6_family = AF_INET6;
+        p->listen_addr.v6.sin6_port = htons(port);
+    } else {
+        p->listen_family = AF_INET;
+        p->listen_addr.v4.sin_family = AF_INET;
+        p->listen_addr.v4.sin_port = htons(port);
+        if (host[0] && inet_pton(AF_INET, host, &p->listen_addr.v4.sin_addr) != 1)
+            p->listen_addr.v4.sin_addr.s_addr = INADDR_ANY;
+    }
+    p->cli_len = cliaddr_len(&p->listen_addr);
 
     /* Parse remote address */
     if (parse_host_port(remote_str, p->remote_host, sizeof(p->remote_host), &p->remote_port) < 0)
@@ -730,12 +814,12 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
     if (cfg->mode != AWG_MODE_NORMAL) {
         for (int i = 0; i < BATCH_SIZE; i++) {
             p->recv_c2s.msgs[i].msg_hdr.msg_name = &p->recv_c2s.addrs[i];
-            p->recv_c2s.msgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
+            p->recv_c2s.msgs[i].msg_hdr.msg_namelen = p->cli_len;
         }
     } else {
         /* Normal: capture client addr only from first packet in batch */
         p->recv_c2s.msgs[0].msg_hdr.msg_name = &p->recv_c2s.addrs[0];
-        p->recv_c2s.msgs[0].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
+        p->recv_c2s.msgs[0].msg_hdr.msg_namelen = p->cli_len;
     }
 
     for (int i = 0; i < BATCH_SIZE; i++) {
@@ -743,7 +827,7 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
         p->send_s2c.msgs[i].msg_hdr.msg_iov = &p->send_s2c.iovecs[i];
         p->send_s2c.msgs[i].msg_hdr.msg_iovlen = 1;
         p->send_s2c.msgs[i].msg_hdr.msg_name = &p->send_s2c.addrs[i];
-        p->send_s2c.msgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
+        p->send_s2c.msgs[i].msg_hdr.msg_namelen = p->cli_len;
 
         /* send_c2s: to remote, connected — no addr needed */
         p->send_c2s.msgs[i].msg_hdr.msg_iov = &p->send_c2s.iovecs[i];
@@ -779,15 +863,15 @@ static int send_packet(int fd, const void *data, int len) {
     return r;
 }
 
-static int send_packet_to(int fd, const void *data, int len, struct sockaddr_in *addr) {
+static int send_packet_to(int fd, const void *data, int len, cliaddr_t *addr) {
     int r = (int)sendto(fd, data, len, MSG_DONTWAIT | MSG_NOSIGNAL,
-                        (struct sockaddr *)addr, sizeof(*addr));
+                        &addr->sa, cliaddr_len(addr));
     if (r < 0)
         log_debug2("send_packet_to failed: ", strerror(errno));
     return r;
 }
 
-static void send_junk_and_cps_to(proxy_t *p, int fd, struct sockaddr_in *addr) {
+static void send_junk_and_cps_to(proxy_t *p, int fd, cliaddr_t *addr) {
     awg_config_t *cfg = p->cfg;
 
     int ncps = cps_generate_all(cfg->cps, &p->cps_counter,
@@ -841,7 +925,7 @@ static void send_junk_and_cps(proxy_t *p, int fd) {
 
 static void send_batch_gso(proxy_t *p, int fd, struct mmsghdr *msgs,
                            struct iovec *iovecs, int nsend,
-                           struct sockaddr_in *addr) {
+                           cliaddr_t *addr) {
     int sent = 0;
     if (p->gso_ok && nsend > 1) {
         int n = send_gso(fd, iovecs, nsend, addr);
@@ -873,6 +957,26 @@ static inline void send_batch_remote(proxy_t *p, int fd, struct mmsghdr *msgs,
 
 /* ---- c2s thread ---- */
 
+/* Latch the address a batch came from as "the client". Returns 1 only when it
+ * changed — normal mode uses that to re-pin its source port. A family other
+ * than the socket's means the kernel never filled msg_name, so there is
+ * nothing to latch. */
+static int note_client_addr(proxy_t *p, const cliaddr_t *a) {
+    if (a->sa.sa_family != p->listen_family) return 0;
+    if (atomic_load_explicit(&p->has_client, memory_order_acquire) &&
+        cliaddr_eq(&p->client_addr, a))
+        return 0;
+    p->client_addr = *a;
+    atomic_store_explicit(&p->has_client, 1, memory_order_release);
+    int v6 = (a->sa.sa_family == AF_INET6);
+    char abuf[INET6_ADDRSTRLEN], pbuf[12];
+    const char *parts[] = { "client: ", v6 ? "[" : "",
+                            sa_str(&a->sa, abuf, sizeof(abuf)), v6 ? "]:" : ":",
+                            u32_to_str(pbuf, ntohs(cliaddr_port(a))) };
+    log_infon(parts, 5);
+    return 1;
+}
+
 /* ---- c2s: normal mode ---- */
 
 __attribute__((hot))
@@ -901,7 +1005,7 @@ static void *c2s_thread_normal(void *arg) {
             } else {
                 p->gro_hdr_c2s.msg_controllen = sizeof(p->gro_cmsg_c2s);
                 p->gro_hdr_c2s.msg_flags = 0;
-                p->gro_hdr_c2s.msg_namelen = sizeof(struct sockaddr_in);
+                p->gro_hdr_c2s.msg_namelen = p->cli_len;
 
                 total = recvmsg(p->listen_fd, &p->gro_hdr_c2s, 0);
                 if (total <= 0) {
@@ -961,7 +1065,7 @@ static void *c2s_thread_normal(void *arg) {
             /* recvmmsg path */
             for (int i = 0; i < prev_nrecv; i++)
                 p->recv_c2s.iovecs[i].iov_len = BUF_SIZE;
-            p->recv_c2s.msgs[0].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
+            p->recv_c2s.msgs[0].msg_hdr.msg_namelen = p->cli_len;
 
             nrecv = recvmmsg(p->listen_fd, p->recv_c2s.msgs, BATCH_SIZE,
                              MSG_WAITFORONE, NULL);
@@ -975,28 +1079,14 @@ static void *c2s_thread_normal(void *arg) {
         atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
 
         /* Check client address from first packet */
-        if (p->recv_c2s.addrs[0].sin_family == AF_INET) {
-            if (!atomic_load_explicit(&p->has_client, memory_order_acquire) ||
-                p->client_addr.sin_addr.s_addr != p->recv_c2s.addrs[0].sin_addr.s_addr ||
-                p->client_addr.sin_port != p->recv_c2s.addrs[0].sin_port) {
-                p->client_addr = p->recv_c2s.addrs[0];
-                atomic_store_explicit(&p->has_client, 1, memory_order_release);
-                char abuf[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &p->client_addr.sin_addr, abuf, sizeof(abuf));
-                char pbuf[12];
-                const char *parts[] = { "client: ", abuf, ":", u32_to_str(pbuf, ntohs(p->client_addr.sin_port)) };
-                log_infon(parts, 4);
-
-                if (p->auto_src_port) {
-                    int cp = ntohs(p->recv_c2s.addrs[0].sin_port);
-                    if (p->local_port != cp) {
-                        p->local_port = cp;
-                        char pb2[12];
-                        log_info2("src port: auto, reconnecting port=",
-                                  u32_to_str(pb2, cp));
-                        atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
-                    }
-                }
+        if (note_client_addr(p, &p->recv_c2s.addrs[0]) && p->auto_src_port) {
+            int cp = ntohs(cliaddr_port(&p->recv_c2s.addrs[0]));
+            if (p->local_port != cp) {
+                p->local_port = cp;
+                char pb2[12];
+                log_info2("src port: auto, reconnecting port=",
+                          u32_to_str(pb2, cp));
+                atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
             }
         }
 
@@ -1111,7 +1201,7 @@ static void *c2s_thread_reverse(void *arg) {
     while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
         for (int i = 0; i < prev_nrecv; i++) {
             p->recv_c2s.iovecs[i].iov_len = BUF_SIZE;
-            p->recv_c2s.msgs[i].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
+            p->recv_c2s.msgs[i].msg_hdr.msg_namelen = p->cli_len;
         }
 
         int nrecv = recvmmsg(p->listen_fd, p->recv_c2s.msgs, BATCH_SIZE,
@@ -1125,19 +1215,8 @@ static void *c2s_thread_reverse(void *arg) {
         atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
 
         /* In reverse (1:1) mode, track single client */
-        if (!server_mode && p->recv_c2s.addrs[0].sin_family == AF_INET) {
-            if (!atomic_load_explicit(&p->has_client, memory_order_acquire) ||
-                p->client_addr.sin_addr.s_addr != p->recv_c2s.addrs[0].sin_addr.s_addr ||
-                p->client_addr.sin_port != p->recv_c2s.addrs[0].sin_port) {
-                p->client_addr = p->recv_c2s.addrs[0];
-                atomic_store_explicit(&p->has_client, 1, memory_order_release);
-                char abuf[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &p->client_addr.sin_addr, abuf, sizeof(abuf));
-                char pbuf[12];
-                const char *parts[] = { "client: ", abuf, ":", u32_to_str(pbuf, ntohs(p->client_addr.sin_port)) };
-                log_infon(parts, 4);
-            }
-        }
+        if (!server_mode)
+            note_client_addr(p, &p->recv_c2s.addrs[0]);
 
         int remote_fd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
         if (remote_fd < 0) continue;
@@ -1224,7 +1303,7 @@ static void *c2s_thread_reverse(void *arg) {
             if (!out) continue; /* junk packet, drop */
 
             /* Server mode: record sender_index from init/response for routing */
-            if (server_mode && p->recv_c2s.addrs[i].sin_family == AF_INET) {
+            if (server_mode && p->recv_c2s.addrs[i].sa.sa_family == p->listen_family) {
                 uint32_t msg_type;
                 memcpy(&msg_type, out, 4);
                 if ((msg_type == WG_HANDSHAKE_INIT && out_len == WG_INIT_SIZE) ||
@@ -1265,7 +1344,7 @@ static void *c2s_thread(void *arg) {
 __attribute__((hot))
 static inline int process_s2c_pkt_normal(proxy_t *p, uint8_t *pkt, int n,
                                           struct iovec *send_iovecs,
-                                          struct sockaddr_in *send_addrs,
+                                          cliaddr_t *send_addrs,
                                           int *nsend) {
     awg_config_t *cfg = p->cfg;
     int s4 = cfg->s4;
@@ -1347,13 +1426,13 @@ __attribute__((hot))
 static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pkt,
                                            int n, int prefix,
                                            struct iovec *send_iovecs,
-                                           struct sockaddr_in *send_addrs,
+                                           cliaddr_t *send_addrs,
                                            int *nsend) {
     awg_config_t *cfg = p->cfg;
     int server_mode = (cfg->mode == AWG_MODE_SERVER);
 
     /* Determine destination address */
-    struct sockaddr_in *dest_addr = NULL;
+    cliaddr_t *dest_addr = NULL;
     session_entry_t *dest_entry = NULL;
     uint32_t msg_type = 0;
     const uint8_t *out_mac1key = NULL;
@@ -1685,7 +1764,7 @@ static void *s2c_thread(void *arg) {
 
         /* === Send === */
         if (nsend > 0) {
-            struct sockaddr_in *gso_addr = (p->cfg->mode == AWG_MODE_SERVER)
+            cliaddr_t *gso_addr = (p->cfg->mode == AWG_MODE_SERVER)
                 ? NULL : &p->send_s2c.addrs[0];
             send_batch_gso(p, p->listen_fd, p->send_s2c.msgs,
                            p->send_s2c.iovecs, nsend, gso_addr);
@@ -1700,25 +1779,31 @@ static void *s2c_thread(void *arg) {
 int proxy_run(proxy_t *p) {
     awg_config_t *cfg = p->cfg;
 
-    /* Create listen socket (blocking for c2s thread). The client-facing leg
-     * stays IPv4: the session table and profile cache key on sockaddr_in. */
-    p->listen_fd = create_udp_socket(AF_INET, 1);
+    /* Create listen socket (blocking for c2s thread). Family comes from
+     * AWG_LISTEN; on a v6 socket V6ONLY is turned off so one hub can serve
+     * clients of both families — a v4 one simply arrives v4-mapped. */
+    p->listen_fd = create_udp_socket(p->listen_family, 1);
     if (p->listen_fd < 0) {
         log_error("socket create failed");
         return -1;
     }
     int opt = 1;
     setsockopt(p->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    if (bind(p->listen_fd, (struct sockaddr *)&p->listen_addr,
-             sizeof(p->listen_addr)) < 0) {
-        log_error("bind failed");
+    if (p->listen_family == AF_INET6) {
+        int off = 0;
+        setsockopt(p->listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+    }
+    if (bind(p->listen_fd, &p->listen_addr.sa, p->cli_len) < 0) {
+        log_error2("bind failed: ", strerror(errno));
         close(p->listen_fd);
         return -1;
     }
+    if (p->listen_family == AF_INET6)
+        log_ipv6_mtu_hint(p, "clients reach this proxy over IPv6");
     set_socket_buffers(p->listen_fd, cfg->socket_buf);
     set_busy_poll(p->listen_fd, cfg->busy_poll);
     if (cfg->no_df)
-        set_df_off(p->listen_fd, AF_INET);
+        set_df_off(p->listen_fd, p->listen_family);
     /* Normal mode only — c2s_thread_reverse() reads with recvmmsg and has no
      * way to split a coalesced buffer back into datagrams. */
     if (!cfg->no_gro && cfg->mode == AWG_MODE_NORMAL) {

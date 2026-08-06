@@ -5,6 +5,7 @@
 #include "fastrand.h"
 #include <stdint.h>
 #include <stdatomic.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
@@ -17,9 +18,41 @@
 #define SESSION_TABLE_SIZE 4096
 #define SESSION_TABLE_MASK (SESSION_TABLE_SIZE - 1)
 
+/* One client-facing address. The listen leg picks its family once, at bind
+ * time, from AWG_LISTEN: an IPv4 host (or none) keeps the socket AF_INET,
+ * an IPv6 one makes it AF_INET6 with V6ONLY off. Every address the kernel
+ * then hands back has that same family — a v4 client on a v6 socket arrives
+ * v4-mapped — so the length is a per-socket constant (p->cli_len) and the
+ * hot paths never branch on it. */
+typedef union {
+    struct sockaddr     sa;
+    struct sockaddr_in  v4;
+    struct sockaddr_in6 v6;
+} cliaddr_t;
+
+static inline socklen_t cliaddr_len(const cliaddr_t *a) {
+    return a->sa.sa_family == AF_INET6 ? (socklen_t)sizeof(a->v6)
+                                       : (socklen_t)sizeof(a->v4);
+}
+
+static inline uint16_t cliaddr_port(const cliaddr_t *a) {
+    return a->sa.sa_family == AF_INET6 ? a->v6.sin6_port : a->v4.sin_port;
+}
+
+/* Address and port both — this answers "same client?", unlike sa_addr_eq. */
+static inline int cliaddr_eq(const cliaddr_t *a, const cliaddr_t *b) {
+    if (a->sa.sa_family != b->sa.sa_family) return 0;
+    if (a->sa.sa_family == AF_INET6)
+        return a->v6.sin6_port == b->v6.sin6_port &&
+               memcmp(&a->v6.sin6_addr, &b->v6.sin6_addr,
+                      sizeof(struct in6_addr)) == 0;
+    return a->v4.sin_port == b->v4.sin_port &&
+           a->v4.sin_addr.s_addr == b->v4.sin_addr.s_addr;
+}
+
 typedef struct {
     uint32_t sender_index;
-    struct sockaddr_in addr;
+    cliaddr_t addr;
     _Atomic int peer_slot;
     _Atomic int prof;      /* obfuscation profile this client speaks */
     _Atomic int valid;
@@ -36,9 +69,17 @@ typedef struct {
     uint8_t prof;
 } prof_cache_entry_t;
 
-static inline uint32_t prof_cache_key(const struct sockaddr_in *a) {
-    uint32_t k = (uint32_t)a->sin_addr.s_addr ^ ((uint32_t)a->sin_port << 16)
-               ^ (uint32_t)a->sin_port;
+static inline uint32_t prof_cache_key(const cliaddr_t *a) {
+    uint32_t k;
+    if (a->sa.sa_family == AF_INET6) {
+        uint32_t w[4];
+        memcpy(w, &a->v6.sin6_addr, sizeof(w));
+        k = w[0] ^ w[1] ^ w[2] ^ w[3] ^ ((uint32_t)a->v6.sin6_port << 16)
+          ^ (uint32_t)a->v6.sin6_port;
+    } else {
+        k = (uint32_t)a->v4.sin_addr.s_addr ^ ((uint32_t)a->v4.sin_port << 16)
+          ^ (uint32_t)a->v4.sin_port;
+    }
     return k ? k : 1u;
 }
 
@@ -97,7 +138,8 @@ typedef struct {
     _Atomic uint8_t fe_transport_c2s;   /* first transport packet to remote */
     _Atomic uint8_t fe_transport_s2c;   /* first transport packet to client */
     uint8_t _pad_fe;
-    struct sockaddr_in client_addr; /* 16B */
+    cliaddr_t client_addr;          /* 16B v4 / 28B v6 */
+    socklen_t cli_len;              /* 4B — namelen for every client-leg msg */
     int gso_ok;                     /* 4B */
     int gro_enabled;                /* 4B */
     int c2s_headroom;               /* 4B — bytes reserved before recv_c2s data */
@@ -114,7 +156,7 @@ typedef struct {
         uint8_t bufs[BATCH_SIZE][BUF_SIZE + AWG_PACKET_HEADROOM];
         struct mmsghdr msgs[BATCH_SIZE];
         struct iovec iovecs[BATCH_SIZE];
-        struct sockaddr_in addrs[BATCH_SIZE];
+        cliaddr_t addrs[BATCH_SIZE];
     } recv_c2s;
 
     struct {
@@ -132,11 +174,12 @@ typedef struct {
     struct {
         struct mmsghdr msgs[BATCH_SIZE];
         struct iovec iovecs[BATCH_SIZE];
-        struct sockaddr_in addrs[BATCH_SIZE];
+        cliaddr_t addrs[BATCH_SIZE];
     } send_s2c;
 
     /* === Cold: init/reconnect === */
-    struct sockaddr_in listen_addr;
+    cliaddr_t listen_addr;
+    int listen_family;              /* AF_INET or AF_INET6 */
     /* Remote is the only leg that speaks both families. The socket is
      * connect()ed and every send goes through send(), so nothing on the hot
      * path ever looks at these. */
@@ -146,6 +189,12 @@ typedef struct {
     uint16_t remote_port;
     int auto_src_port;
     int local_port;
+
+    /* Learned transport preference: which family to dial first. Read from
+     * cfg->state_file at init, updated at most once per run (state_written) so
+     * a flapping link cannot turn into a write loop on the router's flash. */
+    int prefer6;
+    int state_written;
 
     /* Happy Eyeballs: c2s keeps a copy of the first packet it sends so the
      * probe can replay it on the other family. Published by the release store
@@ -179,7 +228,7 @@ typedef struct {
     struct iovec gro_iov_c2s;
     struct msghdr gro_hdr_c2s;
     uint8_t gro_cmsg_c2s[32];
-    struct sockaddr_in gro_addr_c2s;
+    cliaddr_t gro_addr_c2s;
     int gro_enabled_c2s;
 
     /* === Large cold arrays === */
@@ -202,7 +251,7 @@ static inline session_entry_t *session_get_entry(proxy_t *p, uint32_t index) {
 }
 
 static inline session_entry_t *session_put_prof(proxy_t *p, uint32_t index,
-                                                struct sockaddr_in *addr, int prof) {
+                                                const cliaddr_t *addr, int prof) {
     uint32_t slot = index & SESSION_TABLE_MASK;
     for (int i = 0; i < 4; i++) {
         uint32_t s = (slot + i) & SESSION_TABLE_MASK;
@@ -227,11 +276,11 @@ static inline session_entry_t *session_put_prof(proxy_t *p, uint32_t index,
     return &p->sessions[slot];
 }
 
-static inline void session_put(proxy_t *p, uint32_t index, struct sockaddr_in *addr) {
+static inline void session_put(proxy_t *p, uint32_t index, const cliaddr_t *addr) {
     session_put_prof(p, index, addr, 0);
 }
 
-static inline struct sockaddr_in *session_get(proxy_t *p, uint32_t index) {
+static inline cliaddr_t *session_get(proxy_t *p, uint32_t index) {
     session_entry_t *entry = session_get_entry(p, index);
     return entry ? &entry->addr : NULL;
 }
@@ -253,8 +302,7 @@ static inline session_entry_t *session_find_sole_entry(proxy_t *p) {
             continue;
         if (!found) {
             found = &p->sessions[i];
-        } else if (found->addr.sin_addr.s_addr != p->sessions[i].addr.sin_addr.s_addr ||
-                   found->addr.sin_port != p->sessions[i].addr.sin_port) {
+        } else if (!cliaddr_eq(&found->addr, &p->sessions[i].addr)) {
             return NULL; /* multiple clients */
         }
     }
@@ -262,7 +310,7 @@ static inline session_entry_t *session_find_sole_entry(proxy_t *p) {
 }
 
 /* Find client address when only one unique client exists in session table */
-static inline struct sockaddr_in *session_find_sole_client(proxy_t *p) {
+static inline cliaddr_t *session_find_sole_client(proxy_t *p) {
     session_entry_t *entry = session_find_sole_entry(p);
     return entry ? &entry->addr : NULL;
 }
@@ -271,6 +319,12 @@ static inline struct sockaddr_in *session_find_sole_client(proxy_t *p) {
  * 1 = cur gone, -1 = resolve error. Walks every record to tolerate
  * round-robin DNS; a record matches only when family and address both do. */
 int resolve_addr_check(const char *host, const struct sockaddr *cur);
+
+/* Persisted transport preference — a single byte, '6' or '4'. Anything else
+ * (missing file, empty path, unreadable) reads as "no preference" = 0, which
+ * keeps the stock IPv4-first Happy Eyeballs order. */
+int state_read_prefer6(const char *path);
+int state_write_prefer6(const char *path, int prefer6);
 
 /* Split "host:port" / "[v6addr]:port". A bare IPv6 literal is rejected: the
  * port is mandatory, so brackets are the only unambiguous form. */

@@ -6,6 +6,9 @@
 *.png
 *.txt
 
+# jsdom, pulled in only to run tests/conf3.0-ipv6.test.js
+node_modules/
+
 # Bench harness artifacts: a checked-out upstream clone, the staged proxy
 # binary and whatever a run leaves behind (logs, captures, generated keys).
 __pycache__/

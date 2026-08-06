@@ -139,6 +139,7 @@ typedef struct {
     int timeout;        /* seconds, default 180 */
     int dns_refresh;    /* periodic DNS re-resolve interval, seconds, 0 = off */
     int he_delay;       /* Happy Eyeballs: ms of IPv4 silence before probing IPv6 */
+    const char *state_file; /* learned-preference file, NULL/"" = don't persist */
     int log_level;
     int socket_buf;     /* socket buffer size */
     int src_port;       /* 0 = auto */

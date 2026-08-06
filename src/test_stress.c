@@ -120,12 +120,31 @@ static int make_client_socket(void) {
     return fd;
 }
 
+/* Unbound v6 client. -1 means the host has no IPv6 at all — skip, not fail. */
+static int make_client_socket6(void) {
+    int fd = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    int bufsize = 8 * 1024 * 1024;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    return fd;
+}
+
 static struct sockaddr_in make_addr(int port) {
     struct sockaddr_in a = {
         .sin_family = AF_INET,
         .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
         .sin_port = htons(port)
     };
+    return a;
+}
+
+static struct sockaddr_in6 make_addr6(int port) {
+    struct sockaddr_in6 a;
+    memset(&a, 0, sizeof(a));
+    a.sin6_family = AF_INET6;
+    a.sin6_addr = in6addr_loopback;
+    a.sin6_port = htons(port);
     return a;
 }
 
@@ -162,23 +181,22 @@ static long get_rss_kb(pid_t pid) {
     return rss;
 }
 
-/* remote_str is passed to AWG_REMOTE verbatim, so IPv6 scenarios can hand in
- * "[::1]:port" or a dual-stack name. he_delay may be NULL to keep the default. */
-static pid_t start_proxy_remote(const char *mode, int listen_port,
-                                const char *remote_str, const char *he_delay) {
+/* listen_str and remote_str are passed to AWG_LISTEN / AWG_REMOTE verbatim, so
+ * IPv6 scenarios can hand in "[::]:port", "[::1]:port" or a dual-stack name.
+ * he_delay may be NULL to keep the default. */
+static pid_t start_proxy_listen_remote(const char *mode, const char *listen_str,
+                                       const char *remote_str, const char *he_delay) {
     /* Find a free port for proxy's source to avoid auto_src_port reconnect race */
     int src_port = find_free_port();
 
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        char lbuf[32], sp[8];
+        char sp[8];
         char jc[8], jmin[8], jmax[8], s1[8], s2[8];
         char h1[16], h2[16], h3[16], h4[16];
 
-        snprintf(lbuf, sizeof(lbuf), ":%d", listen_port);
-
-        setenv("AWG_LISTEN", lbuf, 1);
+        setenv("AWG_LISTEN", listen_str, 1);
         setenv("AWG_REMOTE", remote_str, 1);
         if (he_delay) setenv("AWG_HE_DELAY", he_delay, 1);
         else unsetenv("AWG_HE_DELAY");
@@ -204,6 +222,13 @@ static pid_t start_proxy_remote(const char *mode, int listen_port,
     }
     usleep(200000); /* 200ms for proxy startup */
     return pid;
+}
+
+static pid_t start_proxy_remote(const char *mode, int listen_port,
+                                const char *remote_str, const char *he_delay) {
+    char lbuf[32];
+    snprintf(lbuf, sizeof(lbuf), ":%d", listen_port);
+    return start_proxy_listen_remote(mode, lbuf, remote_str, he_delay);
 }
 
 static pid_t start_proxy(const char *mode, int listen_port, int remote_port) {
@@ -1715,6 +1740,116 @@ static void test_happy_eyeballs(void) {
     close(v4_blackhole);
 }
 
+/* ---- Scenario 14: dual-stack hub — AWG_LISTEN on [::] serves both families ----
+ *
+ * This is the server-mode leg the MikroTik hub needs: the AWG side faces the
+ * internet over IPv6 while the WireGuard side stays on the router's veth over
+ * IPv4. A v4 client on the same socket arrives v4-mapped, so both must be
+ * routed back by receiver_index to the family they came from. */
+static void test_server_listen6(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0);
+    ASSERT(remote_port > 0);
+
+    int probe = make_client_socket6();
+    if (probe < 0) {
+        fprintf(stderr, "          (no IPv6 on this host, skipped)\n");
+        return;
+    }
+    close(probe);
+
+    /* WG side stays IPv4 — that is the veth inside the router. */
+    int server_fd = make_udp_socket(remote_port);
+    ASSERT(server_fd >= 0);
+
+    char lbuf[32], rbuf[64];
+    snprintf(lbuf, sizeof(lbuf), "[::]:%d", listen_port);
+    snprintf(rbuf, sizeof(rbuf), "127.0.0.1:%d", remote_port);
+    pid_t proxy = start_proxy_listen_remote("server", lbuf, rbuf, NULL);
+    ASSERT(proxy > 0);
+
+    int fd6 = make_client_socket6();
+    int fd4 = make_client_socket();
+    ASSERT(fd6 >= 0 && fd4 >= 0);
+    struct sockaddr_in6 hub6 = make_addr6(listen_port);
+    struct sockaddr_in  hub4 = make_addr(listen_port);
+
+    const uint32_t idx6 = 0x6a00, idx4 = 0x4a00;
+    uint8_t awg_init[TEST_S1 + WG_INIT_SIZE];
+
+    make_awg_init(awg_init, idx6);
+    ASSERT(sendto(fd6, awg_init, sizeof(awg_init), 0,
+                  (struct sockaddr *)&hub6, sizeof(hub6)) > 0);
+    make_awg_init(awg_init, idx4);
+    ASSERT(sendto(fd4, awg_init, sizeof(awg_init), 0,
+                  (struct sockaddr *)&hub4, sizeof(hub4)) > 0);
+    usleep(300000);
+
+    /* Both handshakes must have arrived at the WG server as plain WG. */
+    struct sockaddr_in proxy_src;
+    memset(&proxy_src, 0, sizeof(proxy_src));
+    int seen6 = 0, seen4 = 0;
+    for (;;) {
+        uint8_t buf[2048];
+        struct sockaddr_in from;
+        socklen_t fromlen = sizeof(from);
+        ssize_t n = recvfrom(server_fd, buf, sizeof(buf), MSG_DONTWAIT,
+                             (struct sockaddr *)&from, &fromlen);
+        if (n <= 0) break;
+        proxy_src = from;
+        if (n != WG_INIT_SIZE) continue;   /* junk/CPS ahead of the init */
+        uint32_t t, si;
+        memcpy(&t, buf, 4);
+        memcpy(&si, buf + 4, 4);
+        if (t != WG_HANDSHAKE_INIT) continue;
+        if (si == idx6) seen6 = 1;
+        if (si == idx4) seen4 = 1;
+    }
+    fprintf(stderr, "          (WG init seen: v6-client=%d, v4-client=%d)\n", seen6, seen4);
+    ASSERT(seen6);
+    ASSERT(seen4);
+    ASSERT(proxy_src.sin_port != 0);
+
+    /* Reply to each by receiver_index; each must come back on its own family. */
+    uint8_t wg[200];
+    for (int i = 0; i < 50; i++) {
+        make_wg_transport(wg, idx6, (uint64_t)i, 200);
+        sendto(server_fd, wg, 200, 0, (struct sockaddr *)&proxy_src, sizeof(proxy_src));
+        make_wg_transport(wg, idx4, (uint64_t)i, 200);
+        sendto(server_fd, wg, 200, 0, (struct sockaddr *)&proxy_src, sizeof(proxy_src));
+    }
+    usleep(400000);
+
+    /* Count only packets carrying the receiver_index this client owns: a
+     * session-table mix-up would show up as a delivery to the wrong family. */
+    int got6 = 0, got4 = 0, misrouted = 0;
+    struct { int fd; uint32_t mine; uint32_t other; int *hit; } side[2] = {
+        { fd6, idx6, idx4, &got6 }, { fd4, idx4, idx6, &got4 }
+    };
+    for (int s = 0; s < 2; s++) {
+        uint8_t buf[2048];
+        ssize_t n;
+        while ((n = recvfrom(side[s].fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL)) > 0) {
+            if (n != 200) continue;         /* junk ahead of the stream */
+            uint32_t ri;
+            memcpy(&ri, buf + 4, 4);
+            if (ri == side[s].mine) (*side[s].hit)++;
+            else if (ri == side[s].other) misrouted++;
+        }
+    }
+    fprintf(stderr, "          (routed back: v6=%d, v4=%d of 50 each, misrouted=%d)\n",
+            got6, got4, misrouted);
+    ASSERT(got6 >= 50 * 9 / 10);
+    ASSERT(got4 >= 50 * 9 / 10);
+    ASSERT_EQ(misrouted, 0);
+
+    stop_proxy(proxy);
+    close(fd6);
+    close(fd4);
+    close(server_fd);
+}
+
 int main(void) {
     fprintf(stderr, "=== stress tests ===\n");
     RUN_TEST(normal_burst);
@@ -1730,5 +1865,6 @@ int main(void) {
     RUN_TEST(v3_header_protection);
     RUN_TEST(ipv6_remote);
     RUN_TEST(happy_eyeballs);
+    RUN_TEST(server_listen6);
     TEST_MAIN_END();
 }

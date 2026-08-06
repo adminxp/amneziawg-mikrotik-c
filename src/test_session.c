@@ -1,18 +1,19 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
 #include "test.h"
 #include "transform.h"
 #include "blake2s.h"
+#include "proxy.h"
 
-/* Minimal session table test without socket headers.
- * Tests transform_inbound MAC1 recompute in reverse mode,
- * and session table logic using portable types. */
+/* Session table + reverse-mode MAC1 tests.
+ *
+ * The first half models the table with a portable struct (probing, eviction,
+ * collisions); the second half exercises the real one from proxy.h, which now
+ * stores a cliaddr_t because the client leg can be IPv6. */
 
-/* --- Session table unit test using portable struct --- */
-
-#define SESSION_TABLE_SIZE 4096
-#define SESSION_TABLE_MASK (SESSION_TABLE_SIZE - 1)
+/* --- Table behaviour, modelled --- */
 
 typedef struct {
     uint32_t sender_index;
@@ -23,7 +24,7 @@ typedef struct {
 
 static test_session_t g_sessions[SESSION_TABLE_SIZE];
 
-static void session_put(uint32_t index, uint32_t ip, uint16_t port) {
+static void mock_session_put(uint32_t index, uint32_t ip, uint16_t port) {
     uint32_t slot = index & SESSION_TABLE_MASK;
     for (int i = 0; i < 4; i++) {
         uint32_t s = (slot + i) & SESSION_TABLE_MASK;
@@ -41,7 +42,7 @@ static void session_put(uint32_t index, uint32_t ip, uint16_t port) {
     g_sessions[slot].valid = 1;
 }
 
-static test_session_t *session_get(uint32_t index) {
+static test_session_t *mock_session_get(uint32_t index) {
     uint32_t slot = index & SESSION_TABLE_MASK;
     for (int i = 0; i < 4; i++) {
         uint32_t s = (slot + i) & SESSION_TABLE_MASK;
@@ -58,8 +59,8 @@ static void reset_sessions(void) {
 /* 1. Basic put/get */
 static void test_session_basic(void) {
     reset_sessions();
-    session_put(42, 0x0A000001, 12345);
-    test_session_t *got = session_get(42);
+    mock_session_put(42, 0x0A000001, 12345);
+    test_session_t *got = mock_session_get(42);
     ASSERT(got != NULL);
     ASSERT_EQ(got->ip, 0x0A000001u);
     ASSERT_EQ(got->port, 12345);
@@ -68,15 +69,15 @@ static void test_session_basic(void) {
 /* 2. Get non-existent */
 static void test_session_miss(void) {
     reset_sessions();
-    ASSERT(session_get(999) == NULL);
+    ASSERT(mock_session_get(999) == NULL);
 }
 
 /* 3. Update existing */
 static void test_session_update(void) {
     reset_sessions();
-    session_put(100, 0x0A000001, 12345);
-    session_put(100, 0x0A000002, 54321);
-    test_session_t *got = session_get(100);
+    mock_session_put(100, 0x0A000001, 12345);
+    mock_session_put(100, 0x0A000002, 54321);
+    test_session_t *got = mock_session_get(100);
     ASSERT(got != NULL);
     ASSERT_EQ(got->ip, 0x0A000002u);
     ASSERT_EQ(got->port, 54321);
@@ -86,10 +87,10 @@ static void test_session_update(void) {
 static void test_session_multiple(void) {
     reset_sessions();
     for (int i = 0; i < 10; i++)
-        session_put((uint32_t)(i * 1000 + 7), 0x0A000000 + i, 1000 + i);
+        mock_session_put((uint32_t)(i * 1000 + 7), 0x0A000000 + i, 1000 + i);
 
     for (int i = 0; i < 10; i++) {
-        test_session_t *got = session_get((uint32_t)(i * 1000 + 7));
+        test_session_t *got = mock_session_get((uint32_t)(i * 1000 + 7));
         ASSERT(got != NULL);
         ASSERT_EQ(got->ip, (uint32_t)(0x0A000000 + i));
         ASSERT_EQ(got->port, 1000 + i);
@@ -102,11 +103,11 @@ static void test_session_collision(void) {
     uint32_t idx1 = 5;
     uint32_t idx2 = 5 + SESSION_TABLE_SIZE;
 
-    session_put(idx1, 0x0A000001, 1111);
-    session_put(idx2, 0x0A000002, 2222);
+    mock_session_put(idx1, 0x0A000001, 1111);
+    mock_session_put(idx2, 0x0A000002, 2222);
 
-    test_session_t *got1 = session_get(idx1);
-    test_session_t *got2 = session_get(idx2);
+    test_session_t *got1 = mock_session_get(idx1);
+    test_session_t *got2 = mock_session_get(idx2);
     ASSERT(got1 != NULL);
     ASSERT(got2 != NULL);
     ASSERT_EQ(got1->port, 1111);
@@ -118,11 +119,11 @@ static void test_session_eviction(void) {
     reset_sessions();
     /* Fill 4 consecutive slots with same hash bucket */
     for (int i = 0; i < 4; i++)
-        session_put((uint32_t)(5 + i * SESSION_TABLE_SIZE), 0x01010100 + i, 100 + i);
+        mock_session_put((uint32_t)(5 + i * SESSION_TABLE_SIZE), 0x01010100 + i, 100 + i);
 
     /* 5th entry should evict slot 5 */
-    session_put((uint32_t)(5 + 4 * SESSION_TABLE_SIZE), 0x02020200, 9999);
-    test_session_t *got = session_get((uint32_t)(5 + 4 * SESSION_TABLE_SIZE));
+    mock_session_put((uint32_t)(5 + 4 * SESSION_TABLE_SIZE), 0x02020200, 9999);
+    test_session_t *got = mock_session_get((uint32_t)(5 + 4 * SESSION_TABLE_SIZE));
     ASSERT(got != NULL);
     ASSERT_EQ(got->port, 9999);
 }
@@ -225,6 +226,92 @@ static void test_server_inbound_init_mac1(void) {
     ASSERT_MEM_EQ(out + 116, expected_mac1, 16);
 }
 
+/* --- The real table, the one the proxy runs on ---
+ *
+ * Everything above models the table with a portable struct. Since the client
+ * leg can be IPv6 the entries hold a cliaddr_t, and that part is worth testing
+ * against the actual code rather than a stand-in. */
+
+static proxy_t g_p;
+
+static cliaddr_t addr_v4(uint32_t ip, uint16_t port) {
+    cliaddr_t a;
+    memset(&a, 0, sizeof(a));
+    a.v4.sin_family = AF_INET;
+    a.v4.sin_addr.s_addr = htonl(ip);
+    a.v4.sin_port = htons(port);
+    return a;
+}
+
+static cliaddr_t addr_v6(const char *s, uint16_t port) {
+    cliaddr_t a;
+    memset(&a, 0, sizeof(a));
+    a.v6.sin6_family = AF_INET6;
+    a.v6.sin6_port = htons(port);
+    inet_pton(AF_INET6, s, &a.v6.sin6_addr);
+    return a;
+}
+
+/* 10. A v6 client survives the round trip through the real table */
+static void test_real_session_v6(void) {
+    memset(&g_p, 0, sizeof(g_p));
+    cliaddr_t c6 = addr_v6("2a00:f2a:e08e:3da0::2", 51820);
+    session_put(&g_p, 0x1111, &c6);
+
+    cliaddr_t *got = session_get(&g_p, 0x1111);
+    ASSERT(got != NULL);
+    ASSERT_EQ(got->sa.sa_family, AF_INET6);
+    ASSERT(cliaddr_eq(got, &c6));
+    ASSERT_EQ(cliaddr_len(got), sizeof(struct sockaddr_in6));
+    ASSERT_EQ(ntohs(cliaddr_port(got)), 51820);
+}
+
+/* 11. Both families coexist and never collapse into each other */
+static void test_real_session_mixed(void) {
+    memset(&g_p, 0, sizeof(g_p));
+    cliaddr_t c6 = addr_v6("2001:db8::1", 1234);
+    cliaddr_t c4 = addr_v4(0x0A000001, 1234);
+    session_put(&g_p, 0xAAA, &c6);
+    session_put(&g_p, 0xBBB, &c4);
+
+    ASSERT(cliaddr_eq(session_get(&g_p, 0xAAA), &c6));
+    ASSERT(cliaddr_eq(session_get(&g_p, 0xBBB), &c4));
+    ASSERT(!cliaddr_eq(&c6, &c4));
+    /* Two clients, so there is no sole one to fall back to */
+    ASSERT(session_find_sole_client(&g_p) == NULL);
+}
+
+/* 12. Same v6 client under several indices still counts as one */
+static void test_real_session_sole_v6(void) {
+    memset(&g_p, 0, sizeof(g_p));
+    cliaddr_t c6 = addr_v6("fd11:11:11::5", 500);
+    session_put(&g_p, 1, &c6);
+    session_put(&g_p, 2, &c6);
+    cliaddr_t *sole = session_find_sole_client(&g_p);
+    ASSERT(sole != NULL);
+    ASSERT(cliaddr_eq(sole, &c6));
+
+    /* One byte of the address apart is a different client */
+    cliaddr_t other = addr_v6("fd11:11:11::6", 500);
+    session_put(&g_p, 3, &other);
+    ASSERT(session_find_sole_client(&g_p) == NULL);
+}
+
+/* 13. A port or an address bit must move the profile-cache key */
+static void test_prof_cache_key_v6(void) {
+    cliaddr_t a = addr_v6("2001:db8::1", 1000);
+    cliaddr_t b = addr_v6("2001:db8::2", 1000);
+    cliaddr_t c = addr_v6("2001:db8::1", 1001);
+    ASSERT_EQ(prof_cache_key(&a), prof_cache_key(&a));
+    ASSERT(prof_cache_key(&a) != prof_cache_key(&b));
+    ASSERT(prof_cache_key(&a) != prof_cache_key(&c));
+    /* Never 0 — that value marks an empty slot */
+    cliaddr_t zero;
+    memset(&zero, 0, sizeof(zero));
+    zero.v6.sin6_family = AF_INET6;
+    ASSERT(prof_cache_key(&zero) != 0);
+}
+
 int main(void) {
     fprintf(stderr, "=== session & reverse tests ===\n");
     RUN_TEST(session_basic);
@@ -236,5 +323,9 @@ int main(void) {
     RUN_TEST(reverse_inbound_init_mac1);
     RUN_TEST(normal_inbound_init_mac1);
     RUN_TEST(server_inbound_init_mac1);
+    RUN_TEST(real_session_v6);
+    RUN_TEST(real_session_mixed);
+    RUN_TEST(real_session_sole_v6);
+    RUN_TEST(prof_cache_key_v6);
     TEST_MAIN_END();
 }

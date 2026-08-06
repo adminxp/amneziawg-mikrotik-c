@@ -2759,6 +2759,7 @@
         src.push('  /ip/firewall/nat/remove [find where out-interface="wg-' + prefix + '"]');
         src.push('  /ip/firewall/nat/remove [find where src-address="' + net.natSrc + '"]');
         src.push('  /ip/address/remove [find where address="' + net.hostAddr + '"]');
+        src = src.concat(containerV6UninstallLines(prefix, '  '));
         src.push('  /interface/veth/remove [find where name="veth-' + prefix + '"]');
         src.push('  /interface/wireguard/peers/remove [find where interface="wg-' + prefix + '"]');
         src.push('  /ip/address/remove [find where interface="wg-' + prefix + '"]');
@@ -2923,12 +2924,19 @@
 
         lines.push(buildUninstallScriptSource(hasDNS, storageDisk, prefix, net, scenario));
 
+        var net6 = ipv6Enabled() ? getTunnelNetwork6(prefix) : null;
         lines = lines.concat([
             '',
             '# 2. Network infrastructure',
-            '/interface/veth/add name=veth-' + prefix + ' address=' + net.vethAddr + ' gateway=' + net.vethGw,
+            '/interface/veth/add name=veth-' + prefix + ' ' + vethAddrArgs(net, net6),
             '/ip/address/add address=' + net.hostAddr + ' interface=veth-' + prefix,
             '/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + net.natSrc,
+        ]);
+        if (net6) {
+            lines.push('# The AWG server is IPv6: the container needs a way out over IPv6 too.');
+            lines = lines.concat(containerV6Lines(prefix, net6, true));
+        }
+        lines = lines.concat([
             '',
             '# 3. WireGuard interface (MikroTik derives the public key automatically)',
             '/interface/wireguard/add name=wg-' + prefix + ' private-key="' + i.PrivateKey + '" listen-port=' + randomWgPort() + wgMtuOpt(i) + ' disabled=yes',
@@ -3385,11 +3393,15 @@
     // the prefix to clean them up. Uses a simple djb2-style hash spread across
     // different bit ranges: bits 0-3 → 2nd octet (172.16-31.x.x), bits 4-11 →
     // 3rd octet, bits 12-17 → 4th octet base (0-252, aligned to /30).
-    function getTunnelNetwork(prefix) {
+    function prefixHash(prefix) {
         var h = 0;
         for (var i = 0; i < prefix.length; i++)
             h = ((h * 31) + prefix.charCodeAt(i)) & 0xFFFFFFFF;
-        h = h >>> 0;
+        return h >>> 0;
+    }
+
+    function getTunnelNetwork(prefix) {
+        var h = prefixHash(prefix);
         var oct2 = 16 + (h & 0xF);
         var oct3 = (h >>> 4) & 0xFF;
         var oct4base = ((h >>> 12) & 0x3F) * 4;
@@ -3399,6 +3411,108 @@
             vethGw:   '172.' + oct2 + '.' + oct3 + '.' + (oct4base + 1),
             natSrc:   '172.' + oct2 + '.' + oct3 + '.' + oct4base + '/30'
         };
+    }
+
+    // The veth carries only IPv4 by default, which leaves the container with a
+    // link-local address and nothing else — it cannot reach an IPv6 AWG server
+    // and cannot be reached over IPv6 either. When IPv6 is in play the veth
+    // gets a ULA too; the global address stays on the router, which NATs. The
+    // /64 is derived from the same prefix hash, so two tunnels on one router
+    // never land on the same one.
+    function getTunnelNetwork6(prefix) {
+        var h = prefixHash(prefix);
+        function hex(v, w) { var s = v.toString(16); while (s.length < w) s = '0' + s; return s; }
+        var net = 'fd' + hex((h >>> 24) & 0xFF, 2) + ':' + hex((h >>> 8) & 0xFFFF, 4) +
+                  ':' + hex(h & 0xFFFF, 4);
+        return {
+            vethAddr: net + '::2/64',
+            hostAddr: net + '::1/64',
+            vethAddrBare: net + '::2',
+            vethGw: net + '::1',
+            net: net + '::/64'
+        };
+    }
+
+    // "address=<v4>[,<v6>] gateway=<v4gw>[ gateway6=<v6gw>]" for /interface/veth/add
+    function vethAddrArgs(net, net6) {
+        if (!net6) return 'address=' + net.vethAddr + ' gateway=' + net.vethGw;
+        return 'address=' + net.vethAddr + ',' + net6.vethAddr +
+               ' gateway=' + net.vethGw + ' gateway6=' + net6.vethGw;
+    }
+
+    // Router side of the container's IPv6 leg. `outbound` also opens the way
+    // out: the container talks to the world through the router's own global
+    // address (NAT66), because a /128 from the ISP cannot be split further and
+    // a delegated prefix is not something we can count on.
+    //
+    // Both legs need a default route inside the container, and getting one took
+    // a live capture to pin down: RouterOS does NOT push the veth's `gateway6`
+    // into the container's network namespace. The container is left with an
+    // on-link /64 and nothing else, so anything aimed off-link dies inside it —
+    // an outbound leg never reaches the server, and a hub cannot answer a client
+    // whose address is (by definition) off-link. The router therefore has to
+    // advertise on the veth (RA), which is what installs `default via <router
+    // link-local>` in the namespace.
+    //
+    // Two details matter. `advertise=yes` alone is not enough: a router whose
+    // /ipv6/nd default is scoped to another interface (e.g. bridge) sends no RA
+    // on the veth, hence the explicit per-interface nd entry. And the prefix is
+    // advertised with `autonomous=no` so the container takes only the route and
+    // not an extra SLAAC address — it keeps sourcing from the static ::2 the
+    // veth already gave it, which is what the hub's dst-nat conntrack expects to
+    // see on the way back. With SLAAC on, replies leave from an unpredictable
+    // EUI-64 address and the translation never reverses.
+    function containerV6Lines(prefix, net6, outbound) {
+        var veth = 'veth-' + prefix;
+        var l = [
+            // Order matters, and only a live run shows why. The stock /ipv6/nd
+            // entry covers interface=all, so the moment an address on the veth
+            // says advertise=yes the router starts sending RAs and generates a
+            // *dynamic* prefix entry with autonomous=yes — after which adding
+            // the static one fails outright with "configuration for this prefix
+            // already exists". Declaring the prefix first leaves the router
+            // nothing to invent.
+            '/ipv6/nd/prefix/add interface=' + veth + ' prefix=' + net6.net + ' autonomous=no',
+            '/ipv6/address/add address=' + net6.hostAddr + ' interface=' + veth +
+                ' advertise=yes comment=' + prefix + '-v6',
+            '/ipv6/nd/add interface=' + veth + ' comment=' + prefix + '-v6',
+            // Both legs, and at the top of the chain. An outbound leg opens new
+            // connections from an interface that is not in LAN, which the
+            // defconf forward chain drops outright. A hub only ever answers, so
+            // on a stock router its replies already pass as established — but
+            // non-stock chains are common (force-ipv4 policies, geo-filters,
+            // "IPv6 only from LAN"), and anything sitting above the
+            // established-accept rejects those replies. The failure that causes
+            // is near-undiagnosable from either end: the handshake arrives, the
+            // hub answers, and the answer dies on the way out. The rule only
+            // ever passes traffic leaving our own container, which speaks to
+            // nobody but the clients in its session table.
+            '/ipv6/firewall/filter/add chain=forward action=accept in-interface=' + veth +
+                ' place-before=0 comment=' + prefix + '-v6-out'
+        ];
+        // Only an initiator masquerades. A hub must not: its replies have to
+        // keep the ::2 source that the inbound dst-nat recorded, or conntrack
+        // cannot translate them back to the router's global address.
+        if (outbound) {
+            l.push('/ipv6/firewall/nat/add chain=srcnat action=masquerade src-address=' + net6.net +
+                   ' out-interface-list=WAN comment=' + prefix + '-v6-nat');
+        }
+        return l;
+    }
+
+    // Undo of the above — the uninstall scripts are the only place that knows
+    // these objects exist, so they list them by comment.
+    function containerV6UninstallLines(prefix, indent) {
+        var p = indent || '';
+        return [
+            p + ':do { /ipv6/firewall/nat/remove [find where comment=' + prefix + '-v6-nat] } on-error={}',
+            p + ':do { /ipv6/firewall/nat/remove [find where comment=' + prefix + '-dstnat6] } on-error={}',
+            p + ':do { /ipv6/firewall/filter/remove [find where comment=' + prefix + '-v6-out] } on-error={}',
+            p + ':do { /ipv6/firewall/filter/remove [find where comment=' + prefix + '-awg-in6] } on-error={}',
+            p + ':do { /ipv6/nd/remove [find where interface=veth-' + prefix + '] } on-error={}',
+            p + ':do { /ipv6/nd/prefix/remove [find where interface=veth-' + prefix + '] } on-error={}',
+            p + ':do { /ipv6/address/remove [find where comment=' + prefix + '-v6] } on-error={}'
+        ];
     }
 
     // The WG listen-port used to come out of the same hash (bits 18+), but those
@@ -4021,6 +4135,7 @@
         src.push('  :do { /ip/firewall/filter/remove [find where comment=' + prefix + '-wg-mgmt] } on-error={}');
         src.push('  :do { /ip/firewall/nat/remove [find where comment=' + prefix + '-dstnat] } on-error={}');
         src.push('  :do { /ip/firewall/nat/remove [find where comment=' + prefix + '-ft-nat] } on-error={}');
+        src = src.concat(containerV6UninstallLines(prefix, '  '));
         src.push('  :do { /ip/firewall/filter/remove [find where comment=' + prefix + '-ft-fwd] } on-error={}');
         src.push('  /ip/firewall/nat/remove [find where src-address="' + net.natSrc + '"]');
         src.push('  :do { /ip/firewall/nat/remove [find where out-interface="wg-' + prefix + '"] } on-error={}');
@@ -4123,10 +4238,19 @@
         ls.push(buildServerUninstallSource(prefix, storageServer, net));
         ls.push('');
 
+        // The hub answers on IPv6 when the endpoint clients dial is IPv6. Its
+        // AWG socket then binds [::] with V6ONLY off, so one hub serves both
+        // families: an IPv4 client arrives on the same socket, v4-mapped.
+        var srvNet6 = ipv6Enabled() ? getTunnelNetwork6(prefix) : null;
+
         ls.push('# 2. Network infrastructure');
-        ls.push('/interface/veth/add name=veth-' + prefix + ' address=' + net.vethAddr + ' gateway=' + net.vethGw);
+        ls.push('/interface/veth/add name=veth-' + prefix + ' ' + vethAddrArgs(net, srvNet6));
         ls.push('/ip/address/add address=' + net.hostAddr + ' interface=veth-' + prefix);
         ls.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + net.natSrc);
+        if (srvNet6) {
+            ls.push('# Clients reach this hub over IPv6 - give the container an IPv6 leg.');
+            ls = ls.concat(containerV6Lines(prefix, srvNet6, false));
+        }
         ls.push('');
 
         ls.push('# 3. WireGuard server');
@@ -4141,6 +4265,13 @@
         ls.push('/ip/firewall/filter/add chain=input action=accept protocol=udp src-address=' + vethIP + ' dst-port=' + wgPort + ' place-before=0 comment=' + prefix + '-wg-in');
         ls.push('/ip/firewall/filter/add chain=input action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-wg-mgmt');
         ls.push('/ip/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgPort + ' in-interface-list=WAN to-addresses=' + vethIP + ' to-ports=' + awgPort + ' comment=' + prefix + '-dstnat');
+        if (srvNet6) {
+            // No dst-address here on purpose: an ISP-assigned IPv6 tends to
+            // change, and the rule has to survive that. Port plus WAN is
+            // specific enough.
+            ls.push('/ipv6/firewall/filter/add chain=forward action=accept protocol=udp dst-port=' + awgPort + ' in-interface-list=WAN place-before=0 comment=' + prefix + '-awg-in6');
+            ls.push('/ipv6/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgPort + ' in-interface-list=WAN to-address=' + srvNet6.vethAddrBare + ' to-ports=' + awgPort + ' comment=' + prefix + '-dstnat6');
+        }
         ls.push('# Full-tunnel egress for direct AmneziaWG clients (no-op for site-to-site peers that don\'t route 0.0.0.0/0)');
         ls.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + tunnelCidr + ' out-interface-list=WAN comment=' + prefix + '-ft-nat');
         ls.push('/ip/firewall/filter/add chain=forward action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-ft-fwd');
@@ -4148,7 +4279,8 @@
 
         ls.push('# 5. Container environment variables');
         ls.push('/container/envs/add list=' + prefix + '-env key=AWG_MODE value="server"');
-        ls.push('/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value=":' + awgPort + '"');
+        ls.push('/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value="' +
+                (srvNet6 ? '[::]:' : ':') + awgPort + '"');
         ls.push('/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + net.vethGw + ':' + wgPort + '"');
         ls = ls.concat(s2sObfEnvLines(prefix, awgParams));
         ls.push('/container/envs/add list=' + prefix + '-env key=AWG_SERVER_PUB value="' + serverKey.publicKey + '"');
@@ -4202,9 +4334,14 @@
         // Client-side WG port is purely local (the peer talks to the container over
         // veth), so nothing has to agree on it.
         var clientWgPort = randomWgPort();
-        lc.push('/interface/veth/add name=veth-' + prefix + ' address=' + cnet.vethAddr + ' gateway=' + cnet.vethGw);
+        var cnet6 = ipv6Enabled() ? getTunnelNetwork6(prefix) : null;
+        lc.push('/interface/veth/add name=veth-' + prefix + ' ' + vethAddrArgs(cnet, cnet6));
         lc.push('/ip/address/add address=' + cnet.hostAddr + ' interface=veth-' + prefix);
         lc.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + cnet.natSrc);
+        if (cnet6) {
+            lc.push('# The hub is reached over IPv6 - the container needs a way out over IPv6.');
+            lc = lc.concat(containerV6Lines(prefix, cnet6, true));
+        }
         lc.push('');
 
         lc.push('# 3. WireGuard client');
@@ -4320,10 +4457,15 @@
         var cvethIP = cnet.vethAddr.replace(/\/.*/, '');
         // Local-only port, same reasoning as in buildServerCommands.
         var clientWgPort = randomWgPort();
+        var cnet6 = ipv6Enabled() ? getTunnelNetwork6(prefix) : null;
         lc.push('# 2. Network infrastructure');
-        lc.push('/interface/veth/add name=veth-' + prefix + ' address=' + cnet.vethAddr + ' gateway=' + cnet.vethGw);
+        lc.push('/interface/veth/add name=veth-' + prefix + ' ' + vethAddrArgs(cnet, cnet6));
         lc.push('/ip/address/add address=' + cnet.hostAddr + ' interface=veth-' + prefix);
         lc.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + cnet.natSrc);
+        if (cnet6) {
+            lc.push('# The hub is reached over IPv6 - the container needs a way out over IPv6.');
+            lc = lc.concat(containerV6Lines(prefix, cnet6, true));
+        }
         lc.push('');
 
         lc.push('# 3. WireGuard client');
@@ -4535,10 +4677,15 @@
         la.push('');
 
         // Network
+        var net6 = ipv6Enabled() ? getTunnelNetwork6(prefix) : null;
         la.push('# 2. Network infrastructure');
-        la.push('/interface/veth/add name=veth-' + prefix + ' address=' + net.vethAddr + ' gateway=' + net.vethGw);
+        la.push('/interface/veth/add name=veth-' + prefix + ' ' + vethAddrArgs(net, net6));
         la.push('/ip/address/add address=' + net.hostAddr + ' interface=veth-' + prefix);
         la.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + net.natSrc);
+        if (net6) {
+            la.push('# Side B is reached over IPv6 - the container needs a way out over IPv6.');
+            la = la.concat(containerV6Lines(prefix, net6, true));
+        }
         la.push('');
 
         // WireGuard
@@ -4597,9 +4744,13 @@
 
         // Network
         lb.push('# 2. Network infrastructure');
-        lb.push('/interface/veth/add name=veth-' + prefix + ' address=' + net.vethAddr + ' gateway=' + net.vethGw);
+        lb.push('/interface/veth/add name=veth-' + prefix + ' ' + vethAddrArgs(net, net6));
         lb.push('/ip/address/add address=' + net.hostAddr + ' interface=veth-' + prefix);
         lb.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + net.natSrc);
+        if (net6) {
+            lb.push('# Side A dials this side over IPv6 - give the container an IPv6 leg.');
+            lb = lb.concat(containerV6Lines(prefix, net6, false));
+        }
         lb.push('');
 
         // dst-nat + forward accept for AWG port
@@ -4607,6 +4758,10 @@
         lb.push('/ip/firewall/filter/add chain=forward action=accept protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN place-before=0 comment=' + prefix + '-awg-in');
         lb.push('/ip/firewall/filter/add chain=input action=accept protocol=udp src-address=' + net.vethAddr.replace(/\/.*/, '') + ' dst-port=' + wgPort + ' place-before=0 comment=' + prefix + '-wg-in');
         lb.push('/ip/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN to-addresses=' + net.vethAddr.replace(/\/.*/, '') + ' to-ports=' + awgParams.port + ' comment=' + prefix + '-dstnat');
+        if (net6) {
+            lb.push('/ipv6/firewall/filter/add chain=forward action=accept protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN place-before=0 comment=' + prefix + '-awg-in6');
+            lb.push('/ipv6/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN to-address=' + net6.vethAddrBare + ' to-ports=' + awgParams.port + ' comment=' + prefix + '-dstnat6');
+        }
         lb.push('');
 
         // WireGuard
@@ -4619,7 +4774,7 @@
 
         // Container env
         lb.push('# 5. Container environment variables');
-        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value=":' + awgParams.port + '"');
+        lb.push('/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value="' + (net6 ? '[::]:' : ':') + awgParams.port + '"');
         lb.push('/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + net.vethGw + ':' + wgPort + '"');
         lb.push('/container/envs/add list=' + prefix + '-env key=AWG_MODE value="reverse"');
         lb = lb.concat(s2sObfEnvLines(prefix, awgParams));
@@ -4683,6 +4838,7 @@
         src.push('  :do { /ip/firewall/filter/remove [find where comment=' + prefix + '-wg-mgmt] } on-error={}');
         src.push('  /ip/firewall/nat/remove [find where src-address="' + net.natSrc + '"]');
         src.push('  /ip/address/remove [find where address="' + net.hostAddr + '"]');
+        src = src.concat(containerV6UninstallLines(prefix, '  '));
         src.push('  /interface/veth/remove [find where name="veth-' + prefix + '"]');
         src.push('  /interface/wireguard/peers/remove [find where interface="wg-' + prefix + '"]');
         src.push('  /ip/address/remove [find where interface="wg-' + prefix + '"]');

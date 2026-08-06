@@ -432,6 +432,16 @@ int main(void) {
         if (cfg->he_delay > 5000) cfg->he_delay = 5000;
     }
 
+    /* Learned transport preference. Default is plain Happy Eyeballs: IPv4 is
+     * tried first and IPv6 only takes over when IPv4 stays silent. The first
+     * time that fallback succeeds the proxy records "prefer IPv6" on disk
+     * (AWG_STATE_FILE) so subsequent starts skip the dead-IPv4 head start
+     * outright. The file is written at most once per learn — the router's flash
+     * is small and must not be hammered. */
+    cfg->state_file = "/etc/awg-proxy.state";
+    if ((v = getenv("AWG_STATE_FILE")) && v[0])
+        cfg->state_file = v;
+
     /* Log level */
     cfg->log_level = LOG_INFO;
     v = getenv("AWG_LOG_LEVEL");
