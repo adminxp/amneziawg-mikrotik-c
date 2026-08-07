@@ -412,8 +412,13 @@ int main(void) {
     }
     config_compute_max_s4(cfg);
 
-    /* Timeout */
-    cfg->timeout = 180;
+    /* How long the remote may stay silent while the tunnel is trying to
+     * handshake before the run reconnects. Was 180 s back when the watchdog
+     * acted on plain silence and a quiet-but-healthy tunnel could trip it; it
+     * now waits for an unanswered handshake init, which a working tunnel never
+     * produces, so the wait can be short without risking a needless reconnect
+     * — and a real outage is noticed three times sooner. */
+    cfg->timeout = 60;
     if ((v = getenv("AWG_TIMEOUT")) && v[0])
         cfg->timeout = parse_int_str(v);
 

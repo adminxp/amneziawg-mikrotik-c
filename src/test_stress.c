@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sys/socket.h>
@@ -184,10 +185,56 @@ static long get_rss_kb(pid_t pid) {
 /* listen_str and remote_str are passed to AWG_LISTEN / AWG_REMOTE verbatim, so
  * IPv6 scenarios can hand in "[::]:port", "[::1]:port" or a dual-stack name.
  * he_delay may be NULL to keep the default. */
+/* The learned-family file is process-global state that outlives a scenario. Left
+ * at its default every proxy start in the suite would read whatever the previous
+ * scenario taught it, so "start on IPv4" would silently become "start on
+ * whatever ran before". Each start gets its own empty file unless a scenario
+ * pins one on purpose, which is how the multi-start cases keep continuity. */
+static char g_state_file[96];
+static int  g_state_pinned;
+
+static void state_file_fresh(void) {
+    static int seq;
+    snprintf(g_state_file, sizeof(g_state_file), "/tmp/awg-state-%d-%d",
+             (int)getpid(), seq++);
+    unlink(g_state_file);
+}
+
+static void state_file_pin(void) {
+    state_file_fresh();
+    g_state_pinned = 1;
+}
+
+static void state_file_unpin(void) {
+    g_state_pinned = 0;
+}
+
+/* Reads back what the run recorded: '6', '4', or 0 when nothing was written. */
+static int state_file_read(void) {
+    int fd = open(g_state_file, O_RDONLY);
+    if (fd < 0) return 0;
+    char c = 0;
+    ssize_t n = read(fd, &c, 1);
+    close(fd);
+    return n == 1 ? c : 0;
+}
+
+/* Optional stderr capture — set to a path to keep the proxy's own log. */
+static const char *g_proxy_log;
+static const char *g_log_level = "error";
+/* Silence watchdog period. Scenarios that need a reconnect on demand shorten it
+ * so the outage path runs in seconds rather than the production three minutes. */
+static const char *g_timeout = "30";
+/* How often the run re-checks that its remote is still in the name's records.
+ * Scenarios that move an address shorten it so the follow-up takes seconds. */
+static const char *g_dns_refresh;
+
 static pid_t start_proxy_listen_remote(const char *mode, const char *listen_str,
                                        const char *remote_str, const char *he_delay) {
     /* Find a free port for proxy's source to avoid auto_src_port reconnect race */
     int src_port = find_free_port();
+
+    if (!g_state_pinned) state_file_fresh();
 
     pid_t pid = fork();
     if (pid < 0) return -1;
@@ -212,10 +259,18 @@ static pid_t start_proxy_listen_remote(const char *mode, const char *listen_str,
         setenv("AWG_H4", utoa_buf(TEST_H4, h4), 1);
         setenv("AWG_SERVER_PUB", DUMMY_SERVER_PUB, 1);
         setenv("AWG_CLIENT_PUB", DUMMY_CLIENT_PUB, 1);
-        setenv("AWG_LOG_LEVEL", "error", 1);
-        setenv("AWG_TIMEOUT", "30", 1);
+        setenv("AWG_LOG_LEVEL", g_log_level, 1);
+        setenv("AWG_TIMEOUT", g_timeout, 1);
         setenv("AWG_NO_GRO", "1", 1);
         setenv("AWG_SRC_PORT", itoa_buf(src_port, sp), 1);
+        setenv("AWG_STATE_FILE", g_state_file, 1);
+        if (g_dns_refresh) setenv("AWG_DNS_REFRESH", g_dns_refresh, 1);
+        else               unsetenv("AWG_DNS_REFRESH");
+
+        if (g_proxy_log) {
+            int lf = open(g_proxy_log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (lf >= 0) { dup2(lf, 2); close(lf); }
+        }
 
         execl(PROXY_BINARY, "awg-proxy", NULL);
         _exit(127);
@@ -1740,7 +1795,757 @@ static void test_happy_eyeballs(void) {
     close(v4_blackhole);
 }
 
-/* ---- Scenario 14: dual-stack hub — AWG_LISTEN on [::] serves both families ----
+/* ---- Scenario 14: Happy Eyeballs — a server that is merely down must not
+ *      cost the tunnel its family ----
+ *
+ * Replays the outage this test was written for: the hub was restarted while the
+ * client was reconnecting, so both families went quiet at once. Silence from
+ * both proves nothing about either path, yet the probe used to hand the run to
+ * the alternate socket on its deadline and record that as the new dial order.
+ * When the hub came back seconds later the client was pinned to a family that
+ * never worked on that route, and it stayed pinned across reconnects.
+ *
+ * Both sockets are bound black holes, so the probe has to reach its 15 s
+ * deadline. Everything after it must still leave on the primary, and the tunnel
+ * must come up the moment the primary starts answering. */
+static void test_he_both_silent_keeps_primary(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0);
+    ASSERT(remote_port > 0);
+
+    int v6_fd = make_udp_socket6(remote_port);
+    if (v6_fd < 0) {
+        fprintf(stderr, "          (no IPv6 loopback on this host, skipped)\n");
+        return;
+    }
+    /* Bound, never answering — a black hole rather than an ICMP reject, so the
+     * probe times out instead of taking the POLLERR shortcut. */
+    int v4_fd = make_udp_socket(remote_port);
+    ASSERT(v4_fd >= 0);
+
+    char rbuf_env[64];
+    snprintf(rbuf_env, sizeof(rbuf_env), "localhost:%d", remote_port);
+    pid_t proxy = start_proxy_remote("normal", listen_port, rbuf_env, "200");
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    /* With no state file the dial order is IPv4 first, IPv6 as the alternate. */
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, 0x7200);
+    sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+           (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+
+    /* The probe must actually be running, or the rest proves nothing. */
+    struct sockaddr_storage from;
+    socklen_t fromlen = sizeof(from);
+    ASSERT(await_awg_init(v6_fd, &from, &fromlen, TEST_JC + 5, 2000));
+    ASSERT_EQ(from.ss_family, AF_INET6);
+
+    /* Sit out the whole deadline with both families mute. */
+    fprintf(stderr, "          (waiting out the 15s probe deadline...)\n");
+    sleep(17);
+    drain_socket(v4_fd);
+    drain_socket(v6_fd);
+
+    /* The primary is the only thing the proxy learned nothing against, so it
+     * must still be carrying the traffic. */
+    uint8_t transport[200];
+    for (int i = 0; i < 50; i++) {
+        make_wg_transport(transport, 0x7201, (uint64_t)i, 200);
+        sendto(client_fd, transport, 200, 0,
+               (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+    }
+    usleep(400000);
+
+    /* Transport is what the tunnel carries; the probe's replayed handshake
+     * init is a different size and keeps arriving on the alt on purpose, so
+     * the two have to be counted apart. */
+    int on_v4 = 0, v6_transport = 0, v6_probe = 0;
+    uint8_t buf[2048];
+    struct sockaddr_storage v4_peer;
+    socklen_t v4_peerlen = sizeof(v4_peer);
+    ssize_t n;
+    while ((n = recvfrom(v4_fd, buf, sizeof(buf), MSG_DONTWAIT,
+                         (struct sockaddr *)&v4_peer, &v4_peerlen)) > 0) on_v4++;
+    while ((n = recvfrom(v6_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL)) > 0) {
+        if (n == 200) v6_transport++;
+        else          v6_probe++;
+    }
+    fprintf(stderr, "          (after deadline: v4=%d, v6 transport=%d, v6 probe=%d)\n",
+            on_v4, v6_transport, v6_probe);
+    ASSERT(on_v4 >= 50 * 99 / 100);
+    /* Not one byte of the tunnel may have moved to the family that never
+     * answered — that is the whole point. */
+    ASSERT_EQ(v6_transport, 0);
+
+    /* The server comes back on the family the client never left. */
+    uint8_t awg[200];
+    make_awg_transport(awg, 0x7201, 4243, 200);
+    ASSERT(sendto(v4_fd, awg, sizeof(awg), 0,
+                  (struct sockaddr *)&v4_peer, v4_peerlen) > 0);
+
+    int got_wg = 0;
+    for (int i = 0; i < 10 && !got_wg; i++) {
+        int r = recv_one(client_fd, buf, sizeof(buf), 1000);
+        if (r != 200) continue;
+        uint32_t t;
+        memcpy(&t, buf, 4);
+        if (t != WG_TRANSPORT_DATA) continue;
+        uint64_t ctr;
+        memcpy(&ctr, buf + 8, 8);
+        ASSERT_EQ(ctr, 4243u);
+        got_wg = 1;
+    }
+    ASSERT(got_wg);
+
+    stop_proxy(proxy);
+    close(client_fd);
+    close(v6_fd);
+    close(v4_fd);
+}
+
+/* Keep the client handshaking until the one open family sees the init, then
+ * answer on it. The retries matter as much as the answer: an unanswered init is
+ * exactly what tells the silence watchdog the path is gone, and the watchdog is
+ * what reconnects the proxy so the probe gets to run again. Returns 1 if the
+ * survivor was IPv6, 0 for IPv4, -1 if it never saw anything. */
+static int handshake_on_surviving_family(int client_fd, struct sockaddr_in *proxy_addr,
+                                         int live_fd, uint32_t idx, int live_is_v6,
+                                         int max_attempts) {
+    if (live_fd >= 0) drain_socket(live_fd);
+
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, idx);
+    for (int attempt = 0; attempt < max_attempts; attempt++) {
+        sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+               (struct sockaddr *)proxy_addr, sizeof(*proxy_addr));
+
+        struct sockaddr_storage from;
+        socklen_t fromlen = sizeof(from);
+        if (!await_awg_init(live_fd, &from, &fromlen, TEST_JC + 5, 700)) continue;
+
+        uint8_t awg[200];
+        make_awg_transport(awg, idx, 1, 200);
+        sendto(live_fd, awg, sizeof(awg), 0, (struct sockaddr *)&from, fromlen);
+        usleep(400000);
+        return live_is_v6;
+    }
+    return -1;
+}
+
+/* Push transport traffic and report where it went. */
+static void measure_family_split(int client_fd, struct sockaddr_in *proxy_addr,
+                                 uint32_t idx, int v4_fd, int v6_fd,
+                                 int *on_v4, int *on_v6) {
+    uint8_t transport[200];
+    for (int i = 0; i < 30; i++) {
+        make_wg_transport(transport, idx, (uint64_t)i, 200);
+        sendto(client_fd, transport, 200, 0,
+               (struct sockaddr *)proxy_addr, sizeof(*proxy_addr));
+    }
+    usleep(400000);
+
+    uint8_t buf[2048];
+    *on_v4 = *on_v6 = 0;
+    if (v4_fd >= 0)
+        while (recvfrom(v4_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL) > 0) (*on_v4)++;
+    if (v6_fd >= 0)
+        while (recvfrom(v6_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL) > 0) (*on_v6)++;
+}
+
+/* ---- Scenario 15: after a silent spell, the family that wakes up first wins ----
+ *
+ * The companion to the scenario above. Keeping the primary when neither family
+ * answers is right, but the run must not go deaf while it waits: whichever
+ * address comes back has to be picked up within seconds, not at the next
+ * reconnect. Measured on the live pair, giving up outright cost the best part
+ * of a minute after the path returned.
+ *
+ * Both families are black holes past the probe window, then IPv6 starts
+ * answering. The run has to move there on its own. */
+static void test_he_late_answer_wins(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0 && remote_port > 0);
+
+    int v6_fd = make_udp_socket6(remote_port);
+    if (v6_fd < 0) {
+        fprintf(stderr, "          (no IPv6 loopback on this host, skipped)\n");
+        return;
+    }
+    int v4_fd = make_udp_socket(remote_port);
+    ASSERT(v4_fd >= 0);
+
+    char rbuf[64];
+    snprintf(rbuf, sizeof(rbuf), "localhost:%d", remote_port);
+    pid_t proxy = start_proxy_remote("normal", listen_port, rbuf, "200");
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, 0x7300);
+    sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+           (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+
+    struct sockaddr_storage from;
+    socklen_t fromlen = sizeof(from);
+    ASSERT(await_awg_init(v6_fd, &from, &fromlen, TEST_JC + 5, 2000));
+
+    /* Outlast the window with both mute, so the probe has already decided to
+     * keep the primary. */
+    fprintf(stderr, "          (waiting out the 15s window with both silent...)\n");
+    sleep(18);
+    drain_socket(v4_fd);
+
+    /* Now IPv6 wakes up. Answer the next replay that arrives. */
+    int answered_at = -1;
+    for (int i = 0; i < 12 && answered_at < 0; i++) {
+        make_wg_init(init_buf, 0x7300);
+        sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+               (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+        fromlen = sizeof(from);
+        if (await_awg_init(v6_fd, &from, &fromlen, TEST_JC + 5, 1000)) {
+            uint8_t awg[200];
+            make_awg_transport(awg, 0x7301, 1, 200);
+            sendto(v6_fd, awg, sizeof(awg), 0, (struct sockaddr *)&from, fromlen);
+            answered_at = i;
+        }
+    }
+    fprintf(stderr, "          (IPv6 answered a replay on attempt %d)\n", answered_at);
+    ASSERT(answered_at >= 0);          /* the probe must still have been sounding it */
+    usleep(600000);
+    drain_socket(v4_fd);
+    drain_socket(v6_fd);
+
+    /* Everything from here must leave over IPv6 — the family that answered. */
+    uint8_t transport[200];
+    for (int i = 0; i < 40; i++) {
+        make_wg_transport(transport, 0x7301, (uint64_t)i, 200);
+        sendto(client_fd, transport, 200, 0,
+               (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+    }
+    usleep(500000);
+
+    int v4_transport = 0, v6_transport = 0;
+    uint8_t buf[2048];
+    ssize_t n;
+    while ((n = recvfrom(v4_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL)) > 0)
+        if (n == 200) v4_transport++;
+    while ((n = recvfrom(v6_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL)) > 0)
+        if (n == 200) v6_transport++;
+    fprintf(stderr, "          (after the late answer: v4=%d, v6=%d)\n",
+            v4_transport, v6_transport);
+    ASSERT(v6_transport >= 40 * 90 / 100);
+    ASSERT_EQ(v4_transport, 0);
+
+    stop_proxy(proxy);
+    close(client_fd);
+    close(v4_fd);
+    close(v6_fd);
+}
+
+/* ---- Scenario 16: the family only ever changes when a family answers ----
+ *
+ * Walks the whole matrix in one process: start on IPv4, switch to IPv6, back to
+ * IPv4, and out to IPv6 again. Between rounds the family in use is taken away
+ * and left down, so the client handshakes into silence and the watchdog has to
+ * notice and reconnect — the same sequence a real outage produces, and the only
+ * thing that lets the probe run a second time.
+ *
+ * The last assertion is the flash one: the router's storage is weak and the
+ * learned family is documented as at most one write per run, so four verdicts
+ * must still leave exactly one byte on disk. */
+static void test_he_family_switch_matrix(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0);
+    ASSERT(remote_port > 0);
+
+    int probe6 = make_udp_socket6(remote_port);
+    if (probe6 < 0) {
+        fprintf(stderr, "          (no IPv6 loopback on this host, skipped)\n");
+        return;
+    }
+    close(probe6);
+
+    /* One state file for the whole scenario: the point is what a single run
+     * accumulates across reconnects. */
+    state_file_pin();
+    g_timeout = "5";   /* the outage path in seconds, not three minutes */
+
+    int v4_fd = make_udp_socket(remote_port);
+    int v6_fd = make_udp_socket6(remote_port);
+    ASSERT(v4_fd >= 0 && v6_fd >= 0);
+
+    char rbuf_env[64];
+    snprintf(rbuf_env, sizeof(rbuf_env), "localhost:%d", remote_port);
+    pid_t proxy = start_proxy_remote("normal", listen_port, rbuf_env, "200");
+    g_timeout = "30";
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+    int on_v4, on_v6;
+
+    /* Round 1 — nothing learned yet, so IPv4 leads and IPv4 answers. */
+    ASSERT_EQ(handshake_on_surviving_family(client_fd, &proxy_addr, v4_fd,
+                                            0x8100, 0, 12), 0);
+    measure_family_split(client_fd, &proxy_addr, 0x8100, v4_fd, v6_fd, &on_v4, &on_v6);
+    fprintf(stderr, "          (round 1, start on IPv4: v4=%d v6=%d)\n", on_v4, on_v6);
+    ASSERT(on_v4 >= 25);
+    ASSERT_EQ(on_v6, 0);
+    /* Staying where it started is not a change, so nothing is written. */
+    ASSERT_EQ(state_file_read(), 0);
+
+    /* Round 2 — IPv4 goes away for good; only IPv6 can answer. */
+    close(v4_fd);
+    v4_fd = -1;
+    ASSERT_EQ(handshake_on_surviving_family(client_fd, &proxy_addr, v6_fd,
+                                            0x8200, 1, 30), 1);
+    measure_family_split(client_fd, &proxy_addr, 0x8200, v4_fd, v6_fd, &on_v4, &on_v6);
+    fprintf(stderr, "          (round 2, switched to IPv6: v6=%d)\n", on_v6);
+    ASSERT(on_v6 >= 25);
+    ASSERT_EQ(state_file_read(), '6');
+
+    /* Round 3 — IPv6 goes away, IPv4 comes back: switch back. */
+    v4_fd = make_udp_socket(remote_port);
+    ASSERT(v4_fd >= 0);
+    close(v6_fd);
+    v6_fd = -1;
+    ASSERT_EQ(handshake_on_surviving_family(client_fd, &proxy_addr, v4_fd,
+                                            0x8300, 0, 30), 0);
+    measure_family_split(client_fd, &proxy_addr, 0x8300, v4_fd, v6_fd, &on_v4, &on_v6);
+    fprintf(stderr, "          (round 3, back to IPv4: v4=%d)\n", on_v4);
+    ASSERT(on_v4 >= 25);
+
+    /* Round 4 — and out to IPv6 once more. */
+    v6_fd = make_udp_socket6(remote_port);
+    ASSERT(v6_fd >= 0);
+    close(v4_fd);
+    v4_fd = -1;
+    ASSERT_EQ(handshake_on_surviving_family(client_fd, &proxy_addr, v6_fd,
+                                            0x8400, 1, 30), 1);
+    measure_family_split(client_fd, &proxy_addr, 0x8400, v4_fd, v6_fd, &on_v4, &on_v6);
+    fprintf(stderr, "          (round 4, switched to IPv6: v6=%d)\n", on_v6);
+    ASSERT(on_v6 >= 25);
+
+    /* Four verdicts, one byte. The in-memory preference followed every one of
+     * them; the flash copy was written once and never again. */
+    ASSERT_EQ(state_file_read(), '6');
+
+    stop_proxy(proxy);
+    close(client_fd);
+    if (v4_fd >= 0) close(v4_fd);
+    if (v6_fd >= 0) close(v6_fd);
+    state_file_unpin();
+}
+
+/* ---- Scenario 16: a learned IPv6 preference leads the next run's dial ----
+ *
+ * The flash byte exists so a site whose IPv4 is dead stops paying the probe
+ * delay on every restart. Seed it, restart, and the very first packet must go
+ * out over IPv6 with the IPv4 socket never touched. */
+static void test_he_learned_preference_leads(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0);
+    ASSERT(remote_port > 0);
+
+    int v6_fd = make_udp_socket6(remote_port);
+    if (v6_fd < 0) {
+        fprintf(stderr, "          (no IPv6 loopback on this host, skipped)\n");
+        return;
+    }
+    int v4_fd = make_udp_socket(remote_port);
+    ASSERT(v4_fd >= 0);
+
+    state_file_pin();
+    int sf = open(g_state_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ASSERT(sf >= 0);
+    ASSERT_EQ(write(sf, "6", 1), 1);
+    close(sf);
+
+    char rbuf_env[64];
+    snprintf(rbuf_env, sizeof(rbuf_env), "localhost:%d", remote_port);
+    /* A long head start: if the dial order were still IPv4-first the IPv4
+     * socket would carry the init outright, and the IPv6 replay would not be
+     * due for two seconds. */
+    pid_t proxy = start_proxy_remote("normal", listen_port, rbuf_env, "2000");
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, 0x8500);
+    sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+           (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+
+    struct sockaddr_storage from;
+    socklen_t fromlen = sizeof(from);
+    ASSERT(await_awg_init(v6_fd, &from, &fromlen, TEST_JC + 5, 1500));
+    ASSERT_EQ(from.ss_family, AF_INET6);
+
+    int on_v4 = 0;
+    uint8_t buf[2048];
+    while (recvfrom(v4_fd, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL) > 0) on_v4++;
+    fprintf(stderr, "          (IPv6 led the dial, v4 saw %d)\n", on_v4);
+    ASSERT_EQ(on_v4, 0);
+
+    stop_proxy(proxy);
+    close(client_fd);
+    close(v4_fd);
+    close(v6_fd);
+    state_file_unpin();
+}
+
+/* ---- Scenario 17: every (re)connect resolves the name again ----
+ *
+ * A remote given as a hostname may move — that is the whole reason the DNS
+ * re-resolve exists — so no reconnect may reuse the address the previous one
+ * happened to get. Checked against the proxy's own log: each "reconnecting to"
+ * has to be followed by a fresh "resolving". */
+static void test_dns_resolve_before_each_connect(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0);
+    ASSERT(remote_port > 0);
+
+    char logpath[96];
+    snprintf(logpath, sizeof(logpath), "/tmp/awg-log-%d", (int)getpid());
+    unlink(logpath);
+
+    int server_fd = make_udp_socket(remote_port);
+    ASSERT(server_fd >= 0);
+
+    char rbuf_env[64];
+    snprintf(rbuf_env, sizeof(rbuf_env), "localhost:%d", remote_port);
+    g_proxy_log = logpath;
+    g_log_level = "info";
+    g_timeout = "5";
+    pid_t proxy = start_proxy_remote("normal", listen_port, rbuf_env, "200");
+    g_proxy_log = NULL;
+    g_log_level = "error";
+    g_timeout = "30";
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    /* Take the server away and keep the client handshaking into the silence.
+     * Unanswered inits are what the watchdog acts on, so this produces real
+     * reconnects — and every one of them has to resolve the name again. */
+    close(server_fd);
+    server_fd = -1;
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, 0x8600);
+    for (int i = 0; i < 60; i++) {
+        sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+               (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+        usleep(400000);
+    }
+
+    stop_proxy(proxy);
+
+    char *log = NULL;
+    long len = 0;
+    {
+        FILE *f = fopen(logpath, "rb");
+        ASSERT(f != NULL);
+        fseek(f, 0, SEEK_END);
+        len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        log = malloc((size_t)len + 1);
+        ASSERT(log != NULL);
+        ASSERT_EQ((long)fread(log, 1, (size_t)len, f), len);
+        log[len] = 0;
+        fclose(f);
+    }
+
+    int resolves = 0, reconnects = 0;
+    for (const char *s = log; (s = strstr(s, "resolving ")) != NULL; s += 10) resolves++;
+    for (const char *s = log; (s = strstr(s, "reconnecting to ")) != NULL; s += 16) reconnects++;
+    fprintf(stderr, "          (reconnects=%d, resolves=%d)\n", reconnects, resolves);
+
+    /* The reconnects have to have happened, or this proves nothing. */
+    ASSERT(reconnects >= 2);
+    /* One resolve for the initial dial plus one per reconnect, at least. */
+    ASSERT(resolves >= reconnects + 1);
+
+    /* And the order matters: a reconnect that reused a cached address would
+     * show up as two "reconnecting to" lines with no "resolving" between. */
+    {
+        const char *s = log;
+        for (int i = 0; i < reconnects; i++) {
+            const char *rc = strstr(s, "reconnecting to ");
+            ASSERT(rc != NULL);
+            const char *next_rc = strstr(rc + 16, "reconnecting to ");
+            const char *rs = strstr(rc + 16, "resolving ");
+            ASSERT(rs != NULL);
+            ASSERT(next_rc == NULL || rs < next_rc);
+            s = rc + 16;
+        }
+    }
+
+    free(log);
+    close(client_fd);
+    if (server_fd >= 0) close(server_fd);
+    unlink(logpath);
+}
+
+/* ---- Scenario 18: a silent remote that sends no ICMP still gets noticed ----
+ *
+ * The reconnects everything else relies on come from ICMP port-unreachable,
+ * which only happens when the far port is closed. A path that swallows packets
+ * — a filtered route, a server whose host is up but whose process is gone, the
+ * IPv4 leg of the site this was found on — produces nothing at all, and then the
+ * silence watchdog is the only thing left.
+ *
+ * It used to be unable to fire. The two counters each zeroed the other's
+ * condition, so the threshold could only be reached by a client that put a
+ * packet in every single five-second tick; one quieter than that — a WireGuard
+ * keepalive every 25 s, a handshake retry that drifts across a tick boundary —
+ * reset the count over and over and a wedged tunnel stayed wedged for as long
+ * as it was left alone.
+ *
+ * So the timing here is deliberate: the timeout is three ticks and the client
+ * speaks once every twelve seconds, which lands in every other tick at best.
+ * The old pair of counters never gets past one; the single counter counts the
+ * remote's silence, which is the thing actually being measured. Both remotes
+ * are bound and mute, so no ICMP can do the job instead, and the reconnect must
+ * also drop the family the run had learned. */
+static void test_watchdog_reconnects_without_icmp(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0);
+    ASSERT(remote_port > 0);
+
+    int v6_fd = make_udp_socket6(remote_port);
+    if (v6_fd < 0) {
+        fprintf(stderr, "          (no IPv6 loopback on this host, skipped)\n");
+        return;
+    }
+    /* Bound, listening, and never answering: no ICMP will ever come back. */
+    int v4_fd = make_udp_socket(remote_port);
+    ASSERT(v4_fd >= 0);
+
+    char logpath[96];
+    snprintf(logpath, sizeof(logpath), "/tmp/awg-wd-%d", (int)getpid());
+    unlink(logpath);
+
+    /* Seed a learned IPv6 preference so the reset has something to undo. */
+    state_file_pin();
+    int sf = open(g_state_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ASSERT(sf >= 0);
+    ASSERT_EQ(write(sf, "6", 1), 1);
+    close(sf);
+
+    char rbuf_env[64];
+    snprintf(rbuf_env, sizeof(rbuf_env), "localhost:%d", remote_port);
+    g_proxy_log = logpath;
+    g_log_level = "info";
+    g_timeout = "15";   /* three five-second ticks */
+    pid_t proxy = start_proxy_remote("normal", listen_port, rbuf_env, "200");
+    g_proxy_log = NULL;
+    g_log_level = "error";
+    g_timeout = "30";
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    /* Handshake into the void, slowly. Keepalive-only traffic would be a
+     * legitimately quiet tunnel; repeated inits are the tunnel saying it cannot
+     * come up. Twelve seconds apart is the point — sparse enough that a counter
+     * needing consecutive busy ticks can never accumulate. */
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, 0x8700);
+    for (int i = 0; i < 5; i++) {
+        sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+               (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+        for (int j = 0; j < 24; j++) {
+            usleep(500000);
+            drain_socket(v4_fd);
+            drain_socket(v6_fd);
+        }
+    }
+
+    stop_proxy(proxy);
+
+    char *log = NULL;
+    {
+        FILE *f = fopen(logpath, "rb");
+        ASSERT(f != NULL);
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        log = malloc((size_t)len + 1);
+        ASSERT(log != NULL);
+        ASSERT_EQ((long)fread(log, 1, (size_t)len, f), len);
+        log[len] = 0;
+        fclose(f);
+    }
+
+    int reconnects = 0, resets = 0;
+    for (const char *s = log; (s = strstr(s, "reconnecting to ")) != NULL; s += 16)
+        reconnects++;
+    for (const char *s = log; (s = strstr(s, "trying IPv4 and IPv6 afresh")) != NULL; s += 26)
+        resets++;
+    fprintf(stderr, "          (no ICMP anywhere: reconnects=%d, family resets=%d)\n",
+            reconnects, resets);
+
+    /* No ICMP was possible, so the watchdog is the only thing that could have
+     * produced either line. */
+    ASSERT(reconnects >= 1);
+    ASSERT(resets >= 1);
+
+    free(log);
+    close(client_fd);
+    close(v4_fd);
+    close(v6_fd);
+    unlink(logpath);
+    state_file_unpin();
+}
+
+/* ---- Scenario 19: the remote moves — the run has to follow it ----
+ *
+ * A hostname remote is not a fixed address: a hub on a dynamic lease, or one
+ * behind a DDNS name, moves and leaves the old address answering nobody. The
+ * run re-checks its own address against the name's records and reconnects when
+ * it is no longer there, which is the only thing that gets it to the new one.
+ *
+ * /etc/hosts is what the resolver reads first, so rewriting it moves the name
+ * exactly the way a DDNS update would, with no DNS server to stand up. Both
+ * addresses are loopback, so "moving" is just binding the second one. */
+static void test_remote_address_moves(void) {
+    /* Needs to rewrite /etc/hosts — fine as root in the test container. */
+    FILE *probe = fopen("/etc/hosts", "a");
+    if (!probe) {
+        fprintf(stderr, "          (/etc/hosts not writable, skipped)\n");
+        return;
+    }
+    fclose(probe);
+
+    /* Keep the original so the box is left as it was found. */
+    char *orig = NULL;
+    long orig_len = 0;
+    {
+        FILE *f = fopen("/etc/hosts", "rb");
+        ASSERT(f != NULL);
+        fseek(f, 0, SEEK_END); orig_len = ftell(f); fseek(f, 0, SEEK_SET);
+        orig = malloc((size_t)orig_len + 1);
+        ASSERT(orig != NULL);
+        ASSERT_EQ((long)fread(orig, 1, (size_t)orig_len, f), orig_len);
+        orig[orig_len] = 0;
+        fclose(f);
+    }
+
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0 && remote_port > 0);
+
+    /* Two "hosts": 127.0.0.1 now, 127.0.0.2 after the move. */
+    struct sockaddr_in a1 = make_addr(remote_port);
+    struct sockaddr_in a2 = make_addr(remote_port);
+    a2.sin_addr.s_addr = inet_addr("127.0.0.2");
+
+    int fd1 = socket(AF_INET, SOCK_DGRAM, 0);
+    int fd2 = socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT(fd1 >= 0 && fd2 >= 0);
+    int one = 1;
+    setsockopt(fd1, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(fd2, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    ASSERT_EQ(bind(fd1, (struct sockaddr *)&a1, sizeof(a1)), 0);
+    ASSERT_EQ(bind(fd2, (struct sockaddr *)&a2, sizeof(a2)), 0);
+
+    int rc = 0;
+    {   /* Point the name at the first address. */
+        FILE *f = fopen("/etc/hosts", "w");
+        ASSERT(f != NULL);
+        fprintf(f, "%s\n127.0.0.1 awghub.test\n", orig);
+        fclose(f);
+    }
+
+    char rbuf[64];
+    snprintf(rbuf, sizeof(rbuf), "awghub.test:%d", remote_port);
+    g_dns_refresh = "5";          /* re-check every tick instead of every minute */
+    pid_t proxy = start_proxy_remote("normal", listen_port, rbuf, NULL);
+    g_dns_refresh = NULL;
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    /* Establish on the first address. */
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, 0x8800);
+    struct sockaddr_storage from;
+    socklen_t fromlen = sizeof(from);
+    int seen = 0;
+    for (int i = 0; i < 8 && !seen; i++) {
+        sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+               (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+        seen = await_awg_init(fd1, &from, &fromlen, TEST_JC + 5, 700);
+    }
+    if (!seen) { rc = 1; goto done; }
+    {
+        uint8_t awg[200];
+        make_awg_transport(awg, 0x8800, 1, 200);
+        sendto(fd1, awg, sizeof(awg), 0, (struct sockaddr *)&from, fromlen);
+    }
+    usleep(300000);
+    drain_socket(fd1);
+    drain_socket(fd2);
+
+    /* The hub moves. Nothing else changes — same name, same port. */
+    {
+        FILE *f = fopen("/etc/hosts", "w");
+        ASSERT(f != NULL);
+        fprintf(f, "%s\n127.0.0.2 awghub.test\n", orig);
+        fclose(f);
+    }
+    fprintf(stderr, "          (remote moved to 127.0.0.2, waiting for the run to follow)\n");
+
+    /* Keep handshaking at the name; the run must end up at the new address. */
+    int landed = 0;
+    for (int i = 0; i < 40 && !landed; i++) {
+        make_wg_init(init_buf, 0x8801);
+        sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+               (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+        usleep(500000);
+        uint8_t buf[2048];
+        while (recvfrom(fd2, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL) > 0) landed++;
+        drain_socket(fd1);
+    }
+    fprintf(stderr, "          (packets at the new address: %d)\n", landed);
+    if (!landed) rc = 2;
+
+done:
+    stop_proxy(proxy);
+    close(client_fd);
+    close(fd1);
+    close(fd2);
+    {   /* Put /etc/hosts back exactly as it was. */
+        FILE *f = fopen("/etc/hosts", "w");
+        if (f) { fwrite(orig, 1, (size_t)orig_len, f); fclose(f); }
+    }
+    free(orig);
+    ASSERT_EQ(rc, 0);
+}
+
+/* ---- Scenario 20: dual-stack hub — AWG_LISTEN on [::] serves both families ----
  *
  * This is the server-mode leg the MikroTik hub needs: the AWG side faces the
  * internet over IPv6 while the WireGuard side stays on the router's veth over
@@ -1865,6 +2670,13 @@ int main(void) {
     RUN_TEST(v3_header_protection);
     RUN_TEST(ipv6_remote);
     RUN_TEST(happy_eyeballs);
+    RUN_TEST(he_both_silent_keeps_primary);
+    RUN_TEST(he_late_answer_wins);
+    RUN_TEST(he_family_switch_matrix);
+    RUN_TEST(he_learned_preference_leads);
+    RUN_TEST(dns_resolve_before_each_connect);
+    RUN_TEST(watchdog_reconnects_without_icmp);
+    RUN_TEST(remote_address_moves);
     RUN_TEST(server_listen6);
     TEST_MAIN_END();
 }

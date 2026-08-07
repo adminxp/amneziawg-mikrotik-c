@@ -300,8 +300,9 @@ static void log_socket_buffers(int fd, const awg_config_t *cfg, const char *labe
  * IPv6 header pushes a full-size WireGuard packet past 1500 at the MTU that is
  * safe over IPv4. The proxy cannot fix this — the MTU belongs to the router's
  * wireguard interface — so it just states the ceiling. */
-static void log_ipv6_mtu_hint(const proxy_t *p, const char *why) {
+static void log_ipv6_mtu_hint(proxy_t *p, const char *why) {
     if (g_log_level < LOG_ERROR) return;
+    if (atomic_exchange_explicit(&p->fe_mtu_hint, 1, memory_order_relaxed)) return;
     char mb[12];
     const char *parts[] = { why, ": set the WireGuard interface MTU to ",
         u32_to_str(mb, (uint32_t)awg_max_wg_mtu(p->cfg->max_s4, 1)),
@@ -435,6 +436,16 @@ static int dial_remote(proxy_t *p, int blocking) {
     if (resolve_addr(p->remote_host, p->remote_port, &v4, &v6) < 0)
         return -1;
 
+    /* A long outage invalidates whatever an earlier probe concluded: the family
+     * that used to answer may be exactly the one that died. The watchdog only
+     * raises the flag; consuming it here keeps prefer6 written by the s2c thread
+     * alone. Back to the neutral order, and let the probe decide again — the
+     * flash copy is left alone, it is written at most once per run. */
+    if (atomic_exchange_explicit(&p->he_reset, 0, memory_order_relaxed)) {
+        p->prefer6 = 0;
+        log_info("connection lost for too long: trying IPv4 and IPv6 afresh");
+    }
+
     const awg_addr_t *primary, *alt;
     if (p->prefer6 && v6.len) {
         primary = &v6;
@@ -477,11 +488,14 @@ static int dial_remote(proxy_t *p, int blocking) {
 
 /* ---- Happy Eyeballs (RFC 8305), adapted to UDP ---- */
 
-/* Upper bound on one probe. Three WireGuard handshake retries (5 s apart) fit
- * inside it, so a family that can answer at all has had several chances before
- * the probe stops waiting and hands the run to the other socket. Without a
- * bound the probe blocks the s2c thread until the silence watchdog fires. */
+/* One probe window. Three WireGuard handshake retries (5 s apart) fit inside
+ * it, so a family that can answer at all has had several chances before the
+ * window closes. Closing it does not end the probe when both stayed silent —
+ * it only slows the replay down (see he_probe). */
 #define HE_PROBE_MAX_MS 15000u
+/* Ceiling for that slow-down. A path that answers nothing then costs one
+ * datagram every few seconds, the same order as WireGuard's own retry. */
+#define HE_PROBE_SLOW_MS 5000
 
 static uint64_t mono_ms(void) {
     struct timespec ts;
@@ -564,30 +578,55 @@ static void he_probe(proxy_t *p) {
      * stopped answering until the 180 s silence watchdog forced a reconnect —
      * which dialled the same dead primary first and repeated the cycle. Keep
      * re-sending every he_delay, and give the whole probe a deadline. */
-    const uint64_t probe_start = mono_ms();
+    uint64_t probe_start = mono_ms();
     /* The first replay honours he_delay exactly, including 0 — "duplicate the
      * first packet immediately" is what the knob documents. The repeats need a
      * floor, because he_delay=0 would otherwise spin the loop resending as fast
      * as poll() returns. */
     const int dup_first = p->cfg->he_delay > 0 ? p->cfg->he_delay : 0;
-    const int dup_every = p->cfg->he_delay > 0 ? p->cfg->he_delay : 250;
+    int dup_every = p->cfg->he_delay > 0 ? p->cfg->he_delay : 250;
     uint64_t last_dup_ms = 0;
     int replayed = 0;
+    int quiet_logged = 0;
 
     while (!atomic_load_explicit(&p->stopped, memory_order_relaxed) &&
            !atomic_load_explicit(&p->reconnect_needed, memory_order_relaxed)) {
         uint64_t now = mono_ms();
         if (now - probe_start >= HE_PROBE_MAX_MS) {
-            /* Neither family said a word. Hand the run to the alt socket: an
-             * untried path beats one that has already been silent this long,
-             * and the next dial starts there too. Not a verdict — no learn. */
-            use_alt = 1;
-            p->prefer6 = (p->remote_alt.sa.ss_family == AF_INET6);
-            log_info(p->remote_alt.sa.ss_family == AF_INET6
-                         ? "happy eyeballs: both silent, switching to IPv6"
-                         : "happy eyeballs: both silent, switching to IPv4");
-            he_finish(p, use_alt, 0);
-            return;
+            /* Nothing was stashed, so the client has sent nothing at all — an
+             * idle tunnel right after a reconnect looks exactly like this. With
+             * no packet to replay there is nothing to probe with, and holding
+             * the second socket open buys nothing. */
+            if (!atomic_load_explicit(&p->he_sent, memory_order_acquire)) {
+                log_info("happy eyeballs: nothing to probe with, keeping current");
+                he_finish(p, 0, 0);
+                return;
+            }
+            /* Both families stayed mute for the whole window. That is not a
+             * verdict — silence never is — so the primary stays and the dial
+             * order learns nothing. But closing the alt socket here would also
+             * make the run deaf: whichever family comes back first, nothing
+             * would notice until the silence watchdog forced a reconnect a
+             * whole timeout later. That is the gap that made recovery take the
+             * best part of a minute after an outage.
+             *
+             * So keep both sockets and keep sounding them, just slower. The
+             * replay interval doubles up to HE_PROBE_SLOW_MS, which turns a
+             * dead address from four packets a second into one every few
+             * seconds, and the moment either family answers the probe commits
+             * to it. The loop still ends on shutdown or on the watchdog's
+             * reconnect, so it cannot run away. */
+            if (!quiet_logged) {
+                quiet_logged = 1;
+                log_info("happy eyeballs: both silent, keeping current, "
+                         "still listening on both");
+            }
+            probe_start = now;
+            if (dup_every < HE_PROBE_SLOW_MS) {
+                dup_every *= 2;
+                if (dup_every > HE_PROBE_SLOW_MS) dup_every = HE_PROBE_SLOW_MS;
+            }
+            continue;
         }
 
         /* Without the eventfd there is nothing to wake us when c2s sends, so
@@ -1272,12 +1311,17 @@ static void *c2s_thread_normal(void *arg) {
             if (n >= 4) {
                 uint32_t hin;
                 memcpy(&hin, data, 4);
-                if (hin == WG_HANDSHAKE_INIT &&
-                    !atomic_exchange_explicit(&p->fe_init_seen, 1, memory_order_relaxed)) {
-                    char nb[12];
-                    const char *parts[] = { "c2s: WG handshake init received from client (size=",
-                                            u32_to_str(nb, n), ")" };
-                    log_infon(parts, 3);
+                if (hin == WG_HANDSHAKE_INIT) {
+                    /* Every init, not just the first: this is what tells the
+                     * watchdog the tunnel is trying to come up rather than
+                     * merely sitting idle. */
+                    atomic_store_explicit(&p->client_init, 1, memory_order_relaxed);
+                    if (!atomic_exchange_explicit(&p->fe_init_seen, 1, memory_order_relaxed)) {
+                        char nb[12];
+                        const char *parts[] = { "c2s: WG handshake init received from client (size=",
+                                                u32_to_str(nb, n), ")" };
+                        log_infon(parts, 3);
+                    }
                 }
             }
 
@@ -1713,6 +1757,7 @@ static int do_reconnect(proxy_t *p) {
 
     atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
     atomic_store_explicit(&p->last_remote_rx, 0, memory_order_relaxed);
+    atomic_store_explicit(&p->client_init, 0, memory_order_relaxed);
     if (p->cfg->mode == AWG_MODE_NORMAL)
         atomic_store_explicit(&p->has_client, 0, memory_order_release);
     atomic_store_explicit(&p->reconnect_needed, 0, memory_order_relaxed);
@@ -2018,8 +2063,8 @@ int proxy_run(proxy_t *p) {
     int timeout_secs = cfg->timeout > 0 ? cfg->timeout : 180;
     int checks_needed = timeout_secs / 5;
     if (checks_needed < 1) checks_needed = 1;
-    int inactive_count = 0;
-    int remote_silent_count = 0;
+    int silent_ticks = 0;      /* consecutive ticks with nothing from the remote */
+    int init_unanswered = 0;   /* ...during which the client asked to handshake */
 
     /* Fallback probing (initiator side of a dual-profile s2s config): after
      * fb_after seconds of the client sending but the remote staying silent,
@@ -2087,6 +2132,7 @@ int proxy_run(proxy_t *p) {
                 read(p->timer_fd, &expirations, sizeof(expirations));
                 int had_activity = atomic_exchange_explicit(&p->last_active, 0, memory_order_relaxed);
                 int had_remote_rx = atomic_exchange_explicit(&p->last_remote_rx, 0, memory_order_relaxed);
+                int had_init = atomic_exchange_explicit(&p->client_init, 0, memory_order_relaxed);
 
                 if (fb_enabled) {
                     if (had_remote_rx) {
@@ -2105,7 +2151,11 @@ int proxy_run(proxy_t *p) {
                                 log_infon(parts, 2);
                             }
                             fb_silent_count = 0;
-                            remote_silent_count = 0;
+                            /* The profile switch reconnects on its own; the
+                             * silence watchdog must not also count this stretch
+                             * against the new profile it has not yet tried. */
+                            silent_ticks = 0;
+                            init_unanswered = 0;
                             int rfd2 = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
                             if (rfd2 >= 0) {
                                 atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
@@ -2115,34 +2165,35 @@ int proxy_run(proxy_t *p) {
                     }
                 }
 
-                if (had_activity) {
-                    inactive_count = 0;
-                    if (!had_remote_rx) {
-                        /* Client sending but remote silent — DNS may have changed */
-                        remote_silent_count++;
-                        if (remote_silent_count >= checks_needed) {
-                            log_info("remote silent (DNS re-resolve), triggering reconnect");
-                            int rfd2 = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
-                            if (rfd2 >= 0) {
-                                atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
-                                shutdown(rfd2, SHUT_RDWR);
-                            }
-                            remote_silent_count = 0;
-                        }
-                    } else {
-                        remote_silent_count = 0;
-                    }
+                /* One counter, driven by the remote's silence alone. The pair it
+                 * replaced each zeroed the other's condition, so any traffic
+                 * sparser than one packet per tick — a 25 s WireGuard keepalive,
+                 * say — kept both pinned near zero and the watchdog never fired
+                 * at all, leaving a wedged tunnel wedged indefinitely.
+                 *
+                 * Silence on its own is not a fault: an established tunnel with
+                 * nothing to carry is legitimately quiet, and keepalives draw no
+                 * reply. A handshake init does — WireGuard answers one whenever
+                 * it can — so an init that goes unanswered for the whole timeout
+                 * is the unambiguous signal that the path, not the traffic, has
+                 * stopped. That is when the run may drop what it learned. */
+                if (had_remote_rx) {
+                    silent_ticks = 0;
+                    init_unanswered = 0;
                 } else {
-                    remote_silent_count = 0;
-                    inactive_count++;
-                    if (inactive_count >= checks_needed) {
-                        log_info("remote timeout, triggering reconnect");
+                    if (had_init) init_unanswered = 1;
+                    if (silent_ticks < checks_needed) silent_ticks++;
+                    if (silent_ticks >= checks_needed && init_unanswered) {
+                        log_info("remote silent while the tunnel is handshaking, "
+                                 "triggering reconnect");
+                        atomic_store_explicit(&p->he_reset, 1, memory_order_relaxed);
                         int rfd2 = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
                         if (rfd2 >= 0) {
                             atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
                             shutdown(rfd2, SHUT_RDWR);
                         }
-                        inactive_count = 0;
+                        silent_ticks = 0;
+                        init_unanswered = 0;
                     }
                 }
 

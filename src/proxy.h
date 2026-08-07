@@ -128,6 +128,8 @@ typedef struct {
     _Atomic int has_client;         /* 4B */
     _Atomic int last_active;        /* 4B */
     _Atomic int last_remote_rx;     /* 4B — set when data received from remote */
+    _Atomic int client_init;        /* 4B — client sent a WG handshake init */
+    _Atomic int he_reset;           /* 4B — drop the learned family on next dial */
     _Atomic int reconnect_needed;   /* 4B */
     /* First-event flags (one per connection — touched once after start/reconnect) */
     _Atomic uint8_t fe_init_seen;       /* WG handshake init seen from client */
@@ -137,7 +139,11 @@ typedef struct {
     _Atomic uint8_t fe_resp_sent;       /* WG handshake response delivered to client */
     _Atomic uint8_t fe_transport_c2s;   /* first transport packet to remote */
     _Atomic uint8_t fe_transport_s2c;   /* first transport packet to client */
-    uint8_t _pad_fe;
+    /* The MTU hint is advice about the config, not about this connection, and
+     * the config cannot change while the process runs — so unlike the flags
+     * above this one is never reset, or the same warning repeats verbatim on
+     * every reconnect. */
+    _Atomic uint8_t fe_mtu_hint;
     cliaddr_t client_addr;          /* 16B v4 / 28B v6 */
     socklen_t cli_len;              /* 4B — namelen for every client-leg msg */
     int gso_ok;                     /* 4B */
