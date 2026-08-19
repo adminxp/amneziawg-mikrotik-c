@@ -20,6 +20,14 @@ static int parse_int_str(const char *s) {
     return neg ? -v : v;
 }
 
+/* awg-tools writes booleans as on/off and accepts plain numbers, so a .conf
+ * carried over verbatim has to parse both. Anything else reads as off. */
+static int parse_bool_str(const char *s) {
+    if ((s[0] == 'o' || s[0] == 'O') && (s[1] == 'n' || s[1] == 'N') && !s[2]) return 1;
+    if ((s[0] == 't' || s[0] == 'T') || (s[0] == 'y' || s[0] == 'Y')) return 1;
+    return parse_int_str(s) != 0;
+}
+
 static uint32_t parse_uint32(const char *s) {
     uint32_t v = 0;
     while (*s >= '0' && *s <= '9') { v = v * 10 + (uint32_t)(*s - '0'); s++; }
@@ -242,6 +250,8 @@ static int parse_fb_stage(awg_config_t *cfg, int stage, awg_profile_t *fb) {
     if ((v = getenv(fb_name(nb, stage, "S3"))) && v[0]) fb->s3 = parse_int_str(v);
     if ((v = getenv(fb_name(nb, stage, "S4"))) && v[0]) fb->s4 = parse_int_str(v);
     if ((v = getenv(fb_name(nb, stage, "HP"))) && v[0]) fb->hp_on = parse_int_str(v) != 0;
+    if ((v = getenv(fb_name(nb, stage, "RANDOM_TRAILERS"))) && v[0])
+        fb->rt = parse_bool_str(v);
     if (fb->hp_on && !cfg->hp_key_set) {
         const char *parts[] = { fb_name(nb, stage, "HP"),
                                 "=1 requires AWG_HEADER_PROTECTION_KEY" };
@@ -384,6 +394,18 @@ int main(void) {
         cfg->hp_on = cfg->hp_key_set;
     }
 
+    /* AWG 3.1 — RandomTrailers: a random tail on every handshake, response and
+     * cookie, so their sizes stop being a fingerprint. Both peers must agree:
+     * a 3.0 peer measures sizes exactly and drops a padded handshake. */
+    if ((v = getenv("AWG_RANDOM_TRAILERS")) && v[0])
+        cfg->rt = parse_bool_str(v);
+
+    /* AWG 3.1 — DisableCookies: the interface answers no handshake with a
+     * cookie reply, so the proxy drops the one the local WireGuard produced
+     * instead of forwarding it. */
+    if ((v = getenv("AWG_DISABLE_COOKIES")) && v[0])
+        cfg->disable_cookies = parse_bool_str(v);
+
     {
         const char *cfg_err = NULL;
         if (config_validate(cfg, &cfg_err) < 0)
@@ -509,7 +531,9 @@ int main(void) {
 
     /* Determine protocol mode */
     const char *mode = "v1";
-    if (cfg->hp_key_set) {
+    if (cfg->rt || cfg->disable_cookies) {
+        mode = "v3.1";
+    } else if (cfg->hp_key_set) {
         mode = "v3";
     } else if (cfg->s3 > 0 || cfg->s4 > 0 ||
         cfg->h1.min != cfg->h1.max || cfg->h2.min != cfg->h2.max ||
@@ -569,6 +593,10 @@ int main(void) {
     }
     if (cfg->hp_key_set)
         log_info("config: AWG 3.0 header protection enabled (ChaCha20 over the packet header)");
+    if (cfg->rt)
+        log_info("config: AWG 3.1 random trailers enabled (handshakes get a random tail)");
+    if (cfg->disable_cookies)
+        log_info("config: AWG 3.1 cookie replies disabled (outbound cookies are dropped)");
     if (cfg->profile_count > 1) {
         char ab[12], cb[12];
         const char *parts[] = { "config: fallback chain of ",
@@ -581,8 +609,9 @@ int main(void) {
             const char *sparts[] = { "config: FB stage ", u32_to_str(ib, i),
                 ": S1=", u32_to_str(s1b, fb->s1), " S2=", u32_to_str(s2b, fb->s2),
                 " S3=", u32_to_str(s3b, fb->s3), " S4=", u32_to_str(s4b, fb->s4),
-                fb->hp_on ? " HP=on" : " HP=off" };
-            log_infon(sparts, 11);
+                fb->hp_on ? " HP=on" : " HP=off",
+                fb->rt ? " RT=on" : " RT=off" };
+            log_infon(sparts, 12);
             char h1b[12], h2b[12], h3b[12], h4b[12];
             const char *hparts[] = { "config: FB stage ", u32_to_str(ib, i),
                 ": H1=", u32_to_str(h1b, fb->h1.min),

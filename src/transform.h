@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include "chacha20.h"
 
 /* WireGuard message types (LE uint32 in first 4 bytes) */
@@ -28,6 +29,20 @@
  * The padding itself stays in the clear, so every S must be at least 12. */
 #define AWG_HP_MIN_PADDING   CHACHA20_NONCE_SIZE
 #define AWG_HP_TRANSPORT_HDR 16
+
+/* --- AWG 3.1 random trailers ---
+ * A random number of bytes is appended to every handshake, response and cookie
+ * packet, so their sizes stop being a fingerprint. The receiver accepts any
+ * length at or above the expected one and cuts the tail off. Transport packets
+ * carry their trailer *inside* the AEAD as ordinary content padding, which the
+ * peer's WireGuard strips on its own — the proxy holds no keys and therefore
+ * neither adds nor removes anything there.
+ *
+ * The trailer length is drawn from [0, udp_window - packet_size): the window is
+ * the largest datagram seen on this connection (never below 500, never above
+ * the packet buffer), so a padded handshake never stands out against the
+ * transport traffic around it. */
+#define AWG_DEFAULT_UDP_WINDOW 500
 
 /* Fallback chain length: v3 -> v2 -> v1.5 -> v1 */
 #define AWG_MAX_PROFILES 4
@@ -84,6 +99,7 @@ typedef struct {
     hrange_t h1, h2, h3, h4;
     cps_template_t *cps[5]; /* I1-I5, NULL if not configured */
     int hp_on;              /* v3: this profile encrypts the header */
+    int rt;                 /* v3.1: append a random trailer to handshakes */
     /* Derived (filled by config_compute_profile) */
     uint32_t h4_fixed;
     int h4_noop;
@@ -130,6 +146,14 @@ typedef struct {
     int resp_total;     /* S2 + 92 */
     int cookie_total;   /* S3 + 64 */
     int hp_on;          /* active profile encrypts the header */
+    int rt;             /* active profile appends random trailers */
+    int rt_any;         /* any profile does — gates the window bookkeeping */
+    int disable_cookies; /* v3.1: never forward a cookie reply outbound */
+    /* Largest datagram seen on this connection — the ceiling for trailer
+     * lengths. Written by both I/O threads, read by the transform: a stale or
+     * torn value would only pick a different trailer size, so relaxed atomics
+     * are enough and no lock is taken on the hot path. */
+    _Atomic uint32_t udp_window;
     int has_server_pub; /* server_pub != zero */
     int has_client_pub; /* client_pub != zero */
     const uint8_t *mac1key_out; /* MAC1 key for outbound (WG→AWG) recompute */
@@ -167,6 +191,14 @@ typedef struct {
 #define AWG_MODE_REVERSE 1
 #define AWG_MODE_SERVER  2
 
+/* Note a datagram size against the trailer window (no-op unless trailers are
+ * on). Called from the transport fast paths, where cfg is never const. */
+static inline void awg_window_note(awg_config_t *cfg, int size) {
+    if (!cfg->rt_any) return;
+    if ((uint32_t)size > atomic_load_explicit(&cfg->udp_window, memory_order_relaxed))
+        atomic_store_explicit(&cfg->udp_window, (uint32_t)size, memory_order_relaxed);
+}
+
 /* Compute MAC1 keys and fast-path flags. Call after setting all config fields. */
 void config_compute(awg_config_t *cfg);
 
@@ -180,7 +212,8 @@ void config_snapshot_profile(const awg_config_t *cfg, awg_profile_t *pr);
  * Shared fields (keys, mac1) are untouched. Refill the H4 ring after this. */
 void config_apply_profile(awg_config_t *cfg, int idx);
 
-/* Recompute max_s4 across the configured profiles. */
+/* Recompute the per-chain derived fields (max_s4, rt_any) across profiles.
+ * Call after the fallback stages have been parsed. */
 void config_compute_max_s4(awg_config_t *cfg);
 
 /* Validate config values that participate in buffer sizing and layout. */

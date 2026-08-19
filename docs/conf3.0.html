@@ -1511,7 +1511,8 @@
     // rendered with its extra keys instead of being flagged as unknown.
     var IFACE_OPTIONAL = ['DNS', 'S3', 'S4', 'I1', 'I2', 'I3', 'I4', 'I5',
         'HeaderProtectionKey', 'ContentPaddingAddition', 'RekeyAfterTime',
-        'RekeyTimeout', 'RejectAfterTime', 'KeepaliveTimeout', 'MaxHandshakeAttempts'];
+        'RekeyTimeout', 'RejectAfterTime', 'KeepaliveTimeout', 'MaxHandshakeAttempts',
+        'RandomTrailers', 'DisableCookies'];
     var PEER_REQUIRED = ['PublicKey', 'Endpoint', 'AllowedIPs'];
     var PEER_OPTIONAL = ['PresharedKey', 'PersistentKeepalive'];
 
@@ -1528,7 +1529,10 @@
         ['RekeyTimeout',           'AWG_REKEY_TIMEOUT'],
         ['RejectAfterTime',        'AWG_REJECT_AFTER'],
         ['KeepaliveTimeout',       'AWG_KEEPALIVE_TIMEOUT'],
-        ['MaxHandshakeAttempts',   'AWG_MAX_HANDSHAKE_ATTEMPTS']
+        ['MaxHandshakeAttempts',   'AWG_MAX_HANDSHAKE_ATTEMPTS'],
+        // AWG 3.1 — both are on-the-wire behaviour the proxy does implement.
+        ['RandomTrailers',         'AWG_RANDOM_TRAILERS'],
+        ['DisableCookies',         'AWG_DISABLE_COOKIES']
     ];
 
     function v3EnvLines(prefix, iface) {
@@ -2045,6 +2049,12 @@
          'RejectAfterTime', 'KeepaliveTimeout', 'MaxHandshakeAttempts'].forEach(function (k) {
             if (iface[k] && !isHValue(iface[k]))
                 errors.push('[Interface] ' + k + ' -- must be an integer or range MIN-MAX');
+        });
+
+        // --- AWG 3.1 --- awg-tools writes these as on/off, and accepts 0/1.
+        ['RandomTrailers', 'DisableCookies'].forEach(function (k) {
+            if (iface[k] && !/^(on|off|0|1|true|false)$/i.test(iface[k].trim()))
+                errors.push('[Interface] ' + k + ' -- must be on/off (or 0/1)');
         });
 
         ['I1','I2','I3','I4','I5'].forEach(function(k) {

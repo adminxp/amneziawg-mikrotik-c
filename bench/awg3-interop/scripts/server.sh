@@ -1,7 +1,7 @@
 #!/bin/bash
 # AmneziaWG 3.x server: userspace amneziawg-go + UAPI configuration.
 #
-# PROFILE = v1 | v1.5 | v2 | v3   (see profiles.sh)
+# PROFILE = v1 | v1.5 | v2 | v3 | v3.1   (see profiles.sh)
 # SRV_HPK = override the profile's header protection key on this side only;
 #           used by the negative controls.
 set -eu
@@ -57,6 +57,8 @@ for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.2; done
     [ -n "$I1" ] && echo "i1=$I1"
     [ -n "$I2" ] && echo "i2=$I2"
     [ "$USE_HPK" = 1 ] && echo "header_protection_key=$HPK_HEX"
+    [ "$RT_ON" = 1 ] && echo "random_trailers=1"
+    [ "$DC_ON" = 1 ] && echo "disable_cookies=1"
     echo "public_key=$CLIENT_PUB_HEX"
     echo "allowed_ip=$CLI_TUN/32"
     echo ""
@@ -76,7 +78,16 @@ if echo "$STATE" | grep -q "^header_protection_key="; then ACTUAL=1; else ACTUAL
     exit 1
 }
 
+# get=1 reports the 3.1 switches unconditionally (uapi.go boolf), so a mismatch
+# here means the server build predates 3.1 rather than that the key was ignored.
+if [ "$RT_ON" = 1 ]; then
+    echo "$STATE" | grep -q "^random_trailers=1" || {
+        echo "FATAL: server does not report random_trailers=1 (needs amneziawg-go 3.1)"
+        exit 1
+    }
+fi
+
 ip addr add "$SRV_TUN/$TUN_MASK" dev "$IFACE" 2>/dev/null || true
 ip link set mtu 1420 up dev "$IFACE"
 
-echo "server up: impl=$SRV_IMPL profile=$PROFILE S=$S1/$S2/$S3/$S4 HPK=$ACTUAL (verified via get=1)"
+echo "server up: impl=$SRV_IMPL profile=$PROFILE S=$S1/$S2/$S3/$S4 HPK=$ACTUAL RT=$RT_ON DC=$DC_ON (verified via get=1)"

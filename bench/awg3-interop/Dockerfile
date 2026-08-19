@@ -9,7 +9,7 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 
 # --- AmneziaWG 3.x server (userspace) ---
 COPY src /build/amneziawg-go
-RUN cd /build/amneziawg-go && git checkout -q v3.0.3 \
+RUN cd /build/amneziawg-go && git checkout -q v3.1.20260814 \
     && git log --oneline -1 \
     && go build -o /usr/local/bin/amneziawg-go .
 
@@ -23,7 +23,7 @@ RUN cd /build/amneziawg-go && git checkout -q v3.0.3 \
 RUN cd /build/amneziawg-go \
     && git checkout -f -q v0.2.19 \
     && go build -o /usr/local/bin/amneziawg-go-legacy . \
-    && git checkout -f -q v3.0.3 \
+    && git checkout -f -q v3.1.20260814 \
     && /usr/local/bin/amneziawg-go-legacy --version 2>/dev/null; \
     test -x /usr/local/bin/amneziawg-go-legacy
 

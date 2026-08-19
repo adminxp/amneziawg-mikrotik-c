@@ -373,6 +373,50 @@ static pid_t start_proxy_v3(const char *mode, int listen_port, int remote_port) 
     return pid;
 }
 
+/* AWG 3.1 proxy: the v3 profile with random trailers and cookies disabled. */
+static pid_t start_proxy_v31(const char *mode, int listen_port, int remote_port) {
+    int src_port = find_free_port();
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char lbuf[32], rbuf[64], sp[8];
+        char jc[8], jmin[8], jmax[8], s1[8], s2[8], s3[8], s4[8];
+        char h1[16], h2[16], h3[16], h4[16];
+
+        snprintf(lbuf, sizeof(lbuf), ":%d", listen_port);
+        snprintf(rbuf, sizeof(rbuf), "127.0.0.1:%d", remote_port);
+
+        setenv("AWG_LISTEN", lbuf, 1);
+        setenv("AWG_REMOTE", rbuf, 1);
+        setenv("AWG_MODE", mode, 1);
+        setenv("AWG_JC", itoa_buf(TEST_JC, jc), 1);
+        setenv("AWG_JMIN", itoa_buf(TEST_JMIN, jmin), 1);
+        setenv("AWG_JMAX", itoa_buf(TEST_JMAX, jmax), 1);
+        setenv("AWG_S1", itoa_buf(TEST_V3_S1, s1), 1);
+        setenv("AWG_S2", itoa_buf(TEST_V3_S2, s2), 1);
+        setenv("AWG_S3", itoa_buf(TEST_V3_S3, s3), 1);
+        setenv("AWG_S4", itoa_buf(TEST_V3_S4, s4), 1);
+        setenv("AWG_H1", utoa_buf(TEST_H1, h1), 1);
+        setenv("AWG_H2", utoa_buf(TEST_H2, h2), 1);
+        setenv("AWG_H3", utoa_buf(TEST_H3, h3), 1);
+        setenv("AWG_H4", utoa_buf(TEST_H4, h4), 1);
+        setenv("AWG_HEADER_PROTECTION_KEY", TEST_HP_KEY_HEX, 1);
+        setenv("AWG_RANDOM_TRAILERS", "on", 1);
+        setenv("AWG_DISABLE_COOKIES", "on", 1);
+        setenv("AWG_SERVER_PUB", DUMMY_SERVER_PUB, 1);
+        setenv("AWG_CLIENT_PUB", DUMMY_CLIENT_PUB, 1);
+        setenv("AWG_LOG_LEVEL", "error", 1);
+        setenv("AWG_TIMEOUT", "30", 1);
+        setenv("AWG_NO_GRO", "1", 1);
+        setenv("AWG_SRC_PORT", itoa_buf(src_port, sp), 1);
+
+        execl(PROXY_BINARY, "awg-proxy", NULL);
+        _exit(127);
+    }
+    usleep(200000);
+    return pid;
+}
+
 static void stop_proxy(pid_t pid) {
     if (pid <= 0) return;
     kill(pid, SIGTERM);
@@ -1519,6 +1563,123 @@ static int make_awg_v3_transport(uint8_t *buf, uint32_t receiver_index,
         msg[i] = (uint8_t)(i ^ (counter & 0xFF));
     chacha20_xor(TEST_HP_KEY, buf, msg, AWG_HP_TRANSPORT_HDR);
     return TEST_V3_S4 + msg_size;
+}
+
+/* AWG 3.1 handshake as a real peer would send it: S padding, the whole message
+ * encrypted under the header key, then a random tail left in the clear. */
+static int make_awg_v31_handshake(uint8_t *buf, uint32_t htype, int pad,
+                                  int msg_size, uint32_t sender_index,
+                                  int trailer) {
+    for (int i = 0; i < pad; i++)
+        buf[i] = (uint8_t)(sender_index * 13 + i * 5 + 1);
+    uint8_t *msg = buf + pad;
+    memset(msg, 0, (size_t)msg_size);
+    memcpy(msg, &htype, 4);
+    memcpy(msg + 4, &sender_index, 4);
+    for (int i = 8; i < msg_size; i++)
+        msg[i] = (uint8_t)(i ^ (sender_index & 0xFF));
+    chacha20_xor(TEST_HP_KEY, buf, msg, msg_size);
+    for (int i = 0; i < trailer; i++)
+        buf[pad + msg_size + i] = (uint8_t)(i * 29 + 7);
+    return pad + msg_size + trailer;
+}
+
+static void make_wg_cookie(uint8_t *buf, uint32_t receiver_index) {
+    memset(buf, 0, WG_COOKIE_SIZE);
+    uint32_t t = WG_COOKIE_REPLY;
+    memcpy(buf, &t, 4);
+    memcpy(buf + 4, &receiver_index, 4);
+    for (int i = 8; i < WG_COOKIE_SIZE; i++)
+        buf[i] = (uint8_t)(i * 3 + 1);
+}
+
+/* AWG 3.1: outgoing handshakes carry a random tail, incoming ones are accepted
+ * with any tail, and cookie replies never leave. */
+static void test_v31_random_trailers(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0);
+    ASSERT(remote_port > 0);
+
+    int server_fd = make_udp_socket(remote_port);
+    ASSERT(server_fd >= 0);
+
+    pid_t proxy = start_proxy_v31("normal", listen_port, remote_port);
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    /* c2s: several inits, each of which must arrive at or above the plain 3.0
+     * size, inside the default 500-byte window — and not always at the minimum,
+     * or nothing is being randomised at all. */
+    const int min_len = TEST_V3_S1 + WG_INIT_SIZE;
+    int seen = 0, padded = 0, longest = 0;
+    struct sockaddr_in from = {0};
+    socklen_t fromlen = sizeof(from);
+    uint8_t rbuf[2048];
+
+    for (int round = 0; round < 8; round++) {
+        uint8_t init_buf[WG_INIT_SIZE];
+        make_wg_init(init_buf, 0x3100u + (uint32_t)round);
+        sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+               (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+
+        for (int i = 0; i < TEST_JC + 5; i++) {
+            struct pollfd pfd = { .fd = server_fd, .events = POLLIN };
+            if (poll(&pfd, 1, 500) <= 0) break;
+            fromlen = sizeof(from);
+            int n = (int)recvfrom(server_fd, rbuf, sizeof(rbuf), 0,
+                                  (struct sockaddr *)&from, &fromlen);
+            if (n < min_len) continue;
+            if (v3_unmask_type(rbuf, TEST_V3_S1) != TEST_H1) continue;
+            ASSERT(n <= AWG_DEFAULT_UDP_WINDOW);
+            seen++;
+            if (n > min_len) padded++;
+            if (n > longest) longest = n;
+            break;
+        }
+    }
+    fprintf(stderr, "          (inits=%d, padded=%d, longest=%d)\n",
+            seen, padded, longest);
+    ASSERT(seen >= 6);
+    ASSERT(padded > 0);
+    drain_socket(server_fd);
+
+    /* s2c: a response with a tail must reach the client as a plain 92-byte WG
+     * response, tail cut off. */
+    uint8_t awg[1500];
+    int awg_len = make_awg_v31_handshake(awg, TEST_H2, TEST_V3_S2, WG_RESP_SIZE,
+                                         0x3200, 137);
+    sendto(server_fd, awg, (size_t)awg_len, 0, (struct sockaddr *)&from, fromlen);
+
+    int got_resp = 0;
+    for (int i = 0; i < 5; i++) {
+        int n = recv_one(client_fd, rbuf, sizeof(rbuf), 1000);
+        if (n != WG_RESP_SIZE) continue;
+        uint32_t t;
+        memcpy(&t, rbuf, 4);
+        if (t != WG_HANDSHAKE_RESPONSE) continue;
+        uint32_t sidx;
+        memcpy(&sidx, rbuf + 4, 4);
+        ASSERT_EQ(sidx, 0x3200u);
+        got_resp = 1;
+        break;
+    }
+    ASSERT(got_resp);
+
+    /* Cookie replies are disabled: nothing at all may reach the server. */
+    uint8_t cookie[WG_COOKIE_SIZE];
+    make_wg_cookie(cookie, 0x3200);
+    sendto(client_fd, cookie, WG_COOKIE_SIZE, 0,
+           (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+    struct pollfd pfd = { .fd = server_fd, .events = POLLIN };
+    ASSERT(poll(&pfd, 1, 500) == 0);
+
+    stop_proxy(proxy);
+    close(client_fd);
+    close(server_fd);
 }
 
 static void test_v3_header_protection(void) {
@@ -2668,6 +2829,7 @@ int main(void) {
     RUN_TEST(throughput_benchmark);
     RUN_TEST(s2s_fallback);
     RUN_TEST(v3_header_protection);
+    RUN_TEST(v31_random_trailers);
     RUN_TEST(ipv6_remote);
     RUN_TEST(happy_eyeballs);
     RUN_TEST(he_both_silent_keeps_primary);

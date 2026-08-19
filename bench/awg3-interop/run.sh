@@ -1,7 +1,7 @@
 #!/bin/bash
 # AmneziaWG end-to-end interop harness.
 #
-#   [wireguard-go, plain WG] --> [awg-proxy] --> [amneziawg-go v3.0.3]
+#   [wireguard-go, plain WG] --> [awg-proxy] --> [amneziawg-go v3.1.20260814]
 #        10.55.0.2               transform         10.55.0.1
 #
 # The client speaks stock WireGuard and the server is the unmodified reference
@@ -25,7 +25,7 @@ SRV_IP6=fd00:30::10
 PRX_IP6=fd00:30::20
 CLI_IP6=fd00:30::30
 SRV_PORT=51820  # must match scripts/profile.env
-SRV_IMPL=       # "" = reference v3.0.3, "legacy" = real pre-3.0 server (v0.2.19)
+SRV_IMPL=       # "" = reference v3.1, "legacy" = real pre-3.0 server (v0.2.19)
 FAMILY=v4       # v4 | v6 | dual -- how the proxy addresses the server
 HE_DELAY=       # AWG_HE_DELAY override, only meaningful with FAMILY=dual
 WG_MTU_OVERRIDE=  # forces the client WG MTU instead of deriving it from S4
@@ -251,6 +251,21 @@ negative_case() {
     fi
 }
 
+# --- scenario: one end sends random trailers, the other does not ------------
+trailer_mismatch_case() {
+    local label=$1 sp=$2 pp=$3
+    echo
+    echo "=== negative control: $label ==="
+    if ! bring_up "$sp" "$pp"; then
+        bad "$label: stack failed to start"; return
+    fi
+    if handshake_ok 15; then
+        bad "$label: handshake SUCCEEDED - random trailers are not on the wire"
+    else
+        ok "$label: handshake correctly fails"
+    fi
+}
+
 # --- scenario: Happy Eyeballs picks IPv6 when IPv4 is a black hole ----------
 #
 # The server name resolves to both an A and an AAAA (docker embedded DNS), and
@@ -331,6 +346,7 @@ test_all() {
     version_case v1.5 v1.5
     version_case v2   v2
     version_case v3   v3
+    version_case v3.1 v3.1
 
     # Same three pre-3.0 generations against the real old server (v0.2.19),
     # which has no header-protection code at all — so this checks a separate
@@ -362,6 +378,11 @@ test_all() {
     # v2 and v3 differ only by the key, so these isolate header protection.
     negative_case "server v3 + proxy without key" v3 v3 1 0
     negative_case "server without key + proxy v3" v3 v3 0 1
+
+    # v3.1 vs v3 differ only by the trailers, so a mismatch must break the
+    # handshake — otherwise the feature is not on the wire at all.
+    trailer_mismatch_case "server v3.1 + proxy v3" v3.1 v3
+    trailer_mismatch_case "server v3 + proxy v3.1" v3 v3.1
 
     wire_case v2 plaintext 77 225
     wire_case v3 encrypted 77 225

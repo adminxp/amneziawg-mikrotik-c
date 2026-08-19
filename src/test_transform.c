@@ -1839,6 +1839,226 @@ static void test_multi_profile_switch(void) {
     }
 }
 
+/* ---- AWG 3.1: random trailers and disabled cookies ---- */
+
+static awg_config_t make_v31_config(void) {
+    awg_config_t cfg = make_v3_config();
+    cfg.rt = 1;
+    config_compute(&cfg);
+    return cfg;
+}
+
+/* Outbound: every handshake carries a tail, and the packet never grows past
+ * the trailer window. */
+static void test_rt_outbound_appends_trailer(void) {
+    awg_config_t cfg = make_v31_config();
+    uint8_t buf[AWG_PACKET_HEADROOM + AWG_PACKET_BUF_SIZE];
+    int dataoff = AWG_PACKET_HEADROOM;
+    int longest = 0;
+
+    for (int i = 0; i < 64; i++) {
+        memset(buf, 0, sizeof(buf));
+        uint8_t *data = buf + dataoff;
+        write32_le(data, WG_HANDSHAKE_INIT);
+        fill_seq(data + 4, WG_INIT_SIZE - 4);
+
+        int out_len, sendJunk;
+        uint8_t *out = transform_outbound(buf, dataoff, WG_INIT_SIZE, &cfg,
+                                          0x1000 + (uint64_t)i, &out_len, &sendJunk);
+        ASSERT(out != NULL);
+        ASSERT(out_len >= cfg.init_total);
+        ASSERT(out_len < AWG_DEFAULT_UDP_WINDOW);
+        if (out_len > longest) longest = out_len;
+    }
+    ASSERT(longest > cfg.init_total); /* the tail is not always empty */
+}
+
+/* Inbound: a handshake with a tail decodes, and the tail is cut off. */
+static void test_rt_inbound_accepts_trailer(void) {
+    awg_config_t cfg = make_v31_config();
+    uint8_t wire[AWG_PACKET_BUF_SIZE], scratch[AWG_PACKET_BUF_SIZE];
+    uint8_t buf[AWG_PACKET_HEADROOM + AWG_PACKET_BUF_SIZE];
+    int dataoff = AWG_PACKET_HEADROOM;
+
+    static const struct { uint32_t type; int len; } msgs[] = {
+        { WG_HANDSHAKE_INIT,     WG_INIT_SIZE   },
+        { WG_HANDSHAKE_RESPONSE, WG_RESP_SIZE   },
+        { WG_COOKIE_REPLY,       WG_COOKIE_SIZE },
+    };
+
+    for (unsigned m = 0; m < sizeof(msgs) / sizeof(msgs[0]); m++) {
+        memset(buf, 0, sizeof(buf));
+        uint8_t *data = buf + dataoff;
+        write32_le(data, msgs[m].type);
+        fill_seq(data + 4, msgs[m].len - 4);
+
+        int out_len, sendJunk;
+        uint8_t *out = transform_outbound(buf, dataoff, msgs[m].len, &cfg,
+                                          0xBEEF + m, &out_len, &sendJunk);
+        ASSERT(out != NULL);
+        memcpy(wire, out, (size_t)out_len);
+
+        int in_len;
+        memcpy(scratch, wire, (size_t)out_len);
+        uint8_t *res = transform_inbound(scratch, out_len, &cfg, &in_len);
+        ASSERT(res != NULL);
+        ASSERT_EQ(in_len, msgs[m].len);
+        ASSERT_EQ(read32_le(res), msgs[m].type);
+        for (int i = 4; i < msgs[m].len; i++)
+            ASSERT_EQ(res[i], (uint8_t)(i - 4));
+    }
+}
+
+/* A peer that did not enable the feature measures sizes exactly, so the same
+ * padded init is not a handshake to it. */
+static void test_rt_inbound_rejects_trailer_when_off(void) {
+    awg_config_t cfg = make_v31_config();
+    uint8_t buf[AWG_PACKET_HEADROOM + AWG_PACKET_BUF_SIZE];
+    uint8_t scratch[AWG_PACKET_BUF_SIZE];
+    int dataoff = AWG_PACKET_HEADROOM;
+    int out_len = 0, sendJunk, padded = 0;
+    uint8_t *out = NULL;
+
+    for (uint64_t seed = 1; seed < 64 && !padded; seed++) {
+        memset(buf, 0, sizeof(buf));
+        uint8_t *data = buf + dataoff;
+        write32_le(data, WG_HANDSHAKE_INIT);
+        fill_seq(data + 4, WG_INIT_SIZE - 4);
+        out = transform_outbound(buf, dataoff, WG_INIT_SIZE, &cfg, seed,
+                                 &out_len, &sendJunk);
+        padded = out_len > cfg.init_total;
+    }
+    ASSERT(padded);
+
+    awg_config_t off = make_v3_config(); /* same profile, trailers disabled */
+    int in_len;
+    memcpy(scratch, out, (size_t)out_len);
+    ASSERT(transform_inbound(scratch, out_len, &off, &in_len) == NULL);
+}
+
+/* The window follows the largest datagram seen, and trailers grow with it. */
+static void test_rt_window_grows_with_traffic(void) {
+    awg_config_t cfg = make_v31_config();
+    uint8_t buf[AWG_PACKET_HEADROOM + AWG_PACKET_BUF_SIZE];
+    int dataoff = AWG_PACKET_HEADROOM;
+    int longest = 0;
+
+    awg_window_note(&cfg, 1200);
+
+    for (int i = 0; i < 64; i++) {
+        memset(buf, 0, sizeof(buf));
+        uint8_t *data = buf + dataoff;
+        write32_le(data, WG_HANDSHAKE_INIT);
+        fill_seq(data + 4, WG_INIT_SIZE - 4);
+
+        int out_len, sendJunk;
+        uint8_t *out = transform_outbound(buf, dataoff, WG_INIT_SIZE, &cfg,
+                                          0x2000 + (uint64_t)i, &out_len, &sendJunk);
+        ASSERT(out != NULL);
+        ASSERT(out_len <= 1200);
+        if (out_len > longest) longest = out_len;
+    }
+    ASSERT(longest > AWG_DEFAULT_UDP_WINDOW);
+}
+
+/* Even at the largest padding the config allows, padding + message + trailer
+ * stays inside the packet buffer. */
+static void test_rt_trailer_never_overflows_buffer(void) {
+    awg_config_t cfg = make_v31_config();
+    cfg.s1 = AWG_PACKET_BUF_SIZE - WG_INIT_SIZE; /* init_total == 1500 */
+    config_compute(&cfg);
+    awg_window_note(&cfg, 9000); /* absurd window: must still be capped */
+
+    uint8_t buf[AWG_PACKET_HEADROOM + AWG_PACKET_BUF_SIZE];
+    int dataoff = AWG_PACKET_HEADROOM;
+    for (int i = 0; i < 16; i++) {
+        memset(buf, 0, sizeof(buf));
+        uint8_t *data = buf + dataoff;
+        write32_le(data, WG_HANDSHAKE_INIT);
+        fill_seq(data + 4, WG_INIT_SIZE - 4);
+
+        int out_len, sendJunk;
+        uint8_t *out = transform_outbound(buf, dataoff, WG_INIT_SIZE, &cfg,
+                                          0x3000 + (uint64_t)i, &out_len, &sendJunk);
+        ASSERT(out != NULL);
+        ASSERT_EQ(out_len, AWG_PACKET_BUF_SIZE);
+    }
+}
+
+/* DisableCookies: the cookie reply is dropped, everything else still flows. */
+static void test_disable_cookies_drops_cookie_only(void) {
+    awg_config_t cfg = make_v3_config();
+    cfg.disable_cookies = 1;
+    config_compute(&cfg);
+
+    uint8_t buf[AWG_PACKET_HEADROOM + AWG_PACKET_BUF_SIZE];
+    int dataoff = AWG_PACKET_HEADROOM;
+    int out_len, sendJunk;
+
+    memset(buf, 0, sizeof(buf));
+    write32_le(buf + dataoff, WG_COOKIE_REPLY);
+    fill_seq(buf + dataoff + 4, WG_COOKIE_SIZE - 4);
+    ASSERT(transform_outbound(buf, dataoff, WG_COOKIE_SIZE, &cfg, 7,
+                              &out_len, &sendJunk) == NULL);
+    ASSERT_EQ(out_len, 0);
+
+    memset(buf, 0, sizeof(buf));
+    write32_le(buf + dataoff, WG_HANDSHAKE_INIT);
+    fill_seq(buf + dataoff + 4, WG_INIT_SIZE - 4);
+    ASSERT(transform_outbound(buf, dataoff, WG_INIT_SIZE, &cfg, 7,
+                              &out_len, &sendJunk) != NULL);
+    ASSERT_EQ(out_len, cfg.init_total);
+
+    memset(buf, 0, sizeof(buf));
+    write32_le(buf + dataoff, WG_TRANSPORT_DATA);
+    fill_seq(buf + dataoff + 4, 196);
+    ASSERT(transform_outbound(buf, dataoff, 200, &cfg, 7,
+                              &out_len, &sendJunk) != NULL);
+    ASSERT_EQ(out_len, cfg.s4 + 200);
+}
+
+/* A cookie still goes out untouched when the feature is off. */
+static void test_cookies_pass_when_enabled(void) {
+    awg_config_t cfg = make_v3_config();
+    uint8_t buf[AWG_PACKET_HEADROOM + AWG_PACKET_BUF_SIZE];
+    int dataoff = AWG_PACKET_HEADROOM;
+    int out_len, sendJunk;
+
+    memset(buf, 0, sizeof(buf));
+    write32_le(buf + dataoff, WG_COOKIE_REPLY);
+    fill_seq(buf + dataoff + 4, WG_COOKIE_SIZE - 4);
+    uint8_t *out = transform_outbound(buf, dataoff, WG_COOKIE_SIZE, &cfg, 7,
+                                      &out_len, &sendJunk);
+    ASSERT(out != NULL);
+    ASSERT_EQ(out_len, cfg.cookie_total);
+}
+
+/* Trailers are per profile: a fallback stage that speaks an older version must
+ * not inherit them. */
+static void test_rt_is_per_profile(void) {
+    awg_config_t cfg = make_v31_config();
+    cfg.profiles[1] = cfg.profiles[0];
+    cfg.profiles[1].rt = 0;
+    config_compute_profile(&cfg.profiles[1]);
+    cfg.profile_count = 2;
+
+    uint8_t buf[AWG_PACKET_HEADROOM + AWG_PACKET_BUF_SIZE];
+    int dataoff = AWG_PACKET_HEADROOM;
+    int out_len, sendJunk;
+
+    for (int i = 0; i < 32; i++) {
+        memset(buf, 0, sizeof(buf));
+        write32_le(buf + dataoff, WG_HANDSHAKE_INIT);
+        fill_seq(buf + dataoff + 4, WG_INIT_SIZE - 4);
+        uint8_t *out = transform_outbound_profile(buf, dataoff, WG_INIT_SIZE, &cfg,
+                                                  &cfg.profiles[1], NULL,
+                                                  0x4000 + (uint64_t)i,
+                                                  &out_len, &sendJunk);
+        ASSERT(out != NULL);
+        ASSERT_EQ(out_len, cfg.profiles[1].init_total);
+    }
+}
+
 int main(void) {
     fprintf(stderr, "=== transform tests ===\n");
     RUN_TEST(outbound_handshake_init);
@@ -1909,5 +2129,14 @@ int main(void) {
     RUN_TEST(hp_off_matches_v2);
     RUN_TEST(hp_nonce_uniqueness);
     RUN_TEST(multi_profile_switch);
+    /* AWG 3.1 random trailers / disabled cookies */
+    RUN_TEST(rt_outbound_appends_trailer);
+    RUN_TEST(rt_inbound_accepts_trailer);
+    RUN_TEST(rt_inbound_rejects_trailer_when_off);
+    RUN_TEST(rt_window_grows_with_traffic);
+    RUN_TEST(rt_trailer_never_overflows_buffer);
+    RUN_TEST(disable_cookies_drops_cookie_only);
+    RUN_TEST(cookies_pass_when_enabled);
+    RUN_TEST(rt_is_per_profile);
     TEST_MAIN_END();
 }

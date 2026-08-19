@@ -1,7 +1,7 @@
 #!/bin/bash
 # Our awg-proxy in normal mode: plain WG on the client side, AWG upstream.
 #
-# PROFILE     = v1 | v1.5 | v2 | v3   primary profile
+# PROFILE     = v1 | v1.5 | v2 | v3 | v3.1   primary profile
 # PRX_HPK     = override the profile's header protection key on this side only
 # FB_PROFILE  = optional AWG_FB_* fallback stage (profile name)
 # FB_AFTER    = seconds of remote silence before probing the fallback stage
@@ -46,6 +46,8 @@ export AWG_LOG_LEVEL=debug
 [ -n "$I1" ] && export AWG_I1="$I1"
 [ -n "$I2" ] && export AWG_I2="$I2"
 [ "$USE_HPK" = 1 ] && export AWG_HEADER_PROTECTION_KEY=$HPK_HEX
+[ "$RT_ON" = 1 ] && export AWG_RANDOM_TRAILERS=on
+[ "$DC_ON" = 1 ] && export AWG_DISABLE_COOKIES=on
 
 # Optional fallback stage. The key is shared by the whole chain, so a v3->v2
 # degradation is expressed by leaving AWG_FB_HP unset (defaults to 0).
@@ -56,6 +58,7 @@ if [ -n "$FB_PROFILE" ]; then
     [ -n "$I1" ] && export AWG_FB_I1="$I1"
     [ -n "$I2" ] && export AWG_FB_I2="$I2"
     [ "$HPK_ON" = 1 ] && export AWG_FB_HP=1
+    [ "$RT_ON" = 1 ] && export AWG_FB_RANDOM_TRAILERS=on
     export AWG_FB_AFTER=${FB_AFTER:-10}
 fi
 
@@ -63,4 +66,4 @@ awg-proxy >>"$LOG" 2>&1 &
 sleep 1
 
 pgrep -f awg-proxy >/dev/null || { echo "FATAL: proxy died"; tail -30 "$LOG"; exit 1; }
-echo "proxy up: profile=$PROFILE HPK=$USE_HPK fallback=${FB_PROFILE:-none} remote=$REMOTE"
+echo "proxy up: profile=$PROFILE HPK=$USE_HPK RT=$RT_ON DC=$DC_ON fallback=${FB_PROFILE:-none} remote=$REMOTE"

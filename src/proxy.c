@@ -1291,6 +1291,7 @@ static void *c2s_thread_normal(void *arg) {
                     }
                     if (hp)
                         chacha20_xor(cfg->hp_key, base, data, AWG_HP_TRANSPORT_HDR);
+                    awg_window_note(cfg, total);
                     p->send_c2s.iovecs[nsend].iov_base = base;
                     p->send_c2s.iovecs[nsend].iov_len = total;
                     nsend++;
@@ -1329,6 +1330,10 @@ static void *c2s_thread_normal(void *arg) {
             uint8_t *out = transform_outbound(p->recv_c2s.bufs[i], prefix, n,
                                                cfg, fastrand_u64(&p->rng_c2s),
                                                &out_len, &sendJunk);
+            if (!out) {
+                log_debug("c2s: cookie reply dropped (AWG_DISABLE_COOKIES)");
+                continue;
+            }
 
             if (sendJunk) {
                 log_debug("c2s: handshake init, sending junk");
@@ -1430,6 +1435,7 @@ static void *c2s_thread_reverse(void *arg) {
                             chacha20_xor_ks(pkt + s4, kstream, AWG_HP_TRANSPORT_HDR);
                         uint32_t wt = WG_TRANSPORT_DATA;
                         memcpy(pkt + s4, &wt, 4);
+                        awg_window_note(cfg, n);
 
                         /* Server mode: extract receiver_index for routing (but on c2s
                          * transport is from client, no need to record — server replies
@@ -1542,6 +1548,7 @@ static inline int process_s2c_pkt_normal(proxy_t *p, uint8_t *pkt, int n,
                     chacha20_xor_ks(pkt + s4, kstream, AWG_HP_TRANSPORT_HDR);
                 uint32_t wt = WG_TRANSPORT_DATA;
                 memcpy(pkt + s4, &wt, 4);
+                awg_window_note(cfg, n);
                 int idx = *nsend;
                 send_iovecs[idx].iov_base = pkt + s4;
                 send_iovecs[idx].iov_len = n - s4;
@@ -1683,6 +1690,7 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
                 if (pr->hp_on)
                     chacha20_xor(cfg->hp_key, out, pkt, AWG_HP_TRANSPORT_HDR);
             }
+            awg_window_note(cfg, total);
             int idx = *nsend;
             send_iovecs[idx].iov_base = out;
             send_iovecs[idx].iov_len = total;
@@ -1723,6 +1731,10 @@ static inline int process_s2c_pkt_reverse(proxy_t *p, uint8_t *base, uint8_t *pk
                                               out_mac1key,
                                               fastrand_u64(&p->rng_s2c),
                                               &out_len, &sendJunk);
+    if (!out) {
+        log_debug("s2c: cookie reply dropped (AWG_DISABLE_COOKIES)");
+        return 0;
+    }
 
     if (sendJunk) {
         log_debug("s2c: reverse: handshake init, sending junk");
@@ -1761,6 +1773,10 @@ static int do_reconnect(proxy_t *p) {
     if (p->cfg->mode == AWG_MODE_NORMAL)
         atomic_store_explicit(&p->has_client, 0, memory_order_release);
     atomic_store_explicit(&p->reconnect_needed, 0, memory_order_relaxed);
+    /* The trailer window describes a path, and this is a new one — amneziawg
+     * resets it the same way when a peer's endpoint changes. */
+    atomic_store_explicit(&p->cfg->udp_window, AWG_DEFAULT_UDP_WINDOW,
+                          memory_order_relaxed);
 
     /* Reset first-event flags so handshake phases re-log after reconnect */
     atomic_store_explicit(&p->fe_init_seen,     0, memory_order_relaxed);

@@ -465,12 +465,15 @@ With 3+ clients, this is easier to automate with a script on the server.
 | `AWG_S4` | No | `0` | Transport data padding (v2) |
 | `AWG_I1`--`AWG_I5` | No | -- | CPS templates (v1.5/v2/v3) |
 | `AWG_HEADER_PROTECTION_KEY` | No | -- | Header protection key (v3), base64 (44 chars) or hex (64 chars). Setting it enables AmneziaWG 3.0 |
+| `AWG_RANDOM_TRAILERS` | No | `off` | v3.1: random trailer on handshakes (`on`/`off`). Must match the server |
+| `AWG_DISABLE_COOKIES` | No | `off` | v3.1: never send a cookie reply outbound (`on`/`off`) |
 | `AWG_MODE` | No | `normal` | Operating mode: `normal`, `reverse`, `server` |
 | `AWG_FB_H1`--`AWG_FB_H4` | No | -- | Fallback chain stage 1: message types. Enables the chain |
 | `AWG_FB_S1`, `AWG_FB_S2` | Yes** | -- | Init/response padding for stage 1 |
 | `AWG_FB_S3`, `AWG_FB_S4` | No | `0` | Cookie reply / transport padding for stage 1 |
 | `AWG_FB_I1`--`AWG_FB_I5` | No | -- | CPS templates for stage 1 |
 | `AWG_FB_HP` | No | `0` | `1` = stage 1 also encrypts the header (needs `AWG_HEADER_PROTECTION_KEY`) |
+| `AWG_FB_RANDOM_TRAILERS` | No | `off` | `on` = stage 1 also appends a random trailer (v3.1) |
 | `AWG_FB2_*`, `AWG_FB3_*` | No | -- | Chain stages 2 and 3, same set of keys |
 | `AWG_FB_AFTER` | No | `20` | Seconds of remote silence before probing the next stage (initiator) |
 | `AWG_SRC_PORT` | No | auto | Outgoing port to server: `auto` / number / `random` |
@@ -493,7 +496,7 @@ With 3+ clients, this is easier to automate with a script on the server.
 
 `**` Required only when the fallback profile is enabled (`AWG_FB_H1` is set).
 
-The protocol version is detected automatically: **v3** if `AWG_HEADER_PROTECTION_KEY` is set, otherwise **v2** if S3/S4 are set or H values are ranges, otherwise **v1.5** if CPS templates (I1-I5) are set, otherwise **v1**.
+The protocol version is detected automatically: **v3.1** if `AWG_RANDOM_TRAILERS` or `AWG_DISABLE_COOKIES` is on, otherwise **v3** if `AWG_HEADER_PROTECTION_KEY` is set, otherwise **v2** if S3/S4 are set or H values are ranges, otherwise **v1.5** if CPS templates (I1-I5) are set, otherwise **v1**.
 
 ### AmneziaWG 3.0
 
@@ -522,6 +525,20 @@ With no key set, the proxy behaves **byte for byte** like v2 (`hp_off_matches_v2
 All of these variables are accepted so a provider `.conf` carries over intact, and each is logged as not applied. What stays visible to a DPI: packet sizes remain multiples of 16, and the WireGuard rhythm (5 s retries, 10 s keepalive, 120 s rekey) is not disguised.
 
 **Fallback chain (backward compatibility / DPI resilience).** The primary profile (`AWG_S*`, `AWG_H*`, `AWG_I*`, `AWG_HEADER_PROTECTION_KEY`) can be extended to four stages: `AWG_FB_*`, `AWG_FB2_*`, `AWG_FB3_*`. The typical chain is v3 → v2 → v1.5 → v1. The initiator (`normal`) runs on the primary profile and, if the remote stays silent for longer than `AWG_FB_AFTER` seconds, cycles through the remaining stages until one works. The responder (`reverse`) accepts any stage and replies with whichever one the handshake arrived on. In `server` mode the profile is tracked **per client** (a source-address cache plus a field in the session table), so clients on different versions never override each other. A non-zero `AWG_S4` is now allowed: buffer headroom is sized from the largest S4 across all stages.
+
+### AmneziaWG 3.1
+
+3.1 adds two things on top of 3.0, and the proxy implements both.
+
+**`RandomTrailers` (`AWG_RANDOM_TRAILERS=on`)** appends a random tail to every handshake (init, response, cookie reply), so their sizes stop being a fingerprint — an init used to weigh exactly `S1 + 148` bytes, and that single number was enough to spot AmneziaWG in a UDP stream. The tail length is drawn from `[0, window − packet size)`, where the window is the largest datagram seen on this connection (never below 500 bytes, never above 1500), so a padded handshake lands in the same size range as the tunnel's own traffic. On receive, the proxy accepts a handshake of any length from the expected one upwards and cuts the tail off.
+
+Transport packets are left alone: there the trailer goes **inside** the encryption (as ordinary content padding) and is stripped by WireGuard on the far side. The proxy holds no session keys, so appending bytes from outside would break the AEAD tag — and nothing is lost, since transport packets already vary in size; the handshakes were the fingerprint.
+
+The setting has to match the server: a 3.0 peer measures sizes exactly and drops a padded handshake. In the fallback chain the trailer is per stage (`AWG_FB_RANDOM_TRAILERS`), so a stage describing an older server stays byte for byte as it was.
+
+**`DisableCookies` (`AWG_DISABLE_COOKIES=on`)** stops cookie replies (type 3) from going out at all. A cookie is the answer to a handshake under load, and it makes the server easy to probe: send a junk init, get back a packet of a known size. With this on, the proxy drops that reply. It is meaningful in `reverse` and `server` mode, where our own WireGuard emits cookies; in plain client mode they hardly ever occur.
+
+Both are carried over from a `.conf` by the configurator as-is (`RandomTrailers = on` → `AWG_RANDOM_TRAILERS=on`); `on`/`off` and `1`/`0` are both accepted.
 
 ### IPv6
 

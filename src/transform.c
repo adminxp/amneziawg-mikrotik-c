@@ -98,6 +98,7 @@ void config_snapshot_profile(const awg_config_t *cfg, awg_profile_t *pr) {
     pr->h1 = cfg->h1; pr->h2 = cfg->h2; pr->h3 = cfg->h3; pr->h4 = cfg->h4;
     for (int i = 0; i < 5; i++) pr->cps[i] = cfg->cps[i];
     pr->hp_on = cfg->hp_on;
+    pr->rt = cfg->rt;
     pr->h4_fixed = cfg->h4_fixed;
     pr->h4_noop = cfg->h4_noop;
     pr->init_total = cfg->init_total;
@@ -112,6 +113,7 @@ void config_apply_profile(awg_config_t *cfg, int idx) {
     cfg->h1 = pr->h1; cfg->h2 = pr->h2; cfg->h3 = pr->h3; cfg->h4 = pr->h4;
     for (int i = 0; i < 5; i++) cfg->cps[i] = pr->cps[i];
     cfg->hp_on = pr->hp_on;
+    cfg->rt = pr->rt;
     cfg->h4_fixed = pr->h4_fixed;
     cfg->h4_noop = pr->h4_noop;
     cfg->init_total = pr->init_total;
@@ -122,12 +124,16 @@ void config_apply_profile(awg_config_t *cfg, int idx) {
 }
 
 void config_compute_max_s4(awg_config_t *cfg) {
-    int m = 0;
+    int m = 0, rt = 0;
     int n = cfg->profile_count > 0 ? cfg->profile_count : 1;
     for (int i = 0; i < n; i++) {
         if (cfg->profiles[i].s4 > m) m = cfg->profiles[i].s4;
+        rt |= cfg->profiles[i].rt;
     }
     cfg->max_s4 = m;
+    /* Server mode hands each client its own profile, so the window has to be
+     * kept up to date whenever *any* stage of the chain sends trailers. */
+    cfg->rt_any = rt;
 }
 
 void config_compute(awg_config_t *cfg) {
@@ -161,6 +167,11 @@ void config_compute(awg_config_t *cfg) {
         cfg->mac1key_out = cfg->has_client_pub ? cfg->mac1key_client : NULL;
         cfg->mac1key_in  = cfg->has_server_pub ? cfg->mac1key_server : NULL;
     }
+
+    /* The window only ever grows from here, so a fresh config starts at the
+     * same floor amneziawg uses for a peer that has not sent anything yet. */
+    if (atomic_load_explicit(&cfg->udp_window, memory_order_relaxed) < AWG_DEFAULT_UDP_WINDOW)
+        atomic_store_explicit(&cfg->udp_window, AWG_DEFAULT_UDP_WINDOW, memory_order_relaxed);
 
     /* profiles[0] always mirrors the flat fields: the active profile is what
      * transform_inbound/outbound resolve to. */
@@ -206,6 +217,30 @@ static inline void fill_padding(uint8_t *dst, int len, uint64_t seed) {
     fastrand_fill(&tmp, dst, (size_t)len);
 }
 
+/* AWG 3.1: length of the random trailer for an outbound handshake, mirroring
+ * amneziawg's peer.randomTrailer() — a draw from [0, window - size). The window
+ * is capped at the packet buffer, so padding + message + trailer always fits
+ * both the caller's buffer and hs_buf. */
+static inline int trailer_len(const awg_config_t *cfg, const awg_profile_t *pr,
+                              int size, uint64_t seed) {
+    if (!pr->rt) return 0;
+    uint32_t win = atomic_load_explicit(&cfg->udp_window, memory_order_relaxed);
+    if (win > AWG_PACKET_BUF_SIZE) win = AWG_PACKET_BUF_SIZE;
+    if ((int)win <= size) return 0;
+    return (int)(mix64(seed ^ 0x7A11E45ull) % (uint32_t)((int)win - size));
+}
+
+/* Append that trailer to a finished packet and return its new length. The
+ * trailer stays in the clear under header protection: only the message itself
+ * is encrypted, exactly as in send.go. */
+static inline int append_trailer(const awg_config_t *cfg, const awg_profile_t *pr,
+                                 uint8_t *pkt, int size, uint64_t seed) {
+    int tl = trailer_len(cfg, pr, size, seed);
+    if (tl > 0)
+        fill_padding(pkt + size, tl, seed ^ 0xFEED1ull);
+    return size + tl;
+}
+
 __attribute__((hot))
 uint8_t *transform_outbound_profile(uint8_t *buf, int dataoff, int n,
                                     const awg_config_t *cfg,
@@ -243,10 +278,10 @@ uint8_t *transform_outbound_profile(uint8_t *buf, int dataoff, int n,
             }
             fill_padding(out, pr->s1, rand_val);
             if (hp) chacha20_xor(cfg->hp_key, out, out + pr->s1, n);
-            *out_len = pr->s1 + n;
+            *out_len = append_trailer(cfg, pr, out, pr->s1 + n, rand_val);
             return out;
         }
-        *out_len = n;
+        *out_len = append_trailer(cfg, pr, data, n, rand_val);
         return data;
     }
 
@@ -264,14 +299,20 @@ uint8_t *transform_outbound_profile(uint8_t *buf, int dataoff, int n,
             }
             fill_padding(out, pr->s2, rand_val ^ 0x12345);
             if (hp) chacha20_xor(cfg->hp_key, out, out + pr->s2, n);
-            *out_len = pr->s2 + n;
+            *out_len = append_trailer(cfg, pr, out, pr->s2 + n, rand_val ^ 0x12345);
             return out;
         }
-        *out_len = n;
+        *out_len = append_trailer(cfg, pr, data, n, rand_val ^ 0x12345);
         return data;
     }
 
     if (msgType == WG_COOKIE_REPLY && n == WG_COOKIE_SIZE) {
+        /* v3.1 DisableCookies: the interface never answers with a cookie, so
+         * the reply the local WireGuard produced is dropped here. */
+        if (cfg->disable_cookies) {
+            *out_len = 0;
+            return NULL;
+        }
         write32_le(data, hrange_pick(&pr->h3, rand_val));
         if (pr->s3 > 0) {
             uint8_t *out;
@@ -283,10 +324,10 @@ uint8_t *transform_outbound_profile(uint8_t *buf, int dataoff, int n,
             }
             fill_padding(out, pr->s3, rand_val ^ 0x67890);
             if (hp) chacha20_xor(cfg->hp_key, out, out + pr->s3, n);
-            *out_len = pr->s3 + n;
+            *out_len = append_trailer(cfg, pr, out, pr->s3 + n, rand_val ^ 0x67890);
             return out;
         }
-        *out_len = n;
+        *out_len = append_trailer(cfg, pr, data, n, rand_val ^ 0x67890);
         return data;
     }
 
@@ -398,37 +439,40 @@ uint8_t *transform_inbound_profile(uint8_t *buf, int n, const awg_config_t *cfg,
         type_mask = read32_le(kstream);
     }
 
-    /* Size-based dispatch: handshake first, transport last */
-    if (n == pr->init_total) {
+    /* Size-based dispatch: handshake first, transport last. With v3.1 random
+     * trailers the peer appends an arbitrary tail, so any length at or above
+     * the expected one qualifies and the tail is cut off by returning the fixed
+     * message size — same rule as receive.go's pskb_trim. */
+    if (n == pr->init_total || (pr->rt && n > pr->init_total)) {
         uint32_t h = read32_le(buf + pr->s1) ^ type_mask;
         if (hrange_contains(&pr->h1, h)) {
             if (kstream) chacha20_xor(cfg->hp_key, buf, buf + pr->s1, WG_INIT_SIZE);
             write32_le(buf + pr->s1, WG_HANDSHAKE_INIT);
             if (cfg->mac1key_in)
                 recompute_mac1(buf + pr->s1, cfg->mac1key_in);
-            *out_len = n - pr->s1;
+            *out_len = WG_INIT_SIZE;
             return buf + pr->s1;
         }
     }
 
-    if (n == pr->resp_total) {
+    if (n == pr->resp_total || (pr->rt && n > pr->resp_total)) {
         uint32_t h = read32_le(buf + pr->s2) ^ type_mask;
         if (hrange_contains(&pr->h2, h)) {
             if (kstream) chacha20_xor(cfg->hp_key, buf, buf + pr->s2, WG_RESP_SIZE);
             write32_le(buf + pr->s2, WG_HANDSHAKE_RESPONSE);
             if (cfg->mac1key_in)
                 recompute_mac1_response(buf + pr->s2, cfg->mac1key_in);
-            *out_len = n - pr->s2;
+            *out_len = WG_RESP_SIZE;
             return buf + pr->s2;
         }
     }
 
-    if (n == pr->cookie_total) {
+    if (n == pr->cookie_total || (pr->rt && n > pr->cookie_total)) {
         uint32_t h = read32_le(buf + pr->s3) ^ type_mask;
         if (hrange_contains(&pr->h3, h)) {
             if (kstream) chacha20_xor(cfg->hp_key, buf, buf + pr->s3, WG_COOKIE_SIZE);
             write32_le(buf + pr->s3, WG_COOKIE_REPLY);
-            *out_len = n - pr->s3;
+            *out_len = WG_COOKIE_SIZE;
             return buf + pr->s3;
         }
     }

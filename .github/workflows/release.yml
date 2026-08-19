@@ -1,0 +1,52 @@
+name: Release artifacts
+
+# Builds the release assets and attaches them to the GitHub release for the tag.
+# Build only — no test step of any kind runs here.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and attach artifacts to (e.g. v1.2.5)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - id: ver
+        run: echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+
+      # QEMU covers arm64/armv7/armv5; buildx keeps its layer cache between the
+      # twelve builds, so each platform actually compiles once.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # 4 static binaries + 4 OCI images (RouterOS 7.21+) + 4 classic Docker
+      # tarballs (RouterOS 7.20 LT) — the same set build-c.sh produces locally.
+      - name: Build artifacts
+        run: VERSION=${{ steps.ver.outputs.version }} ./build-c.sh
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          # The release is normally created by hand with its own notes; only
+          # fall back to generated ones when the tag was pushed without one.
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" builds/* --clobber
