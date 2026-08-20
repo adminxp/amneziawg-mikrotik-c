@@ -486,7 +486,9 @@ With 3+ clients, this is easier to automate with a script on the server.
 | `AWG_SOCKET_BUF` | No | `16777216` | Socket buffer size |
 | `AWG_CPU_C2S` | No | `-1` | CPU for client→server thread |
 | `AWG_CPU_S2C` | No | `-1` | CPU for server→client thread |
-| `AWG_BUSY_POLL` | No | `0` | SO_BUSY_POLL timeout (μs) |
+| `AWG_BUSY_POLL` | No | `0` | SO_BUSY_POLL timeout (μs). Unavailable on RouterOS — its kernel is built without `CONFIG_NET_RX_BUSY_POLL` |
+| `AWG_SPIN` | No | `0` | Userspace spin instead of busy poll: μs of non-blocking re-reads before sleeping. `auto` self-tunes |
+| `AWG_STATS` | No | `0` | Seconds between stat lines (throughput, our drops, kernel drops, per-socket drops) |
 | `AWG_DNS` | No | -- | DNS server for hostname resolution in AWG_REMOTE |
 | `AWG_REJECT_AFTER` | No | -- | v3: accepted, not emulated. Logs a WARN when the lower bound is < 150 s |
 | `AWG_CONTENT_PADDING` | No | -- | v3: accepted and ignored (see below) |
@@ -784,11 +786,39 @@ AWG_CPU_S2C=1    # s2c on core 1
 
 **`AWG_BUSY_POLL`** -- enables SO_BUSY_POLL on sockets. The kernel actively polls the network driver for the specified time (in microseconds) instead of going to sleep. Reduces latency by ~50 μs but increases CPU usage. Requires network driver support.
 
+**RouterOS does not have this knob at all:** its kernel is built without `CONFIG_NET_RX_BUSY_POLL` and `setsockopt` answers `ENOPROTOOPT`. The proxy reports the outcome at startup so that a refusal does not read like a working setting:
+
+```
+INFO: busy-poll: kernel 5.6.3, SO_BUSY_POLL=Protocol not available prefer=no budget=no
+```
+
 ```
 AWG_BUSY_POLL=0     # default, disabled
 AWG_BUSY_POLL=50    # 50 μs of active polling
 AWG_BUSY_POLL=100   # 100 μs, for minimum latency
 ```
+
+**`AWG_SPIN`** -- the same idea done by the proxy itself, asking the kernel for no privilege. After a read comes up empty the thread keeps re-reading the socket without blocking for the given number of microseconds before letting itself be put to sleep, so a burst arriving inside that window is picked up with no wakeup in the path at all. Works where `SO_BUSY_POLL` is unavailable.
+
+`auto` turns on self-tuning: the controller walks a 0/50/100/200/400/800 μs ladder, scores each value by the share of packets dropped for want of socket buffer and re-checks the others now and then. Idle windows do not vote; ties go to the smaller value.
+
+**On a router that is CPU-bound, leave it at 0.** Spinning takes cycles from the softirq doing WireGuard's crypto, and that costs throughput: on a hAP ax3 a speedtest to Amsterdam gave 155-192 Mbit/s with spin and 194-206 without it. It is worth enabling where CPU is plentiful and packets are being lost.
+
+```
+AWG_SPIN=0      # default, disabled
+AWG_SPIN=200    # 200 μs of non-blocking re-reads before sleeping
+AWG_SPIN=auto   # pick the value from the drop rate
+```
+
+**`AWG_STATS`** -- seconds between stat lines (`0` -- off). Printed only when something moved, so an idle tunnel keeps the log clean:
+
+```
+stats: c2s rx=173791 tx=173791 drop=0 | s2c tx=168402 drop=0 |
+       kernel udp in_err=1952 rcvbuf_err=1952 sndbuf_err=0 |
+       sockdrop listen=706 remote=233 | spin=0
+```
+
+The line separates three kinds of loss: `drop` -- ours (the packet arrived but could not be sent), `kernel udp rcvbuf_err` -- the kernel discarded it before we got there, having run out of receive buffer, and `sockdrop` -- which socket actually overflowed. The last one matters more than it looks: during an upload the data goes into the listen socket and only ACKs come back, so that pair of numbers says immediately which direction is failing.
 
 ### Routing Traffic Through the Tunnel
 

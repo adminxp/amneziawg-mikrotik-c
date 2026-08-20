@@ -10,6 +10,12 @@
 #include <netinet/in.h>
 
 #define BUF_SIZE       AWG_PACKET_BUF_SIZE
+/* Datagrams one recvmmsg/sendmmsg round carries.
+ *
+ * 32 is measured, not guessed: on a hAP ax2 (Cortex-A53, 864 MHz) raising it to
+ * 128 dropped tunnel throughput from 208 to 127 Mbit/s. The batch buffers
+ * (BATCH_SIZE * ~1.7 KB per direction) stop fitting the cache, and the saving
+ * on syscalls is spent again on misses. */
 #define BATCH_SIZE     32
 #define H4_RING_SIZE   4096
 #define GRO_BUF_SIZE   65536
@@ -144,6 +150,7 @@ typedef struct {
      * above this one is never reset, or the same warning repeats verbatim on
      * every reconnect. */
     _Atomic uint8_t fe_mtu_hint;
+    _Atomic uint8_t fe_frag_warn;   /* fragmentation warning already logged */
     cliaddr_t client_addr;          /* 16B v4 / 28B v6 */
     socklen_t cli_len;              /* 4B — namelen for every client-leg msg */
     int gso_ok;                     /* 4B */
@@ -219,6 +226,29 @@ typedef struct {
 
     int signal_fd;
     int timer_fd;
+
+    /* Spin-drain budget in force, in microseconds. Lives here rather than in
+     * cfg because the self-tuning controller rewrites it while the reader
+     * threads are running. */
+    _Atomic int spin_us;
+
+    /* Throughput/loss accounting. Bumped once per batch, not per packet, so
+     * the hot path pays one relaxed add per recvmmsg/sendmmsg round. A packet
+     * counted in rx but not in tx was dropped by us — that is the number the
+     * kernel counters cannot show, because the drop happens in userspace when
+     * a send returns EAGAIN/ENOBUFS and the rest of the batch is abandoned.
+     *
+     * 32 bits, not 64: ARMv5 has no 64-bit atomic instruction, so a `_Atomic
+     * unsigned long long` there turns into calls to libatomic that a static
+     * build does not link, and the armv5 target stops building altogether.
+     * Nothing is lost — only differences between samples are ever used, and
+     * unsigned subtraction stays correct across the wrap. */
+    _Atomic uint32_t st_c2s_rx;
+    _Atomic uint32_t st_c2s_tx;
+    _Atomic uint32_t st_c2s_drop;
+    _Atomic uint32_t st_s2c_rx;
+    _Atomic uint32_t st_s2c_tx;
+    _Atomic uint32_t st_s2c_drop;
 
     uint8_t cps_bufs[5][1500];
     int cps_lens[5];

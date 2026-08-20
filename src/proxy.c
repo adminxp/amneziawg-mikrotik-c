@@ -244,9 +244,23 @@ static int create_udp_socket(int family, int blocking) {
     return socket(family, flags, 0);
 }
 
+/* SO_RCVBUF is silently clamped to net.core.rmem_max, which on a router is
+ * usually the 208 KiB default — about 8 ms of traffic at 200 Mbit/s. One
+ * scheduling delay longer than that and the kernel drops the overflow before
+ * the proxy ever sees it, invisibly: nothing in the container's own counters
+ * is exported to the host. SO_RCVBUFFORCE ignores the sysctl ceiling for a
+ * caller holding CAP_NET_ADMIN, which is exactly the case in a MikroTik
+ * container, so try that first and keep the clamped version as the fallback
+ * for unprivileged runs. */
 static void set_socket_buffers(int fd, int size) {
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &size, sizeof(size)) < 0) {
+        log_debug2("SO_RCVBUFFORCE refused: ", strerror(errno));
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &size, sizeof(size)) < 0) {
+        log_debug2("SO_SNDBUFFORCE refused: ", strerror(errno));
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+    }
 }
 
 /* IPv6 has no DF bit — a v6 router never fragments — so there the sockopt only
@@ -261,13 +275,64 @@ static void set_df_off(int fd, int family) {
         log_error2("MTU_DISCOVER dont failed: ", strerror(errno));
 }
 
+/* Busy polling is what gets a packet out of the NIC ring before the thread
+ * would have been woken for it, and on a router that is the difference between
+ * catching a burst and losing its tail: the receive buffer is capped at
+ * net.core.rmem_max and cannot be raised from inside a container.
+ *
+ * Three knobs, in order of how early they act:
+ *   SO_BUSY_POLL        - the thread polls the NAPI itself instead of sleeping,
+ *                         but only while it sits inside recv();
+ *   SO_PREFER_BUSY_POLL - tells NAPI to hold back its own softirq and let the
+ *                         poller drain the ring, so the two stop fighting over
+ *                         the same queue (kernel 5.11+, harmless if refused);
+ *   SO_BUSY_POLL_BUDGET - packets one poll pass may take. A full batch is the
+ *                         useful unit: the caller drains into a BATCH_SIZE
+ *                         array anyway, and a burst is what we are chasing. */
+static const char *kernel_release(char *buf, size_t len) {
+    int fd = open("/proc/sys/kernel/osrelease", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return "?";
+    ssize_t n = read(fd, buf, len - 1);
+    close(fd);
+    if (n <= 0) return "?";
+    buf[n] = 0;
+    char *nl = strchr(buf, 0x0A);
+    if (nl) *nl = 0;
+    return buf;
+}
+
 static void set_busy_poll(int fd, int usec) {
     if (usec <= 0) return;
-    setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &usec, sizeof(usec));
-#ifdef SO_BUSY_POLL_BUDGET
-    int budget = BATCH_SIZE;
-    setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget, sizeof(budget));
+    int ll_err = 0, prefer_ok = 0, budget_ok = 0;
+    if (setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &usec, sizeof(usec)) < 0)
+        ll_err = errno;
+#ifdef SO_PREFER_BUSY_POLL
+    int prefer = 1;
+    prefer_ok = setsockopt(fd, SOL_SOCKET, SO_PREFER_BUSY_POLL,
+                           &prefer, sizeof(prefer)) == 0;
 #endif
+#ifdef SO_BUSY_POLL_BUDGET
+    int budget = BATCH_SIZE * 2;
+    budget_ok = setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET,
+                           &budget, sizeof(budget)) == 0;
+#endif
+    /* Say once what the kernel actually did with each of the three, because
+     * none of them can be taken for granted here. Raising sk_ll_usec above the
+     * sysctl default wants CAP_NET_ADMIN, which a RouterOS container is not
+     * given - the same refusal SO_RCVBUFFORCE gets - and the other two landed
+     * in 5.11, which is newer than the kernel RouterOS ships. A silent failure
+     * here would look exactly like a setting that works and does nothing, and
+     * that is a trap worth one log line. */
+    static int reported = 0;
+    if (!reported) {
+        reported = 1;
+        char kb[64];
+        const char *parts[] = { "busy-poll: kernel ", kernel_release(kb, sizeof(kb)),
+                                ", SO_BUSY_POLL=", ll_err ? strerror(ll_err) : "ok",
+                                " prefer=", prefer_ok ? "yes" : "no",
+                                " budget=", budget_ok ? "yes" : "no" };
+        log_infon(parts, 8);
+    }
 }
 
 static void set_thread_affinity(int cpu, const char *name) {
@@ -309,6 +374,22 @@ static void log_ipv6_mtu_hint(proxy_t *p, const char *why) {
         " or lower — the 40-byte IPv6 header makes a full-size packet exceed "
         "1500 bytes and it will be dropped or fragmented" };
     log_msgn("WARN: ", parts, 4);
+}
+
+/* The IPv6 hint above only fires when the transport is v6, but a large enough
+ * S4 overflows 1500 on IPv4 just as well: at S4=148 even the modest MTU 1380
+ * yields a 1588-byte datagram. Nothing in the router's own counters shows the
+ * resulting fragmentation — it just halves throughput — so warn on the packet
+ * the proxy is actually about to put on the wire. */
+static void log_frag_warn(proxy_t *p, int v6, int outer) {
+    if (g_log_level < LOG_ERROR) return;
+    if (atomic_exchange_explicit(&p->fe_frag_warn, 1, memory_order_relaxed)) return;
+    char ob[12], mb[12];
+    const char *parts[] = { "outgoing packet is ", u32_to_str(ob, (uint32_t)outer),
+        " bytes and will be fragmented: set the WireGuard interface MTU to ",
+        u32_to_str(mb, (uint32_t)awg_max_wg_mtu(p->cfg->max_s4, v6)),
+        " or lower (S4 padding is added to every data packet)" };
+    log_msgn("WARN: ", parts, 5);
 }
 
 /* Open and connect one socket to a resolved endpoint. */
@@ -501,6 +582,83 @@ static uint64_t mono_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+static uint64_t mono_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+/* ---- Spin-drain ---------------------------------------------------------
+ *
+ * SO_BUSY_POLL is the kernel's own answer to "take the packet before the thread
+ * would have been woken for it", and inside a RouterOS container it is not
+ * available: raising sk_ll_usec past the sysctl default needs CAP_NET_ADMIN,
+ * which the router does not hand out - the same refusal SO_RCVBUFFORCE gets.
+ *
+ * What is left is to not fall asleep in the first place. When a read comes up
+ * empty, keep retrying without blocking for a short budget before letting the
+ * thread be parked: a burst arriving inside that budget is picked up with no
+ * wakeup in the path at all, and anything slower falls through to an ordinary
+ * blocking read, so an idle tunnel still costs nothing.
+ *
+ * Both helpers end on a blocking call and never return EAGAIN - their callers
+ * read a negative return as "go round again", and would spin a core flat. */
+/* A retry costs a syscall, and a syscall on a UDP socket takes the same lock
+ * the softirq needs to put the next packet in. Hammering it flat out fights
+ * the delivery it is waiting for, so back off a hair between attempts: a few
+ * hundred nanoseconds of yield keeps the thread on its core and awake while
+ * leaving the lock alone. */
+#define SPIN_PAUSE_SPINS 64
+
+static inline void spin_pause(void) {
+    for (int i = 0; i < SPIN_PAUSE_SPINS; i++) {
+        /* YIELD is ARMv6K and up; on ARMv5 (the armv5 build target) the
+         * assembler rejects it outright, so the hint has to be version-gated
+         * rather than architecture-gated. Where there is no hint instruction
+         * the compiler barrier alone still keeps the loop from being hoisted. */
+#if defined(__aarch64__) || (defined(__ARM_ARCH) && __ARM_ARCH >= 7)
+        __asm__ __volatile__("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+        __asm__ __volatile__("pause" ::: "memory");
+#else
+        __asm__ __volatile__("" ::: "memory");
+#endif
+    }
+}
+
+static int spin_recvmsg(proxy_t *p, int fd, struct msghdr *h) {
+    int spin = atomic_load_explicit(&p->spin_us, memory_order_relaxed);
+    size_t clen = h->msg_controllen;
+    if (spin > 0) {
+        uint64_t deadline = mono_us() + (uint64_t)spin;
+        do {
+            ssize_t n = recvmsg(fd, h, MSG_DONTWAIT);
+            if (n >= 0) return (int)n;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) return (int)n;
+            h->msg_controllen = clen;
+            h->msg_flags = 0;
+            spin_pause();
+        } while (mono_us() < deadline);
+    }
+    h->msg_controllen = clen;
+    h->msg_flags = 0;
+    return (int)recvmsg(fd, h, 0);
+}
+
+static int spin_recvmmsg(proxy_t *p, int fd, struct mmsghdr *msgs, int vlen) {
+    int spin = atomic_load_explicit(&p->spin_us, memory_order_relaxed);
+    if (spin > 0) {
+        uint64_t deadline = mono_us() + (uint64_t)spin;
+        do {
+            int n = recvmmsg(fd, msgs, vlen, MSG_DONTWAIT, NULL);
+            if (n > 0) return n;
+            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return n;
+            spin_pause();
+        } while (mono_us() < deadline);
+    }
+    return recvmmsg(fd, msgs, vlen, MSG_WAITFORONE, NULL);
 }
 
 /* c2s: keep a copy of the first packet sent after a (re)connect so the probe
@@ -704,6 +862,15 @@ static int enable_gro(int fd) {
     return setsockopt(fd, IPPROTO_UDP, UDP_GRO, &val, sizeof(val)) == 0;
 }
 
+/* Reads to wait through before offering GRO another chance, doubling on each
+ * refusal up to the cap. The give-up rule below counts single-segment reads,
+ * which an idle tunnel produces by the dozen — one keepalive every 25 s is
+ * enough to retire GRO for the whole session. Coalescing matters most under
+ * load: without it the socket is drained one datagram per syscall, and the
+ * receive queue overflows well before the CPU runs out. */
+#define GRO_REARM_MIN   512
+#define GRO_REARM_MAX   32768
+
 /* Giving up on GRO has to clear the sockopt too: the kernel keeps coalescing
  * while UDP_GRO is set, and the recvmmsg fallback has no way to split a merged
  * buffer, so it would forward several packets glued into one. */
@@ -755,7 +922,7 @@ static int recv_gro(proxy_t *p, int fd, int *seg_size) {
     p->gro_hdr.msg_controllen = sizeof(p->gro_cmsg);
     p->gro_hdr.msg_flags = 0;
 
-    ssize_t n = recvmsg(fd, &p->gro_hdr, 0);
+    ssize_t n = spin_recvmsg(p, fd, &p->gro_hdr);
     if (n <= 0) {
         *seg_size = 0;
         return (int)n;
@@ -963,6 +1130,138 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
     return 0;
 }
 
+/* ---- Stats ---- */
+
+/* One relaxed add per batch, so the accounting costs nothing measurable even
+ * with stats switched off. nsend - sent is what the proxy itself threw away:
+ * send_batch_gso stops at the first sendmmsg failure and abandons the tail. */
+static inline void stats_add_tx(_Atomic uint32_t *tx, _Atomic uint32_t *drop,
+                                int nsend, int sent) {
+    if (sent > 0)
+        atomic_fetch_add_explicit(tx, (uint32_t)sent, memory_order_relaxed);
+    if (nsend > sent)
+        atomic_fetch_add_explicit(drop, (uint32_t)(nsend - sent),
+                                  memory_order_relaxed);
+}
+
+static inline void stats_add_rx(_Atomic uint32_t *rx, int n) {
+    if (n > 0)
+        atomic_fetch_add_explicit(rx, (uint32_t)n, memory_order_relaxed);
+}
+
+/* The kernel's own UDP drop counters for this network namespace. In a MikroTik
+ * container these are invisible from RouterOS, so without reading them here
+ * there is no way to tell a receive-queue overflow from a send failure. */
+typedef struct {
+    unsigned long long in_errors;
+    unsigned long long rcvbuf_errors;
+    unsigned long long sndbuf_errors;
+} udp_kstats_t;
+
+static int read_udp_kstats(udp_kstats_t *out) {
+    int fd = open("/proc/net/snmp", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    char buf[4096];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+
+    /* Two "Udp:" lines: names then values, in the same column order. */
+    char *names = strstr(buf, "Udp:");
+    if (!names) return -1;
+    char *vals = strstr(names + 4, "Udp:");
+    if (!vals) return -1;
+    char *names_end = strchr(names, 0x0A);
+    if (!names_end || names_end > vals) return -1;
+
+    out->in_errors = out->rcvbuf_errors = out->sndbuf_errors = 0;
+    char *np = names + 4, *vp = vals + 4;
+    while (np < names_end) {
+        while (np < names_end && *np == ' ') np++;
+        while (*vp == ' ') vp++;
+        if (np >= names_end || *vp == 0 || *vp == 0x0A) break;
+        unsigned long long v = 0;
+        char *vstart = vp;
+        while (*vp >= '0' && *vp <= '9') { v = v * 10 + (unsigned)(*vp - '0'); vp++; }
+        if (vp == vstart) break;
+        if (!strncmp(np, "InErrors", 8))          out->in_errors = v;
+        else if (!strncmp(np, "RcvbufErrors", 12)) out->rcvbuf_errors = v;
+        else if (!strncmp(np, "SndbufErrors", 12)) out->sndbuf_errors = v;
+        while (np < names_end && *np != ' ') np++;
+    }
+    return 0;
+}
+
+/* Per-socket receive-queue drops, straight from /proc/net/udp[6].
+ *
+ * The netns-wide UdpRcvbufErrors says that something overflowed but not what:
+ * during an upload the listen socket carries the data and the remote socket
+ * only carries ACKs, and the two lead to opposite conclusions. The kernel
+ * exports a per-socket counter in the last column of /proc/net/udp, keyed by
+ * the local port, so read it for exactly the two sockets this proxy owns. */
+static unsigned long long udp_socket_drops(int fd) {
+    struct sockaddr_storage ss;
+    socklen_t slen = sizeof(ss);
+    if (getsockname(fd, (struct sockaddr *)&ss, &slen) < 0) return 0;
+    int port = ntohs(ss.ss_family == AF_INET6
+                     ? ((struct sockaddr_in6 *)&ss)->sin6_port
+                     : ((struct sockaddr_in *)&ss)->sin_port);
+    if (port <= 0) return 0;
+
+    /* The local address field ends with ":PORT" in uppercase hex. */
+    static const char hex[] = "0123456789ABCDEF";
+    char want[6];
+    want[0] = ':';
+    want[1] = hex[(port >> 12) & 0xF];
+    want[2] = hex[(port >> 8) & 0xF];
+    want[3] = hex[(port >> 4) & 0xF];
+    want[4] = hex[port & 0xF];
+    want[5] = 0;
+
+    unsigned long long total = 0;
+    const char *paths[2] = { "/proc/net/udp", "/proc/net/udp6" };
+    for (int f = 0; f < 2; f++) {
+        int fdp = open(paths[f], O_RDONLY | O_CLOEXEC);
+        if (fdp < 0) continue;
+        /* 64 KiB holds far more sockets than a container ever has; a truncated
+         * read only costs the tail lines, never correctness. */
+        static char buf[65536];
+        ssize_t n = read(fdp, buf, sizeof(buf) - 1);
+        close(fdp);
+        if (n <= 0) continue;
+        buf[n] = 0;
+
+        for (char *line = buf; line && *line; ) {
+            char *end = strchr(line, 0x0A);
+            if (end) *end = 0;
+
+            /* Walk the whitespace-separated fields: [1] is local_address,
+             * the last one is the drop counter. */
+            char *fields[16];
+            int nf = 0;
+            for (char *q = line; *q && nf < 16; ) {
+                while (*q == ' ') q++;
+                if (!*q) break;
+                fields[nf++] = q;
+                while (*q && *q != ' ') q++;
+                if (*q) *q++ = 0;
+            }
+            if (nf >= 3) {
+                char *local = fields[1];
+                int llen = (int)strlen(local);
+                if (llen > 5 && !strcmp(local + llen - 5, want)) {
+                    unsigned long long v = 0;
+                    for (char *c = fields[nf - 1]; *c >= '0' && *c <= '9'; c++)
+                        v = v * 10 + (unsigned)(*c - '0');
+                    total += v;
+                }
+            }
+            line = end ? end + 1 : NULL;
+        }
+    }
+    return total;
+}
 /* ---- Send helpers ---- */
 
 /* A connected UDP socket reports a dead path synchronously, so the send itself
@@ -1087,7 +1386,7 @@ static void send_junk_and_cps(proxy_t *p, int fd) {
  * WireGuard interface says nothing about the tunnel. */
 static int send_batch_gso(proxy_t *p, int fd, struct mmsghdr *msgs,
                           struct iovec *iovecs, int nsend,
-                          cliaddr_t *addr) {
+                          cliaddr_t *addr, int *sent_out) {
     int sent = 0;
     int err = 0;
     if (p->gso_ok && nsend > 1) {
@@ -1111,6 +1410,7 @@ static int send_batch_gso(proxy_t *p, int fd, struct mmsghdr *msgs,
         sent += r;
         err = 0;
     }
+    if (sent_out) *sent_out = sent;
     return err;
 }
 
@@ -1119,7 +1419,14 @@ static int send_batch_gso(proxy_t *p, int fd, struct mmsghdr *msgs,
 static inline void send_batch_remote(proxy_t *p, int fd, struct mmsghdr *msgs,
                                      struct iovec *iovecs, int nsend) {
     he_stash(p, iovecs[0].iov_base, (int)iovecs[0].iov_len, 0);
-    int err = send_batch_gso(p, fd, msgs, iovecs, nsend, NULL);
+    if (!atomic_load_explicit(&p->fe_frag_warn, memory_order_relaxed)) {
+        int v6 = (p->remote.sa.ss_family == AF_INET6);
+        int outer = (int)iovecs[0].iov_len + (v6 ? 48 : 28);
+        if (outer > 1500) log_frag_warn(p, v6, outer);
+    }
+    int sent = 0;
+    int err = send_batch_gso(p, fd, msgs, iovecs, nsend, NULL, &sent);
+    stats_add_tx(&p->st_c2s_tx, &p->st_c2s_drop, nsend, sent);
     if (err) note_remote_send_err(p, err);
 }
 
@@ -1156,6 +1463,7 @@ static void *c2s_thread_normal(void *arg) {
     int prev_nrecv = BATCH_SIZE;
     int gro_no_coalesce = 0;
     int gro_pend_off = 0, gro_pend_total = 0, gro_pend_seg = 0;
+    int gro_rearm_in = 0, gro_rearm_gap = GRO_REARM_MIN;
 
     while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
         int nrecv;
@@ -1175,7 +1483,7 @@ static void *c2s_thread_normal(void *arg) {
                 p->gro_hdr_c2s.msg_flags = 0;
                 p->gro_hdr_c2s.msg_namelen = p->cli_len;
 
-                total = recvmsg(p->listen_fd, &p->gro_hdr_c2s, 0);
+                total = spin_recvmsg(p, p->listen_fd, &p->gro_hdr_c2s);
                 if (total <= 0) {
                     if (atomic_load_explicit(&p->stopped, memory_order_relaxed)) break;
                     continue;
@@ -1219,6 +1527,7 @@ static void *c2s_thread_normal(void *arg) {
                 if (++gro_no_coalesce >= 8) {
                     p->gro_enabled_c2s = 0;
                     disable_gro(p->listen_fd);
+                    gro_rearm_in = gro_rearm_gap;
                     log_info("c2s: GRO not coalescing, falling back to recvmmsg");
                 }
                 if (total > BUF_SIZE) {
@@ -1231,12 +1540,19 @@ static void *c2s_thread_normal(void *arg) {
             }
         } else {
             /* recvmmsg path */
+            if (gro_rearm_in > 0 && --gro_rearm_in == 0 && !cfg->no_gro &&
+                enable_gro(p->listen_fd)) {
+                p->gro_enabled_c2s = 1;
+                gro_no_coalesce = 0;
+                if (gro_rearm_gap < GRO_REARM_MAX) gro_rearm_gap *= 2;
+                log_info("c2s: retrying UDP GRO");
+                continue;
+            }
             for (int i = 0; i < prev_nrecv; i++)
                 p->recv_c2s.iovecs[i].iov_len = BUF_SIZE;
             p->recv_c2s.msgs[0].msg_hdr.msg_namelen = p->cli_len;
 
-            nrecv = recvmmsg(p->listen_fd, p->recv_c2s.msgs, BATCH_SIZE,
-                             MSG_WAITFORONE, NULL);
+            nrecv = spin_recvmmsg(p, p->listen_fd, p->recv_c2s.msgs, BATCH_SIZE);
             if (nrecv <= 0) {
                 if (atomic_load_explicit(&p->stopped, memory_order_relaxed)) break;
                 continue;
@@ -1245,6 +1561,7 @@ static void *c2s_thread_normal(void *arg) {
         }
 
         atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
+        stats_add_rx(&p->st_c2s_rx, nrecv);
 
         /* Check client address from first packet */
         if (note_client_addr(p, &p->recv_c2s.addrs[0]) && p->auto_src_port) {
@@ -1383,8 +1700,7 @@ static void *c2s_thread_reverse(void *arg) {
             p->recv_c2s.msgs[i].msg_hdr.msg_namelen = p->cli_len;
         }
 
-        int nrecv = recvmmsg(p->listen_fd, p->recv_c2s.msgs, BATCH_SIZE,
-                             MSG_WAITFORONE, NULL);
+        int nrecv = spin_recvmmsg(p, p->listen_fd, p->recv_c2s.msgs, BATCH_SIZE);
         if (nrecv <= 0) {
             if (atomic_load_explicit(&p->stopped, memory_order_relaxed)) break;
             continue;
@@ -1392,6 +1708,7 @@ static void *c2s_thread_reverse(void *arg) {
         prev_nrecv = nrecv;
 
         atomic_store_explicit(&p->last_active, 1, memory_order_relaxed);
+        stats_add_rx(&p->st_c2s_rx, nrecv);
 
         /* In reverse (1:1) mode, track single client */
         if (!server_mode)
@@ -1822,6 +2139,7 @@ static void *s2c_thread(void *arg) {
     int s2c_headroom = p->s2c_headroom;
     int s2c_buflen = BUF_SIZE + AWG_PACKET_HEADROOM - s2c_headroom;
     int gro_no_coalesce = 0;
+    int gro_rearm_in = 0, gro_rearm_gap = GRO_REARM_MIN;
     int gro_pend_off = 0, gro_pend_total = 0, gro_pend_seg = 0;
 
     while (!atomic_load_explicit(&p->stopped, memory_order_relaxed)) {
@@ -1923,18 +2241,26 @@ static void *s2c_thread(void *arg) {
                 if (++gro_no_coalesce >= 8) {
                     p->gro_enabled = 0;
                     disable_gro(remote_fd);
-                    log_info("GRO not coalescing, falling back to recvmmsg");
+                    gro_rearm_in = gro_rearm_gap;
+                    log_info("s2c: GRO not coalescing, falling back to recvmmsg");
                 }
                 process_s2c_pkt_normal(p, p->gro_buf, n,
                                        p->send_s2c.iovecs, p->send_s2c.addrs, &nsend);
             }
         } else {
             /* Non-GRO path (or reverse mode): recvmmsg with MSG_WAITFORONE */
+            if (gro_rearm_in > 0 && --gro_rearm_in == 0 && !reverse &&
+                !p->cfg->no_gro && enable_gro(remote_fd)) {
+                p->gro_enabled = 1;
+                gro_no_coalesce = 0;
+                if (gro_rearm_gap < GRO_REARM_MAX) gro_rearm_gap *= 2;
+                log_info("s2c: retrying UDP GRO");
+                continue;
+            }
             for (int i = 0; i < prev_nrecv; i++)
                 p->recv_s2c.iovecs[i].iov_len = s2c_buflen;
 
-            int nrecv = recvmmsg(remote_fd, p->recv_s2c.msgs, BATCH_SIZE,
-                                 MSG_WAITFORONE, NULL);
+            int nrecv = spin_recvmmsg(p, remote_fd, p->recv_s2c.msgs, BATCH_SIZE);
             if (nrecv <= 0) {
                 int saved_errno = errno;
                 if (nrecv == 0 || (saved_errno != EAGAIN && saved_errno != EWOULDBLOCK && saved_errno != EINTR)) {
@@ -1980,8 +2306,10 @@ static void *s2c_thread(void *arg) {
         if (nsend > 0) {
             cliaddr_t *gso_addr = (p->cfg->mode == AWG_MODE_SERVER)
                 ? NULL : &p->send_s2c.addrs[0];
+            int sent_s2c = 0;
             send_batch_gso(p, p->listen_fd, p->send_s2c.msgs,
-                           p->send_s2c.iovecs, nsend, gso_addr);
+                           p->send_s2c.iovecs, nsend, gso_addr, &sent_s2c);
+            stats_add_tx(&p->st_s2c_tx, &p->st_s2c_drop, nsend, sent_s2c);
         }
     }
 
@@ -1989,6 +2317,136 @@ static void *s2c_thread(void *arg) {
 }
 
 /* ---- Main ---- */
+
+/* ---- Self-tuning spin budget -------------------------------------------
+ *
+ * The loss this fights is a timing one: the router's WireGuard hands the proxy
+ * a burst at LAN speed, and the couple of milliseconds it takes to wake the
+ * reading thread is long enough to overrun a receive buffer that cannot be
+ * raised past net.core.rmem_max from inside a container. Spinning removes the
+ * wakeup from that path - the thread is already looking.
+ *
+ * How long to spin is not a constant. It depends on how the peer paces its
+ * bursts, on what else the router is doing, and on how much of a core can be
+ * spared for looking rather than working. So walk a ladder of budgets, score
+ * each rung by the share of packets the kernel dropped for want of buffer,
+ * settle on the best and re-check the others now and then. Drop share is the
+ * only signal here not swamped by throughput noise, and it is the exact
+ * failure being prevented. */
+#define SP_LADDER_N     6
+#define SP_START_IDX    3      /* SPIN_START_US, and the ladder must agree */
+#define SP_WINDOW_TICKS 3      /* 5 s timer ticks per measurement window */
+#define SP_MIN_PACKETS  20000  /* quieter than this and the window judges nothing:
+                                * a light window drops nothing at any setting,
+                                * so it would only vote for whatever is in force */
+#define SP_PROBE_EVERY  20     /* settled windows between deliberate re-checks:
+                                * a probe spends 15 s on a possibly worse rung,
+                                * which is 5 % of the time at this spacing */
+
+static const int sp_ladder[SP_LADDER_N] = { 0, 50, 100, 200, 400, 800 };
+
+typedef struct {
+    int idx;                        /* ladder rung in force */
+    int best;                       /* lowest-scoring rung so far */
+    int tick;                       /* 5 s ticks into the current window */
+    int windows;                    /* judged windows since the last probe */
+    int probe_cursor;
+    unsigned score[SP_LADDER_N];    /* EWMA, drops per 10 000 packets */
+    unsigned char seen[SP_LADDER_N];
+    uint32_t pv_pkts;
+    unsigned long long pv_drops;
+} spin_ctl_t;
+
+static uint32_t sp_packets(proxy_t *p) {
+    /* s2c keeps no rx counter of its own; what it forwarded to the client is
+     * the same count of datagrams it took off the remote socket. Kept in 32
+     * bits on purpose: the difference between two samples is what matters, and
+     * it survives the wrap. */
+    return atomic_load_explicit(&p->st_c2s_rx, memory_order_relaxed) +
+           atomic_load_explicit(&p->st_s2c_tx, memory_order_relaxed);
+}
+
+static unsigned long long sp_drops(proxy_t *p) {
+    int rfd = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
+    return udp_socket_drops(p->listen_fd) +
+           (rfd >= 0 ? udp_socket_drops(rfd) : 0);
+}
+
+static void sp_init(proxy_t *p, spin_ctl_t *c) {
+    memset(c, 0, sizeof(*c));
+    c->idx = SP_START_IDX;
+    c->best = SP_START_IDX;
+    c->pv_pkts = sp_packets(p);
+    c->pv_drops = sp_drops(p);
+}
+
+/* One 5 s tick of the controller; acts once every SP_WINDOW_TICKS. */
+static void sp_tick(proxy_t *p, spin_ctl_t *c) {
+    if (++c->tick < SP_WINDOW_TICKS) return;
+    c->tick = 0;
+
+    uint32_t pkts = sp_packets(p);
+    unsigned long long drops = sp_drops(p);
+    uint32_t d_pkts = pkts - c->pv_pkts;          /* correct across the wrap */
+    unsigned long long d_drops = drops > c->pv_drops ? drops - c->pv_drops : 0;
+    c->pv_pkts = pkts;
+    c->pv_drops = drops;
+
+    /* An idle window makes every rung look perfect. Averaging that in would
+     * erase what the busy windows measured, so it counts as no sample at all. */
+    if (d_pkts < SP_MIN_PACKETS) return;
+
+    unsigned sample = (unsigned)((d_drops * 10000ULL) / d_pkts);
+    c->score[c->idx] = c->seen[c->idx] ? (c->score[c->idx] * 3 + sample) / 4
+                                       : sample;
+    c->seen[c->idx] = 1;
+
+    /* Try every rung once before trusting any comparison, opening at the one
+     * that measured best on the routers this was built for. */
+    for (int k = 0; k < SP_LADDER_N; k++) {
+        int i = (SP_START_IDX + k) % SP_LADDER_N;
+        if (!c->seen[i]) {
+            c->idx = i;
+            atomic_store_explicit(&p->spin_us, sp_ladder[i], memory_order_relaxed);
+            return;
+        }
+    }
+
+    /* Ties go to the lower rung, and the ladder is ascending: when two budgets
+     * both come through a loaded window without dropping anything, the cheaper
+     * one wins and the router stops burning a core on looking for work that
+     * was not going to be missed anyway. */
+    int best = 0;
+    for (int i = 1; i < SP_LADDER_N; i++)
+        if (c->score[i] < c->score[best]) best = i;
+
+    int next = best;
+    if (++c->windows >= SP_PROBE_EVERY) {
+        c->windows = 0;
+        for (int k = 0; k < SP_LADDER_N; k++) {
+            int i = (c->probe_cursor + k) % SP_LADDER_N;
+            if (i != best) { next = i; c->probe_cursor = i + 1; break; }
+        }
+    }
+
+    if (best != c->best) {
+        char b[2][12];
+        const char *parts[] = { "spin: settled on ",
+                                u32_to_str(b[0], sp_ladder[best]), "us at ",
+                                u32_to_str(b[1], c->score[best]), " drops/10k" };
+        log_infon(parts, 5);
+        c->best = best;
+    }
+    if (next != c->idx) {
+        char b[2][12];
+        const char *parts[] = { "spin: ", u32_to_str(b[0], sp_ladder[next]),
+                                "us (was ", u32_to_str(b[1], sp_ladder[c->idx]),
+                                "us)" };
+        log_debugn(parts, 5);
+        c->idx = next;
+        atomic_store_explicit(&p->spin_us, sp_ladder[next], memory_order_relaxed);
+    }
+}
 
 int proxy_run(proxy_t *p) {
     awg_config_t *cfg = p->cfg;
@@ -2015,6 +2473,7 @@ int proxy_run(proxy_t *p) {
     if (p->listen_family == AF_INET6)
         log_ipv6_mtu_hint(p, "clients reach this proxy over IPv6");
     set_socket_buffers(p->listen_fd, cfg->socket_buf);
+    atomic_store_explicit(&p->spin_us, cfg->spin_us, memory_order_relaxed);
     set_busy_poll(p->listen_fd, cfg->busy_poll);
     if (cfg->no_df)
         set_df_off(p->listen_fd, p->listen_family);
@@ -2107,6 +2566,25 @@ int proxy_run(proxy_t *p) {
     }
     int dns_tick = 0;
     int dns_miss = 0;
+
+    /* Stats ticker: AWG_STATS seconds, rounded to the 5 s timer. Prints only
+     * when something moved, so an idle tunnel stays silent in the router log. */
+    int stats_checks = cfg->stats_interval > 0 ? cfg->stats_interval / 5 : 0;
+    if (cfg->stats_interval > 0 && stats_checks < 1) stats_checks = 1;
+    int stats_tick = 0;
+    spin_ctl_t spc;
+    if (cfg->spin_auto) {
+        sp_init(p, &spc);
+        log_info("spin: self-tuning enabled");
+    }
+    uint32_t pv_c2s_rx = 0, pv_c2s_tx = 0, pv_c2s_dr = 0;
+    uint32_t pv_s2c_tx = 0, pv_s2c_dr = 0;
+    udp_kstats_t pv_k = { 0, 0, 0 };
+    unsigned long long pv_sl_l = 0, pv_sl_r = 0;
+    if (stats_checks > 0) {
+        read_udp_kstats(&pv_k);
+        pv_sl_l = udp_socket_drops(p->listen_fd);
+    }
 
     /* Epoll for signal + timer only */
     int epfd = epoll_create1(EPOLL_CLOEXEC);
@@ -2211,6 +2689,55 @@ int proxy_run(proxy_t *p) {
                         silent_ticks = 0;
                         init_unanswered = 0;
                     }
+                }
+
+                if (cfg->spin_auto) sp_tick(p, &spc);
+
+                if (stats_checks > 0 && ++stats_tick >= stats_checks) {
+                    stats_tick = 0;
+                    uint32_t c2s_rx = atomic_load_explicit(&p->st_c2s_rx, memory_order_relaxed);
+                    uint32_t c2s_tx = atomic_load_explicit(&p->st_c2s_tx, memory_order_relaxed);
+                    uint32_t c2s_dr = atomic_load_explicit(&p->st_c2s_drop, memory_order_relaxed);
+                    uint32_t s2c_tx = atomic_load_explicit(&p->st_s2c_tx, memory_order_relaxed);
+                    uint32_t s2c_dr = atomic_load_explicit(&p->st_s2c_drop, memory_order_relaxed);
+                    udp_kstats_t k = { 0, 0, 0 };
+                    read_udp_kstats(&k);
+                    uint32_t d_rx = c2s_rx - pv_c2s_rx, d_tx = c2s_tx - pv_c2s_tx;
+                    uint32_t d_dr = c2s_dr - pv_c2s_dr;
+                    uint32_t d_stx = s2c_tx - pv_s2c_tx, d_sdr = s2c_dr - pv_s2c_dr;
+                    unsigned long long d_kin = k.in_errors - pv_k.in_errors;
+                    unsigned long long d_krb = k.rcvbuf_errors - pv_k.rcvbuf_errors;
+                    unsigned long long d_ksb = k.sndbuf_errors - pv_k.sndbuf_errors;
+                    /* Which of the two sockets actually overflowed: during an
+                     * upload the listen socket carries the data and the remote
+                     * one only the ACKs, and the netns-wide counter cannot tell
+                     * them apart. */
+                    int rfd_now = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
+                    unsigned long long sl = udp_socket_drops(p->listen_fd);
+                    unsigned long long sr = rfd_now >= 0 ? udp_socket_drops(rfd_now) : pv_sl_r;
+                    unsigned long long d_sl = sl > pv_sl_l ? sl - pv_sl_l : 0;
+                    unsigned long long d_sr = sr > pv_sl_r ? sr - pv_sl_r : 0;
+                    pv_sl_l = sl; pv_sl_r = sr;
+                    if (d_rx || d_tx || d_dr || d_stx || d_sdr ||
+                        d_kin || d_krb || d_ksb || d_sl || d_sr) {
+                        char b[11][12];
+                        const char *parts[] = {
+                            "stats: c2s rx=", u32_to_str(b[0], (unsigned)d_rx),
+                            " tx=", u32_to_str(b[1], (unsigned)d_tx),
+                            " drop=", u32_to_str(b[2], (unsigned)d_dr),
+                            " | s2c tx=", u32_to_str(b[3], (unsigned)d_stx),
+                            " drop=", u32_to_str(b[4], (unsigned)d_sdr),
+                            " | kernel udp in_err=", u32_to_str(b[5], (unsigned)d_kin),
+                            " rcvbuf_err=", u32_to_str(b[6], (unsigned)d_krb),
+                            " sndbuf_err=", u32_to_str(b[7], (unsigned)d_ksb),
+                            " | sockdrop listen=", u32_to_str(b[8], (unsigned)d_sl),
+                            " remote=", u32_to_str(b[9], (unsigned)d_sr),
+                            " | spin=", u32_to_str(b[10], (unsigned)atomic_load_explicit(
+                                                &p->spin_us, memory_order_relaxed)) };
+                        log_infon(parts, 22);
+                    }
+                    pv_c2s_rx = c2s_rx; pv_c2s_tx = c2s_tx; pv_c2s_dr = c2s_dr;
+                    pv_s2c_tx = s2c_tx; pv_s2c_dr = s2c_dr; pv_k = k;
                 }
 
                 if (dns_checks > 0 && ++dns_tick >= dns_checks) {

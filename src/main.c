@@ -507,10 +507,31 @@ int main(void) {
     if ((v = getenv("AWG_BUSY_POLL")) && v[0])
         cfg->busy_poll = parse_int_str(v);
 
+    /* Spin-drain: how long a reader keeps retrying a non-blocking read before
+     * it lets itself be put to sleep. Unlike SO_BUSY_POLL this asks the kernel
+     * for no privilege at all, so it still works in a container the router
+     * hands no CAP_NET_ADMIN to. */
+    cfg->spin_us = 0;
+    cfg->spin_auto = 0;
+    if ((v = getenv("AWG_SPIN")) && v[0]) {
+        if (v[0] == 'a' || v[0] == 'A') {
+            cfg->spin_auto = 1;
+            cfg->spin_us = SPIN_START_US;
+        } else {
+            cfg->spin_us = parse_int_str(v);
+        }
+    }
+
     /* No GRO */
     cfg->no_gro = 0;
     if ((v = getenv("AWG_NO_GRO")) && v[0])
         cfg->no_gro = parse_int_str(v);
+
+    /* Periodic line with throughput, our own drops and the kernel's. Off by
+     * default: it is a diagnostic, and on a router the log is precious. */
+    cfg->stats_interval = 0;
+    if ((v = getenv("AWG_STATS")) && v[0])
+        cfg->stats_interval = parse_int_str(v);
 
     /* No DF: clear the Don't-Fragment bit on UDP sockets (some DPI/middleboxes
      * mishandle DF=1 UDP; opt-in, changes on-wire IP header behavior) */
@@ -625,14 +646,17 @@ int main(void) {
         log_info("config: UDP GRO disabled (AWG_NO_GRO=1)");
     if (cfg->no_df)
         log_info("config: DF bit cleared on UDP sockets (AWG_NO_DF=1)");
-    if (cfg->cpu_c2s >= 0 || cfg->cpu_s2c >= 0 || cfg->busy_poll > 0) {
-        char c2sb[12], s2cb[12], bpb[12];
+    if (cfg->cpu_c2s >= 0 || cfg->cpu_s2c >= 0 || cfg->busy_poll > 0 ||
+        cfg->spin_us > 0) {
+        char c2sb[12], s2cb[12], bpb[12], spb[12];
         const char *parts[] = {
             "perf: cpu_c2s=", cfg->cpu_c2s >= 0 ? u32_to_str(c2sb, cfg->cpu_c2s) : "auto",
             " cpu_s2c=", cfg->cpu_s2c >= 0 ? u32_to_str(s2cb, cfg->cpu_s2c) : "auto",
-            " busy_poll=", cfg->busy_poll > 0 ? u32_to_str(bpb, cfg->busy_poll) : "off"
+            " busy_poll=", cfg->busy_poll > 0 ? u32_to_str(bpb, cfg->busy_poll) : "off",
+            " spin=", cfg->spin_auto ? "auto" :
+                            (cfg->spin_us > 0 ? u32_to_str(spb, cfg->spin_us) : "off")
         };
-        log_infon(parts, 6);
+        log_infon(parts, 8);
     }
 
     /* Init and run proxy */

@@ -120,6 +120,9 @@ typedef struct {
 /* Config struct */
 #define AWG_MAX_SERVER_PEERS 256
 
+/* Opening bid for the spin-drain controller: the rung it starts on. */
+#define SPIN_START_US 200
+
 typedef struct {
     int jc, jmin, jmax;
     int s1, s2, s3, s4;
@@ -171,8 +174,11 @@ typedef struct {
     int cpu_c2s;        /* CPU affinity for c2s thread (-1 = auto) */
     int cpu_s2c;        /* CPU affinity for s2c thread (-1 = auto) */
     int busy_poll;      /* SO_BUSY_POLL timeout in μs (0 = off) */
+    int spin_us;        /* userspace spin-drain budget in μs (0 = off) */
+    int spin_auto;      /* AWG_SPIN=auto: tune that budget at runtime */
     int no_gro;         /* disable UDP GRO (AWG_NO_GRO=1) */
     int no_df;          /* clear DF bit on UDP sockets (AWG_NO_DF=1) */
+    int stats_interval; /* seconds between throughput/drop stat lines, 0 = off */
 
     int mode;           /* 0=normal, 1=reverse, 2=server */
 

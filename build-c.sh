@@ -9,6 +9,21 @@ DIR=builds
 
 # debian:bookworm-slim no longer lists linux/arm/v5, so that one platform builds
 # from the per-arch repo instead (see the BASE arg in the Dockerfile).
+# Every stage fans out over four platforms and waits. A bare `wait` returns the
+# status of the last job only, so a failure in any of the other three passed
+# silently: v1.2.6 shipped without its three armv5 artifacts and the CI run
+# still went green. Wait on each pid and fail the stage if any of them did.
+pids=()
+wait_all() {
+  local rc=0 pid
+  for pid in "${pids[@]}"; do
+    wait "$pid" || rc=1
+  done
+  pids=()
+  [ "$rc" -eq 0 ] || { echo "$1: FAILED" >&2; exit 1; }
+  echo "$1 done"
+}
+
 base_for() {
   case "$1" in
     linux/arm/v5) echo "arm32v5/debian:bookworm-slim" ;;
@@ -35,9 +50,9 @@ for spec in "arm64:linux/arm64" "arm:linux/arm/v7" "armv5:linux/arm/v5" "amd64:l
     mv "$DIR/bin-$arch/awg-proxy" "$DIR/$IMAGE-linux-$arch"
     rm -rf "$DIR/bin-$arch"
   ) &
+  pids+=($!)
 done
-wait
-echo "Linux binaries done"
+wait_all "Linux binaries"
 echo ""
 
 # --- OCI images ---
@@ -53,9 +68,9 @@ for spec in "arm64:linux/arm64" "arm:linux/arm/v7" "armv5:linux/arm/v5" "amd64:l
       -t "$IMAGE:$VERSION-$arch" .
     gzip -f "$DIR/$IMAGE-$arch.tar"
   ) &
+  pids+=($!)
 done
-wait
-echo "OCI images done"
+wait_all "OCI images"
 echo ""
 
 # --- Classic Docker (RouterOS 7.20 LT) ---
@@ -64,9 +79,9 @@ declare -A ARMS=([arm64]="" [arm]="7" [armv5]="5" [amd64]="")
 for arch in arm64 arm armv5 amd64; do
   VERSION=$VERSION scripts/mkdockertar-c.sh linux "${arch%v5}" "${ARMS[$arch]}" \
     "$IMAGE:$VERSION-$arch" "$DIR/$IMAGE-$arch-7.20-Docker.tar.gz" &
+  pids+=($!)
 done
-wait
-echo "Classic Docker images done"
+wait_all "Classic Docker images"
 echo ""
 
 # --- Summary ---
