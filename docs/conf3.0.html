@@ -715,6 +715,11 @@
             <span data-i18n="netwatchLabel">Netwatch failover</span></label>
             <div class="hint" data-i18n="netwatchHint">Monitors tunnel availability by pinging 8.8.8.8 through the WG interface (via a pinned probe route). If the tunnel is down, disables its route &mdash; traffic falls back to the next tunnel (by distance) or goes direct. Re-enables the route when the tunnel recovers.</div>
         </div>
+        <div id="v6block-row" style="margin-top:8px">
+            <label><input type="checkbox" id="v6block-enable" checked>
+            <span data-i18n="v6blockLabel">Force IPv4 (block native IPv6 past the tunnel)</span></label>
+            <div class="hint" data-i18n="v6blockHint">Only IPv4 goes into the tunnel. If the ISP hands the router native IPv6, every IPv6 flow leaves straight out of WAN and the routing policy never sees it: the site opens past the VPN, or hangs for about 10 seconds until the client falls back to IPv4. These rules reject such connections (TCP with a reset, so the fallback is instant). Anything that must keep speaking IPv6 directly goes into the ...-v6-direct address list.</div>
+        </div>
         <div id="df-row" style="margin-top:8px">
             <label><input type="checkbox" id="df-enable">
             <span data-i18n="dfLabel">Clear DF bit on UDP (DPI workaround)</span></label>
@@ -1101,6 +1106,8 @@
             pCustom: 'Custom...',
             netwatchLabel: 'Netwatch failover',
             netwatchHint: 'Monitors tunnel availability by pinging 8.8.8.8 through the WG interface (via a pinned probe route). If the tunnel is down, disables its route \u2014 traffic falls back to the next tunnel (by distance) or goes direct. Re-enables when the tunnel recovers.',
+            v6blockLabel: 'Force IPv4 (block native IPv6 past the tunnel)',
+            v6blockHint: 'Only IPv4 goes into the tunnel. If the ISP hands the router native IPv6, every IPv6 flow leaves straight out of WAN and the routing policy never sees it: the site opens past the VPN, or hangs for about 10 seconds until the client falls back to IPv4. These rules reject such connections (TCP with a reset, so the fallback is instant). Anything that must keep speaking IPv6 directly goes into the ...-v6-direct address list.',
             dfLabel: 'Clear DF bit on UDP (DPI workaround)',
             dfHint: 'Adds AWG_NO_DF=1 to the container ENV: the proxy clears the Don\u2019t Fragment bit on its UDP packets. Some DPI equipment passes DF=0 UDP better than DF=1. Enable only if the tunnel has connectivity issues \u2014 with DF=0 large packets may be fragmented along the path.',
             ipv6Label: 'Server is reachable over IPv6',
@@ -1293,6 +1300,8 @@
             pCustom: '\u0414\u0440\u0443\u0433\u043e\u0435...',
             netwatchLabel: 'Netwatch failover',
             netwatchHint: '\u041f\u0440\u043e\u0432\u0435\u0440\u044f\u0435\u0442 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0441\u0442\u044c \u0442\u0443\u043d\u043d\u0435\u043b\u044f \u043f\u0438\u043d\u0433\u043e\u043c 8.8.8.8 \u0447\u0435\u0440\u0435\u0437 WG-\u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441 (\u0447\u0435\u0440\u0435\u0437 \u0437\u0430\u043a\u0440\u0435\u043f\u043b\u0451\u043d\u043d\u044b\u0439 probe-\u043c\u0430\u0440\u0448\u0440\u0443\u0442). \u0415\u0441\u043b\u0438 \u0442\u0443\u043d\u043d\u0435\u043b\u044c \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u2014 \u043e\u0442\u043a\u043b\u044e\u0447\u0430\u0435\u0442 \u0435\u0433\u043e \u043c\u0430\u0440\u0448\u0440\u0443\u0442, \u0442\u0440\u0430\u0444\u0438\u043a \u043f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0442\u0443\u043d\u043d\u0435\u043b\u044c (\u043f\u043e distance) \u0438\u043b\u0438 \u0438\u0434\u0451\u0442 \u043d\u0430\u043f\u0440\u044f\u043c\u0443\u044e. \u041f\u0440\u0438 \u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0438 \u043c\u0430\u0440\u0448\u0440\u0443\u0442 \u0432\u043a\u043b\u044e\u0447\u0430\u0435\u0442\u0441\u044f \u043e\u0431\u0440\u0430\u0442\u043d\u043e.',
+            v6blockLabel: '\u0424\u043e\u0440\u0441\u0438\u0440\u043e\u0432\u0430\u0442\u044c IPv4 (\u043d\u0435 \u043f\u0443\u0441\u043a\u0430\u0442\u044c IPv6 \u043c\u0438\u043c\u043e \u0442\u0443\u043d\u043d\u0435\u043b\u044f)',
+            v6blockHint: '\u0412 \u0442\u0443\u043d\u043d\u0435\u043b\u044c \u0437\u0430\u0432\u043e\u0434\u0438\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e IPv4. \u0415\u0441\u043b\u0438 \u043f\u0440\u043e\u0432\u0430\u0439\u0434\u0435\u0440 \u0432\u044b\u0434\u0430\u043b \u0440\u043e\u0443\u0442\u0435\u0440\u0443 \u043d\u0430\u0442\u0438\u0432\u043d\u044b\u0439 IPv6, \u0432\u0435\u0441\u044c IPv6-\u0442\u0440\u0430\u0444\u0438\u043a \u0443\u0445\u043e\u0434\u0438\u0442 \u043f\u0440\u044f\u043c\u043e \u0432 WAN \u0438 \u043f\u0440\u0430\u0432\u0438\u043b\u0430 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438 \u0435\u0433\u043e \u043d\u0435 \u0432\u0438\u0434\u044f\u0442: \u0441\u0430\u0439\u0442 \u043e\u0442\u043a\u0440\u044b\u0432\u0430\u0435\u0442\u0441\u044f \u043c\u0438\u043c\u043e VPN \u0438\u043b\u0438 \u0432\u0438\u0441\u043d\u0435\u0442 \u043e\u043a\u043e\u043b\u043e 10 \u0441\u0435\u043a\u0443\u043d\u0434, \u043f\u043e\u043a\u0430 \u043a\u043b\u0438\u0435\u043d\u0442 \u043d\u0435 \u043e\u0442\u043a\u0430\u0442\u0438\u0442\u0441\u044f \u043d\u0430 IPv4. \u041f\u0440\u0430\u0432\u0438\u043b\u0430 \u043e\u0442\u0431\u0438\u0432\u0430\u044e\u0442 \u0442\u0430\u043a\u0438\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f (TCP \u2014 \u0447\u0435\u0440\u0435\u0437 reset, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 \u043e\u0442\u043a\u0430\u0442 \u043c\u0433\u043d\u043e\u0432\u0435\u043d\u043d\u044b\u0439). \u0422\u043e, \u0447\u0442\u043e \u0434\u043e\u043b\u0436\u043d\u043e \u0445\u043e\u0434\u0438\u0442\u044c \u043f\u043e IPv6 \u043d\u0430\u043f\u0440\u044f\u043c\u0443\u044e, \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0439\u0442\u0435 \u0432 \u0430\u0434\u0440\u0435\u0441-\u043b\u0438\u0441\u0442 ...-v6-direct.',
             dfLabel: '\u0423\u0431\u0440\u0430\u0442\u044c DF-\u0431\u0438\u0442 \u0441 UDP (\u043e\u0431\u0445\u043e\u0434 \u0422\u0421\u041f\u0423)',
             dfHint: '\u0414\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442 AWG_NO_DF=1 \u0432 \u043f\u0435\u0440\u0435\u043c\u0435\u043d\u043d\u044b\u0435 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u0430: \u043f\u0440\u043e\u043a\u0441\u0438 \u0441\u043d\u0438\u043c\u0430\u0435\u0442 Don\u2019t Fragment \u0431\u0438\u0442 \u0441\u043e \u0441\u0432\u043e\u0438\u0445 UDP-\u043f\u0430\u043a\u0435\u0442\u043e\u0432. \u0427\u0430\u0441\u0442\u044c DPI-\u043e\u0431\u043e\u0440\u0443\u0434\u043e\u0432\u0430\u043d\u0438\u044f (\u0422\u0421\u041f\u0423) \u043b\u0443\u0447\u0448\u0435 \u043f\u0440\u043e\u043f\u0443\u0441\u043a\u0430\u0435\u0442 UDP \u0441 DF=0. \u0412\u043a\u043b\u044e\u0447\u0430\u0439\u0442\u0435 \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0440\u0438 \u043f\u0440\u043e\u0431\u043b\u0435\u043c\u0430\u0445 \u0441\u043e \u0441\u0432\u044f\u0437\u044c\u044e \u2014 \u0441 DF=0 \u043a\u0440\u0443\u043f\u043d\u044b\u0435 \u043f\u0430\u043a\u0435\u0442\u044b \u043c\u043e\u0433\u0443\u0442 \u0444\u0440\u0430\u0433\u043c\u0435\u043d\u0442\u0438\u0440\u043e\u0432\u0430\u0442\u044c\u0441\u044f \u043f\u043e \u043f\u0443\u0442\u0438.',
             ipv6Label: '\u0421\u0435\u0440\u0432\u0435\u0440 \u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u043f\u043e IPv6',
@@ -2187,6 +2196,7 @@
         document.getElementById('fasttrack-warn').style.display = (s === 'dns-fwd' || s === 'non-ru') ? 'block' : 'none';
         document.getElementById('non-ru-warn').style.display = s === 'non-ru' ? 'block' : 'none';
         document.getElementById('netwatch-row').style.display = (s === 'dns-fwd' || s === 'non-ru') ? 'block' : 'none';
+        document.getElementById('v6block-row').style.display = (s === 'dns-fwd' || s === 'non-ru') ? 'block' : 'none';
         var hintKey = s === 'dns-fwd' ? 'scenarioDnsHint' : s === 'non-ru' ? 'scenarioNonRuHint' : 'scenarioTunnelHint';
         var hintEl = document.getElementById('scenario-hint');
         hintEl.setAttribute('data-i18n', hintKey);
@@ -2380,6 +2390,42 @@
         ];
     }
 
+    function v6BlockEnabled() {
+        var el = document.getElementById('v6block-enable');
+        return !!(el && el.checked);
+    }
+
+    // Нативный IPv6 провайдера обходит туннель стороной. Внутрь wg заводится
+    // только IPv4 (на интерфейсе один /ip/address), поэтому ::/0 у роутера
+    // смотрит в WAN, и весь IPv6-трафик LAN уходит напрямую — вся политика
+    // маршрутизации выше его попросту не видит. Симптом обманчивый: ICMPv6 до
+    // цели проходит, а TCP висит ~10 секунд, пока клиент не откатится на IPv4,
+    // из-за чего это выглядит как «тормозит VPN», а не как утечка мимо него.
+    //
+    // reject, а не drop: RST/admin-prohibited возвращает клиента на IPv4
+    // мгновенно, drop заставляет его досидеть таймаут. Правила дописываются в
+    // конец цепочки, то есть ПОСЛЕ defconf-accept established,related — рвутся
+    // только новые соединения. Матч по out-interface-list=WAN, поэтому соседние
+    // туннели того же роутера и veth контейнера не задеты; всё остальное, что
+    // должно ходить по IPv6 напрямую, кладётся в список <prefix>-v6-direct.
+    // Комментарии правил — латиницей: кириллица в comment роняет команду в
+    // RouterOS молча, правило просто не создаётся.
+    function buildV6ForceIpv4(prefix) {
+        var tag = prefix + '-v6-force4';
+        var list = prefix + '-v6-direct';
+        return [
+            '# Force IPv4: the tunnel carries no IPv6, so native ISP IPv6 would bypass it',
+            // v6net, а не net: в non-ru-сценарии выше уже есть свой :foreach net
+            // по приватным диапазонам, и в одном блоке имя лучше не переиспользовать.
+            ':foreach v6net in={"fc00::/7";"fe80::/10";"ff00::/8"} do={',
+            '  :do { /ipv6/firewall/address-list/add list=' + list + ' address=$v6net comment=' + tag + ' } on-error={}',
+            '}',
+            '/ipv6/firewall/filter/add chain=forward action=accept dst-address-list=' + list + ' in-interface-list=LAN comment=' + tag,
+            '/ipv6/firewall/filter/add chain=forward action=reject reject-with=tcp-reset protocol=tcp in-interface-list=LAN out-interface-list=WAN comment=' + tag,
+            '/ipv6/firewall/filter/add chain=forward action=reject reject-with=icmp-admin-prohibited in-interface-list=LAN out-interface-list=WAN comment=' + tag
+        ];
+    }
+
     function getSelectedDohForwarder() {
         var radios = document.getElementsByName('doh-fwd');
         for (var i = 0; i < radios.length; i++) {
@@ -2455,9 +2501,14 @@
         lines.push('  /ip/firewall/mangle/add chain=prerouting action=mark-connection new-connection-mark=' + prefix + '-fwd-conn dst-address-list=$l in-interface-list=LAN passthrough=yes comment=' + prefix + '-fwd');
         lines.push('}');
         lines.push('/ip/firewall/mangle/add chain=prerouting action=mark-routing new-routing-mark=' + prefix + '-fwd-table connection-mark=' + prefix + '-fwd-conn in-interface-list=LAN passthrough=no comment=' + prefix + '-fwd');
-        lines.push('# MSS clamp for WireGuard (MTU 1420)');
+        // clamp-to-pmtu, а не число: MTU интерфейса зависит от S4 и транспорта
+        // (wgMtuForS4), захардкоженное значение с ним разъезжается. Пары
+        // /ipv6/firewall/mangle тут нет намеренно — в туннель заводится только
+        // IPv4, клемпить по IPv6 нечего; за IPv6 отвечает buildV6ForceIpv4.
+        lines.push('# MSS clamp for the tunnel (IPv4 only - nothing IPv6 is routed into it)');
         lines.push('/ip/firewall/mangle/add chain=forward action=change-mss new-mss=clamp-to-pmtu passthrough=yes tcp-flags=syn protocol=tcp out-interface=wg-' + prefix + ' comment=' + prefix + '-mss');
         lines.push('/ip/firewall/mangle/add chain=forward action=change-mss new-mss=clamp-to-pmtu passthrough=yes tcp-flags=syn protocol=tcp in-interface=wg-' + prefix + ' comment=' + prefix + '-mss');
+        if (v6BlockEnabled()) lines = lines.concat(buildV6ForceIpv4(prefix));
         lines.push('# Configure FastTrack: only for non-VPN traffic (out-interface-list=WAN)');
         lines.push(':foreach rule in=[/ip/firewall/filter/find where action=fasttrack-connection] do={');
         lines.push('  :local curOut [/ip/firewall/filter/get $rule out-interface-list]');
@@ -2561,9 +2612,14 @@
         lines.push('# Mark non-RU connections for tunnel');
         lines.push('/ip/firewall/mangle/add chain=prerouting action=mark-connection new-connection-mark=' + prefix + '-non-ru connection-state=new dst-address-list=!RU in-interface-list=LAN passthrough=yes comment=' + prefix + '-non-ru');
         lines.push('/ip/firewall/mangle/add chain=prerouting action=mark-routing new-routing-mark=' + prefix + '-non-ru-table connection-mark=' + prefix + '-non-ru in-interface-list=LAN passthrough=no comment=' + prefix + '-non-ru');
-        lines.push('# MSS clamp for WireGuard (MTU 1420)');
+        // clamp-to-pmtu, а не число: MTU интерфейса зависит от S4 и транспорта
+        // (wgMtuForS4), захардкоженное значение с ним разъезжается. Пары
+        // /ipv6/firewall/mangle тут нет намеренно — в туннель заводится только
+        // IPv4, клемпить по IPv6 нечего; за IPv6 отвечает buildV6ForceIpv4.
+        lines.push('# MSS clamp for the tunnel (IPv4 only - nothing IPv6 is routed into it)');
         lines.push('/ip/firewall/mangle/add chain=forward action=change-mss new-mss=clamp-to-pmtu passthrough=yes tcp-flags=syn protocol=tcp out-interface=wg-' + prefix + ' comment=' + prefix + '-mss');
         lines.push('/ip/firewall/mangle/add chain=forward action=change-mss new-mss=clamp-to-pmtu passthrough=yes tcp-flags=syn protocol=tcp in-interface=wg-' + prefix + ' comment=' + prefix + '-mss');
+        if (v6BlockEnabled()) lines = lines.concat(buildV6ForceIpv4(prefix));
         lines.push('# Disable FastTrack (incompatible with policy routing)');
         lines.push(':foreach rule in=[/ip/firewall/filter/find where action=fasttrack-connection] do={');
         lines.push('  :local origComment [/ip/firewall/filter/get $rule comment]');
@@ -2743,6 +2799,9 @@
             src.push('  :do { /ip/firewall/address-list/remove [find where comment~"' + prefix + '-private"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where list="' + prefix + '-vpn-server"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where comment~"' + prefix + '-excl-ip"] } on-error={}');
+            // Форс IPv4 (buildV6ForceIpv4) живёт в /ipv6 — общий prefix-sweep по /ip его не видит.
+            src.push('  :do { /ipv6/firewall/filter/remove [find where comment~"' + prefix + '-v6-force4"] } on-error={}');
+            src.push('  :do { /ipv6/firewall/address-list/remove [find where list="' + prefix + '-v6-direct"] } on-error={}');
             src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
             src = src.concat(buildFasttrackRestore(prefix));
@@ -2833,6 +2892,9 @@
             src.push('  :do { /ip/firewall/address-list/remove [find where comment~"' + prefix + '-private"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where list="' + prefix + '-vpn-server"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where comment~"' + prefix + '-excl-ip"] } on-error={}');
+            // Форс IPv4 (buildV6ForceIpv4) живёт в /ipv6 — общий prefix-sweep по /ip его не видит.
+            src.push('  :do { /ipv6/firewall/filter/remove [find where comment~"' + prefix + '-v6-force4"] } on-error={}');
+            src.push('  :do { /ipv6/firewall/address-list/remove [find where list="' + prefix + '-v6-direct"] } on-error={}');
             src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
             src = src.concat(buildFasttrackRestore(prefix));
@@ -3348,6 +3410,7 @@
             document.getElementById('fasttrack-warn').style.display = 'none';
             document.getElementById('non-ru-warn').style.display = 'none';
             document.getElementById('netwatch-row').style.display = 'none';
+            document.getElementById('v6block-row').style.display = 'none';
         } else {
             onScenarioChange();
         }

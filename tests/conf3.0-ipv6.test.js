@@ -178,6 +178,49 @@ const nonRu4 = w.buildNonRuScenario('awg-proxy-1', [], '', '198.51.100.1', 'disk
 ok('ipv4 server: loop guard still emitted',
    nonRu4.indexOf('address=198.51.100.1 list=awg-proxy-1-vpn-server') >= 0);
 
+/* ---- force IPv4: native ISP IPv6 must not walk past the tunnel ----
+ * Nothing IPv6 is routed into the tunnel (the wg interface only ever gets an
+ * /ip/address), so a router with native IPv6 sends every v6 flow straight out
+ * of WAN and the policy routing never sees it. */
+ok('the force-IPv4 box is on by default', w.document.getElementById('v6block-enable').checked);
+ok('non-ru rejects forwarded IPv6 with a TCP reset',
+   /\/ipv6\/firewall\/filter\/add chain=forward action=reject reject-with=tcp-reset protocol=tcp in-interface-list=LAN out-interface-list=WAN comment=awg-proxy-1-v6-force4/.test(nonRu4), nonRu4);
+ok('non-ru rejects the rest with admin-prohibited',
+   nonRu4.indexOf('action=reject reject-with=icmp-admin-prohibited in-interface-list=LAN out-interface-list=WAN') >= 0, nonRu4);
+ok('non-ru keeps ULA/link-local/multicast direct',
+   nonRu4.indexOf(':foreach v6net in={"fc00::/7";"fe80::/10";"ff00::/8"}') >= 0 &&
+   nonRu4.indexOf('/ipv6/firewall/address-list/add list=awg-proxy-1-v6-direct address=$v6net') >= 0, nonRu4);
+// The escape hatch only works if it is consulted before the rejects.
+const iAccept6 = nonRu4.indexOf('action=accept dst-address-list=awg-proxy-1-v6-direct');
+const iReject6 = nonRu4.indexOf('action=reject reject-with=tcp-reset');
+ok('the direct list is consulted before the rejects', iAccept6 >= 0 && iAccept6 < iReject6);
+// Cyrillic in comment= makes RouterOS drop the whole command without a word.
+ok('every generated line is ASCII', !/[^\x00-\x7f]/.test(nonRu4),
+   (nonRu4.match(/^.*[^\x00-\x7f].*$/m) || [''])[0]);
+// The clamp stays IPv4-only on purpose: there is no IPv6 in the tunnel to clamp.
+ok('no IPv6 MSS clamp is emitted', nonRu4.indexOf('/ipv6/firewall/mangle') < 0);
+ok('the IPv4 MSS clamp is still there',
+   nonRu4.indexOf('/ip/firewall/mangle/add chain=forward action=change-mss new-mss=clamp-to-pmtu') >= 0);
+
+const dnsFwd6 = w.buildDnsRoutingScenario('awg-proxy-2', [], '').join('\n');
+ok('dns-routing gets the same rules', dnsFwd6.indexOf('awg-proxy-2-v6-force4') >= 0);
+
+w.document.getElementById('v6block-enable').checked = false;
+const nonRuNoV6 = w.buildNonRuScenario('awg-proxy-1', [], '', '198.51.100.1', 'disk1', 'container').join('\n');
+ok('unticking the box emits no /ipv6 rules at all',
+   nonRuNoV6.indexOf('v6-force4') < 0 && nonRuNoV6.indexOf('/ipv6/firewall') < 0);
+w.document.getElementById('v6block-enable').checked = true;
+
+// /ipv6 is a separate menu — the uninstall sweep over /ip never reaches it.
+const unC = w.buildUninstallScriptSource(false, 'disk1', 'awg-proxy-1',
+                                         {natSrc: '172.19.0.0/30', hostAddr: '172.19.0.1/30'}, 'non-ru');
+const unS = w.buildStandaloneUninstallScriptSource(false, 'awg-proxy-1', 'non-ru');
+[['container', unC], ['standalone', unS]].forEach(function (pair) {
+    ok('uninstall (' + pair[0] + ') removes the force-IPv4 rules',
+       pair[1].indexOf('/ipv6/firewall/filter/remove [find where comment~"awg-proxy-1-v6-force4"]') >= 0 &&
+       pair[1].indexOf('/ipv6/firewall/address-list/remove [find where list="awg-proxy-1-v6-direct"]') >= 0, pair[1]);
+});
+
 /* ---- the container's own IPv6 leg ----
  * A veth with only an IPv4 address leaves the container link-local and no
  * more: it can neither dial an IPv6 server nor be dialled over IPv6. */
