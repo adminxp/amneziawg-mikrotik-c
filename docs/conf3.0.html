@@ -417,6 +417,66 @@
             background: #fafafa;
         }
 
+        .promo {
+            --promo: #15803d;
+            --promo-line: #4ade80;
+            margin-top: 14px;
+            padding: 12px 14px;
+            border: 1px solid #bbf7d0;
+            border-left: 3px solid var(--promo-line);
+            border-radius: 8px;
+            background: #f3fdf6;
+            font-size: 0.85rem;
+            line-height: 1.55;
+        }
+
+        .promo-title {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-weight: 700;
+            font-size: 0.92rem;
+            color: var(--promo);
+            cursor: pointer;
+            list-style: none;
+        }
+
+        .promo-title::-webkit-details-marker {
+            display: none;
+        }
+
+        .promo-title::before {
+            content: "\1F33F";
+            font-size: 1.05rem;
+            line-height: 1;
+        }
+
+        .promo-title::after {
+            content: "\25BE";
+            font-size: 0.75rem;
+            opacity: 0.7;
+        }
+
+        .promo[open] .promo-title::after {
+            content: "\25B4";
+        }
+
+        .promo-title:hover {
+            opacity: 0.8;
+        }
+
+        .promo[open] .promo-title {
+            margin-bottom: 6px;
+        }
+
+        .promo p {
+            margin: 2px 0;
+        }
+
+        .promo a {
+            color: var(--promo);
+        }
+
         .scenario-panel-header {
             display: flex;
             align-items: center;
@@ -536,6 +596,7 @@
             .btn-secondary:hover { background: #333; }
 
             .scenario-panel { background: #242424; }
+            .promo { --promo: #86efac; --promo-line: #4ade80; background: #14231a; border-color: #1f3d29; }
             .checkbox-grid label:hover { background: #2a2a2a; }
 
             .alert-warning { background: #2a1a00; border-color: #92400e; color: #fcd34d; }
@@ -662,6 +723,16 @@
         <label for="conf-input" data-i18n="confLabel">.conf file contents</label>
         <textarea id="conf-input"
                   placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = 10.1.1.1/32&#10;DNS = 1.1.1.1&#10;Jc = 2&#10;Jmin = 1&#10;Jmax = 500&#10;S1 = 123&#10;S2 = 12&#10;H1 = 12345&#10;...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = 1.2.3.4:12345&#10;AllowedIPs = 0.0.0.0/0"></textarea>
+        <details class="promo">
+            <summary class="promo-title" data-i18n="promoTitle">VPS без ограничений по трафику</summary>
+            <p>
+                <span data-i18n="promoIntro">Разместить сервер AmneziaWG можно у</span>
+                <a href="https://freakhosting.com/clientarea/aff.php?aff=730" target="_blank" rel="noopener">Freakhosting</a><span data-i18n="promoSection">, раздел Budget VPS</span>.
+            </p>
+            <p><b data-i18n="promoPlanLabel">Рекомендуемый тариф:</b> BVPS-2 &mdash; <span data-i18n="promoSpecs">2 vCPU, 2 ГБ RAM, 40 ГБ NVMe SSD</span>.</p>
+            <p><b data-i18n="promoAdvLabel">Ключевое преимущество:</b> <span data-i18n="promoAdv">порт 10 Гбит/с с безлимитным трафиком &mdash; идеально для VPN.</span></p>
+            <p><b data-i18n="promoPriceLabel">Цена:</b> <span data-i18n="promoPrice">всего &euro;25 в год (около 2500 руб.; на момент проверки, цена может меняться)</span>.</p>
+        </details>
         <div id="scenario-row" style="margin-top:14px">
             <label data-i18n="scenarioLabel">Routing scenario</label>
             <div class="radio-group">
@@ -1113,6 +1184,15 @@
             ipv6Label: 'Server is reachable over IPv6',
             ipv6Hint: 'The IPv6 header is 40 bytes instead of 20, so a full-size packet no longer fits a 1500-byte path and the WireGuard MTU has to come down. Ticked automatically when the endpoint is an IPv6 literal. For a DNS name the box stays off (IPv4 MTU) \u2014 tick it yourself if you know the name has an AAAA record; the generated script also asks the router with :resolve type=ipv6 and lowers the MTU if it answers.',
             ipv6MtuNote: 'The endpoint is IPv6, so the WireGuard MTU is lowered by the extra 20 bytes of IPv6 header.',
+            promoTitle: 'VPS with unlimited traffic',
+            promoIntro: 'You can host an AmneziaWG server at',
+            promoSection: ', section Budget VPS',
+            promoPlanLabel: 'Recommended plan:',
+            promoSpecs: '2 vCPU, 2 GB RAM, 40 GB NVMe SSD',
+            promoAdvLabel: 'Key advantage:',
+            promoAdv: '10 Gbps port with unlimited traffic \u2014 perfect for VPN.',
+            promoPriceLabel: 'Price:',
+            promoPrice: 'just \u20ac25 per year (about 2500 RUB; as of the last check, the price may change)',
             scenarioLabel: 'Routing scenario',
             scenarioTunnel: 'Tunnel only (manual routes)',
             scenarioDns: 'DNS-based routing for services',
@@ -1307,6 +1387,15 @@
             ipv6Label: '\u0421\u0435\u0440\u0432\u0435\u0440 \u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u043f\u043e IPv6',
             ipv6Hint: '\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a IPv6 \u0437\u0430\u043d\u0438\u043c\u0430\u0435\u0442 40 \u0431\u0430\u0439\u0442 \u0432\u043c\u0435\u0441\u0442\u043e 20, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 \u043f\u043e\u043b\u043d\u043e\u0440\u0430\u0437\u043c\u0435\u0440\u043d\u044b\u0439 \u043f\u0430\u043a\u0435\u0442 \u043f\u0435\u0440\u0435\u0441\u0442\u0430\u0451\u0442 \u043f\u043e\u043c\u0435\u0449\u0430\u0442\u044c\u0441\u044f \u0432 1500 \u0431\u0430\u0439\u0442 \u0438 MTU WireGuard \u043f\u0440\u0438\u0445\u043e\u0434\u0438\u0442\u0441\u044f \u043f\u043e\u043d\u0438\u0437\u0438\u0442\u044c. \u0421\u0442\u0430\u0432\u0438\u0442\u0441\u044f \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438, \u0435\u0441\u043b\u0438 \u0432 \u043f\u043e\u043b\u0435 endpoint \u0443\u043a\u0430\u0437\u0430\u043d IPv6-\u043b\u0438\u0442\u0435\u0440\u0430\u043b. \u0414\u043b\u044f DNS-\u0438\u043c\u0435\u043d\u0438 \u0433\u0430\u043b\u043e\u0447\u043a\u0430 \u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e \u0441\u043d\u044f\u0442\u0430 (MTU \u043a\u0430\u043a \u0434\u043b\u044f IPv4) \u2014 \u043f\u043e\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0435\u0451 \u0432\u0440\u0443\u0447\u043d\u0443\u044e, \u0435\u0441\u043b\u0438 \u0437\u043d\u0430\u0435\u0442\u0435, \u0447\u0442\u043e \u0443 \u0438\u043c\u0435\u043d\u0438 \u0435\u0441\u0442\u044c AAAA-\u0437\u0430\u043f\u0438\u0441\u044c; \u0441\u0433\u0435\u043d\u0435\u0440\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u044b\u0439 \u0441\u043a\u0440\u0438\u043f\u0442 \u0434\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u0441\u043f\u0440\u0430\u0448\u0438\u0432\u0430\u0435\u0442 \u0440\u043e\u0443\u0442\u0435\u0440 \u0447\u0435\u0440\u0435\u0437 :resolve type=ipv6 \u0438 \u043f\u043e\u043d\u0438\u0436\u0430\u0435\u0442 MTU, \u0435\u0441\u043b\u0438 \u0442\u043e\u0442 \u043e\u0442\u0432\u0435\u0442\u0438\u043b.',
             ipv6MtuNote: 'Endpoint \u2014 IPv6, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 MTU WireGuard \u043f\u043e\u043d\u0438\u0436\u0435\u043d \u043d\u0430 \u043b\u0438\u0448\u043d\u0438\u0435 20 \u0431\u0430\u0439\u0442 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430 IPv6.',
+            promoTitle: 'VPS \u0431\u0435\u0437 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u0439 \u043f\u043e \u0442\u0440\u0430\u0444\u0438\u043a\u0443',
+            promoIntro: '\u0420\u0430\u0437\u043c\u0435\u0441\u0442\u0438\u0442\u044c \u0441\u0435\u0440\u0432\u0435\u0440 AmneziaWG \u043c\u043e\u0436\u043d\u043e \u0443',
+            promoSection: ', \u0440\u0430\u0437\u0434\u0435\u043b Budget VPS',
+            promoPlanLabel: '\u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0443\u0435\u043c\u044b\u0439 \u0442\u0430\u0440\u0438\u0444:',
+            promoSpecs: '2 vCPU, 2 \u0413\u0411 RAM, 40 \u0413\u0411 NVMe SSD',
+            promoAdvLabel: '\u041a\u043b\u044e\u0447\u0435\u0432\u043e\u0435 \u043f\u0440\u0435\u0438\u043c\u0443\u0449\u0435\u0441\u0442\u0432\u043e:',
+            promoAdv: '\u043f\u043e\u0440\u0442 10 \u0413\u0431\u0438\u0442/\u0441 \u0441 \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442\u043d\u044b\u043c \u0442\u0440\u0430\u0444\u0438\u043a\u043e\u043c \u2014 \u0438\u0434\u0435\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f VPN.',
+            promoPriceLabel: '\u0426\u0435\u043d\u0430:',
+            promoPrice: '\u0432\u0441\u0435\u0433\u043e \u20ac25 \u0432 \u0433\u043e\u0434 (\u043e\u043a\u043e\u043b\u043e 2500 \u0440\u0443\u0431.; \u043d\u0430 \u043c\u043e\u043c\u0435\u043d\u0442 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438, \u0446\u0435\u043d\u0430 \u043c\u043e\u0436\u0435\u0442 \u043c\u0435\u043d\u044f\u0442\u044c\u0441\u044f)',
             scenarioLabel: '\u0421\u0446\u0435\u043d\u0430\u0440\u0438\u0439 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438',
             scenarioTunnel: '\u0422\u043e\u043b\u044c\u043a\u043e \u0442\u0443\u043d\u043d\u0435\u043b\u044c (\u0440\u0443\u0447\u043d\u044b\u0435 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u044b)',
             scenarioDns: 'DNS-\u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u044f \u0434\u043b\u044f \u0441\u0435\u0440\u0432\u0438\u0441\u043e\u0432',
