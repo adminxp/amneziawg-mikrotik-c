@@ -705,11 +705,14 @@ In `reverse` and `server` modes, `AWG_REMOTE` points to the WireGuard server (no
 
 **`AWG_SRC_PORT`** -- outgoing UDP port for the connection to the AWG server. By default (`auto`), the proxy uses the WireGuard client's port -- this is needed for correct NAT operation on the router. If a number is specified, a fixed port is used. The value `random` leaves the choice to the kernel: no bind, a fresh ephemeral port on every reconnect -- useful behind CGN/carrier NAT where reusing the old port+server pair after a drop may get stuck.
 
+**The configurator emits `random`**, and here is why. It is not only the carrier's NAT that can get stuck -- masquerade on the router itself can too. If the conntrack entry is created at a moment when the WAN interface has no address (typically right after a DHCP lease renewal), RouterOS puts some other local interface address into it -- say, a private address from a tunnel network. The carrier drops such packets, so no replies ever come back. With a fixed port that entry **never expires**: the conntrack UDP timeout is 30 seconds while the proxy sends a handshake every 5, so the entry is refreshed faster than it ages. Worse, the proxy's own reconnect does not help -- it recreates the socket with the same 5-tuple and lands in the same poisoned entry. The link stays dead until the entry is removed by hand, with a perfectly healthy server on the other end. With `random`, every reconnect takes a fresh ephemeral port and therefore a fresh conntrack entry -- NAT is recomputed on its own and the link comes back within seconds.
+
 ```
 AWG_SRC_PORT=auto    # default, copies the WG client port
 AWG_SRC_PORT=0       # same as auto
 AWG_SRC_PORT=12345   # fixed port 12345
 AWG_SRC_PORT=random  # kernel-ephemeral port, new on every reconnect
+                     # (this is what the configurator emits)
 ```
 
 **`AWG_TIMEOUT`** -- inactivity timeout in seconds. If no packets are sent or received in either direction within this time, the proxy reconnects to the server (re-resolves DNS + new socket). Useful when the server's IP address changes behind DNS.
