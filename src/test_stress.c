@@ -229,6 +229,11 @@ static const char *g_timeout = "30";
  * Scenarios that move an address shorten it so the follow-up takes seconds. */
 static const char *g_dns_refresh;
 
+/* Leave AWG_SRC_PORT unset so the run takes its own default. Only
+ * test_default_src_port_is_ephemeral needs this; every other scenario pins the
+ * port to keep its packet counts stable. */
+static int g_unset_src_port;
+
 static pid_t start_proxy_listen_remote(const char *mode, const char *listen_str,
                                        const char *remote_str, const char *he_delay) {
     /* Find a free port for proxy's source to avoid auto_src_port reconnect race */
@@ -262,7 +267,8 @@ static pid_t start_proxy_listen_remote(const char *mode, const char *listen_str,
         setenv("AWG_LOG_LEVEL", g_log_level, 1);
         setenv("AWG_TIMEOUT", g_timeout, 1);
         setenv("AWG_NO_GRO", "1", 1);
-        setenv("AWG_SRC_PORT", itoa_buf(src_port, sp), 1);
+        if (g_unset_src_port) unsetenv("AWG_SRC_PORT");
+        else setenv("AWG_SRC_PORT", itoa_buf(src_port, sp), 1);
         setenv("AWG_STATE_FILE", g_state_file, 1);
         if (g_dns_refresh) setenv("AWG_DNS_REFRESH", g_dns_refresh, 1);
         else               unsetenv("AWG_DNS_REFRESH");
@@ -2816,6 +2822,68 @@ static void test_server_listen6(void) {
     close(server_fd);
 }
 
+/* ---- Default source port is ephemeral, not the client's ----
+ *
+ * Until v1.2.7 the default was "auto": the run bound its outgoing socket to
+ * whatever port the WG client used, pinning the outgoing 5-tuple forever. A
+ * router NAT entry built from it then outlives every reconnect, so one entry
+ * created while the WAN had no address keeps the tunnel dead. The default is
+ * now a kernel-ephemeral port, and what proves it is that the server sees a
+ * source port that is NOT the client's. */
+static void test_default_src_port_is_ephemeral(void) {
+    int listen_port = find_free_port();
+    int remote_port = find_free_port();
+    ASSERT(listen_port > 0);
+    ASSERT(remote_port > 0);
+
+    int server_fd = make_udp_socket(remote_port);
+    ASSERT(server_fd >= 0);
+
+    g_unset_src_port = 1;
+    pid_t proxy = start_proxy("normal", listen_port, remote_port);
+    g_unset_src_port = 0;
+    ASSERT(proxy > 0);
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, 0x2000);
+    sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+           (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+
+    /* The client's own port — this is what "auto" would have copied. */
+    struct sockaddr_in cli = { 0 };
+    socklen_t cli_len = sizeof(cli);
+    ASSERT(getsockname(client_fd, (struct sockaddr *)&cli, &cli_len) == 0);
+    int client_port = ntohs(cli.sin_port);
+    ASSERT(client_port > 0);
+
+    /* Read whatever the run forwarded and note the port it came from. */
+    usleep(300000);
+    uint8_t rbuf[2048];
+    struct sockaddr_in from;
+    socklen_t from_len = sizeof(from);
+    int seen_port = -1;
+    for (int i = 0; i < TEST_JC + 5; i++) {
+        from_len = sizeof(from);
+        ssize_t n = recvfrom(server_fd, rbuf, sizeof(rbuf), MSG_DONTWAIT,
+                             (struct sockaddr *)&from, &from_len);
+        if (n <= 0) { usleep(100000); continue; }
+        seen_port = ntohs(from.sin_port);
+        break;
+    }
+    fprintf(stderr, "          (client port=%d, proxy source port=%d)\n",
+            client_port, seen_port);
+    ASSERT(seen_port > 0);
+    ASSERT(seen_port != client_port);
+
+    stop_proxy(proxy);
+    close(client_fd);
+    close(server_fd);
+}
+
 int main(void) {
     fprintf(stderr, "=== stress tests ===\n");
     RUN_TEST(normal_burst);
@@ -2840,5 +2908,6 @@ int main(void) {
     RUN_TEST(watchdog_reconnects_without_icmp);
     RUN_TEST(remote_address_moves);
     RUN_TEST(server_listen6);
+    RUN_TEST(default_src_port_is_ephemeral);
     TEST_MAIN_END();
 }

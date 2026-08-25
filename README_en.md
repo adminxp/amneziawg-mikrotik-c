@@ -476,7 +476,7 @@ With 3+ clients, this is easier to automate with a script on the server.
 | `AWG_FB_RANDOM_TRAILERS` | No | `off` | `on` = stage 1 also appends a random trailer (v3.1) |
 | `AWG_FB2_*`, `AWG_FB3_*` | No | -- | Chain stages 2 and 3, same set of keys |
 | `AWG_FB_AFTER` | No | `20` | Seconds of remote silence before probing the next stage (initiator) |
-| `AWG_SRC_PORT` | No | auto | Outgoing port to server: `auto` / number / `random` |
+| `AWG_SRC_PORT` | No | random | Outgoing port to server: `random` / `auto` / number |
 | `AWG_TIMEOUT` | No | `180` | Inactivity timeout (sec) |
 | `AWG_DNS_REFRESH` | No | `60` | Background DNS re-check interval for a hostname in AWG_REMOTE (sec, `0` = off) |
 | `AWG_HE_DELAY` | No | `250` | Happy Eyeballs: ms of IPv4 head start before probing IPv6 (only when the name has both an A and an AAAA) |
@@ -703,16 +703,17 @@ In `reverse` and `server` modes, `AWG_REMOTE` points to the WireGuard server (no
 
 #### Optional -- Network and Diagnostics
 
-**`AWG_SRC_PORT`** -- outgoing UDP port for the connection to the AWG server. By default (`auto`), the proxy uses the WireGuard client's port -- this is needed for correct NAT operation on the router. If a number is specified, a fixed port is used. The value `random` leaves the choice to the kernel: no bind, a fresh ephemeral port on every reconnect -- useful behind CGN/carrier NAT where reusing the old port+server pair after a drop may get stuck.
+**`AWG_SRC_PORT`** -- outgoing UDP port for the connection to the AWG server. By default (`random`) the kernel picks the port: no bind, a fresh ephemeral port on every reconnect. The value `auto` makes the proxy copy the WireGuard client's port, and a number pins a fixed port.
 
-**The configurator emits `random`**, and here is why. It is not only the carrier's NAT that can get stuck -- masquerade on the router itself can too. If the conntrack entry is created at a moment when the WAN interface has no address (typically right after a DHCP lease renewal), RouterOS puts some other local interface address into it -- say, a private address from a tunnel network. The carrier drops such packets, so no replies ever come back. With a fixed port that entry **never expires**: the conntrack UDP timeout is 30 seconds while the proxy sends a handshake every 5, so the entry is refreshed faster than it ages. Worse, the proxy's own reconnect does not help -- it recreates the socket with the same 5-tuple and lands in the same poisoned entry. The link stays dead until the entry is removed by hand, with a perfectly healthy server on the other end. With `random`, every reconnect takes a fresh ephemeral port and therefore a fresh conntrack entry -- NAT is recomputed on its own and the link comes back within seconds.
+**Why `random` became the default (as of v1.2.7).** Copying the client's port pins the outgoing 5-tuple for the whole life of the container, and a NAT entry built from it then cannot be shaken off. Masquerade picks the source address once, when the entry is created. If the entry is born while the WAN interface has no address (typically right after a DHCP lease renewal), it carries some other router interface address, often a private one -- and the carrier drops such packets. Conntrack would normally expire it, but the proxy's keepalive refreshes the entry faster than the 30-second UDP timeout. Reconnecting does not help either: the same 5-tuple lands in the same poisoned entry. The link stays dead with a perfectly healthy server on the other end until the entry is removed by hand. An ephemeral port removes the whole problem: new port, new entry, NAT recomputed.
+
+In `server` and `reverse` modes the variable has no effect for `random` and `auto`: the branch that copies the client's port lives only in the normal-mode handler, so no bind happens there either way. A fixed port number works in all modes.
 
 ```
-AWG_SRC_PORT=auto    # default, copies the WG client port
+AWG_SRC_PORT=random  # default, kernel-ephemeral port, new on every reconnect
+AWG_SRC_PORT=auto    # copies the WG client port (the default before v1.2.7)
 AWG_SRC_PORT=0       # same as auto
 AWG_SRC_PORT=12345   # fixed port 12345
-AWG_SRC_PORT=random  # kernel-ephemeral port, new on every reconnect
-                     # (this is what the configurator emits)
 ```
 
 **`AWG_TIMEOUT`** -- inactivity timeout in seconds. If no packets are sent or received in either direction within this time, the proxy reconnects to the server (re-resolves DNS + new socket). Useful when the server's IP address changes behind DNS.

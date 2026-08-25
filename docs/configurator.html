@@ -2646,7 +2646,6 @@
             '# 4. Container environment variables',
             '/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value=":51820"',
             '/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + p.Endpoint + '"',
-            '/container/envs/add list=' + prefix + '-env key=AWG_SRC_PORT value="random"',
             '/container/envs/add list=' + prefix + '-env key=AWG_JC value="' + i.Jc + '"',
             '/container/envs/add list=' + prefix + '-env key=AWG_JMIN value="' + i.Jmin + '"',
             '/container/envs/add list=' + prefix + '-env key=AWG_JMAX value="' + i.Jmax + '"',
@@ -2913,7 +2912,6 @@
         lines.push('  :put "2. Set environment variables and run:"');
         lines.push('  :put "export AWG_LISTEN=\\":51820\\""');
         lines.push('  :put "export AWG_REMOTE=\\"' + p.Endpoint + '\\""');
-        lines.push('  :put "export AWG_SRC_PORT=\\"random\\""');
         lines.push('  :put "export AWG_JC=\\"' + i.Jc + '\\""');
         lines.push('  :put "export AWG_JMIN=\\"' + i.Jmin + '\\""');
         lines.push('  :put "export AWG_JMAX=\\"' + i.Jmax + '\\""');
@@ -3844,7 +3842,6 @@
         lc.push('# 4. Container environment variables');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value=":51820"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + endpoint + ':' + awgPort + '"');
-        lc.push('/container/envs/add list=' + prefix + '-env key=AWG_SRC_PORT value="random"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_JC value="' + awgParams.jc + '"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_JMIN value="' + awgParams.jmin + '"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_JMAX value="' + awgParams.jmax + '"');
@@ -3973,7 +3970,6 @@
         lc.push('# 4. Container environment variables');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value=":51820"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + endpoint + ':' + awgPort + '"');
-        lc.push('/container/envs/add list=' + prefix + '-env key=AWG_SRC_PORT value="random"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_JC value="' + awgParams.jc + '"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_JMIN value="' + awgParams.jmin + '"');
         lc.push('/container/envs/add list=' + prefix + '-env key=AWG_JMAX value="' + awgParams.jmax + '"');
@@ -4198,7 +4194,6 @@
         la.push('# 4. Container environment variables');
         la.push('/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value=":51820"');
         la.push('/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + endpointB + ':' + awgParams.port + '"');
-        la.push('/container/envs/add list=' + prefix + '-env key=AWG_SRC_PORT value="random"');
         la = la.concat(s2sObfEnvLines(prefix, awgParams));
         la.push('/container/envs/add list=' + prefix + '-env key=AWG_SERVER_PUB value="' + keyB.publicKey + '"');
         la.push('/container/envs/add list=' + prefix + '-env key=AWG_CLIENT_PUB value="' + keyA.publicKey + '"');

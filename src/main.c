@@ -485,11 +485,25 @@ int main(void) {
     if ((v = getenv("AWG_SOCKET_BUF")) && v[0])
         cfg->socket_buf = parse_int_str(v);
 
-    /* Source port: auto (default), fixed N, or "random" (kernel-ephemeral) */
-    int src_port = 0;
+    /* Source port: "random" (default, kernel-ephemeral), "auto"/0 (copy the WG
+     * client's port), or a fixed N.
+     *
+     * The default was "auto" until v1.2.7. Copying the client's port pins the
+     * outgoing 5-tuple for the life of the container, and a router NAT entry
+     * built from it is then impossible to shake off: masquerade picks the
+     * source address once, when the entry is created, so an entry born while
+     * the WAN interface had no address (a DHCP renewal, say) carries some
+     * other local address — often a private one the carrier drops. Conntrack
+     * would normally expire it, but the proxy's own keepalive refreshes it
+     * faster than the 30 s UDP timeout, and reconnecting does not help either:
+     * the same 5-tuple lands in the same poisoned entry. A fresh ephemeral
+     * port on every connect sidesteps all of it, and matches the Go version. */
+    int src_port = -1;
     if ((v = getenv("AWG_SRC_PORT")) && v[0]) {
         if (strcmp(v, "random") == 0)
             src_port = -1;
+        else if (strcmp(v, "auto") == 0)
+            src_port = 0;
         else
             src_port = parse_int_str(v);
     }

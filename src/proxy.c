@@ -1039,8 +1039,10 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
     } else if (src_port == 0) {
         p->auto_src_port = 1;
     }
-    /* src_port < 0 ("random"): local_port stays 0, no bind — the kernel
-     * picks a fresh ephemeral port on every connect */
+    /* src_port < 0 ("random", the default): local_port stays 0, no bind — the
+     * kernel picks a fresh ephemeral port on every connect. Note that reverse
+     * and server modes never reach the auto_src_port branch below anyway: it
+     * lives in c2s_thread_normal(), so for them local_port has always been 0. */
 
     /* Init PRNG */
     uint64_t seed;

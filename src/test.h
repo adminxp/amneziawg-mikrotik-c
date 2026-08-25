@@ -7,11 +7,18 @@
 static int g_tests_run, g_tests_passed, g_tests_failed;
 static const char *g_current_test;
 
+/* ASSERT returns out of the test function, not out of RUN_TEST, so a failed
+ * test used to be counted and printed as PASS right after its own FAIL line —
+ * the summary then read like "23/23 tests passed, 1 FAILED". Compare the
+ * failure counter across the call and only claim PASS when it did not move. */
 #define RUN_TEST(name) do { \
+    int failed_before = g_tests_failed; \
     g_current_test = #name; g_tests_run++; \
     test_##name(); \
-    g_tests_passed++; \
-    fprintf(stderr, "  PASS  %s\n", #name); \
+    if (g_tests_failed == failed_before) { \
+        g_tests_passed++; \
+        fprintf(stderr, "  PASS  %s\n", #name); \
+    } \
 } while(0)
 
 #define ASSERT(cond) do { if (!(cond)) { \
