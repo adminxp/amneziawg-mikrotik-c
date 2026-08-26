@@ -208,6 +208,21 @@ ok('the script body is one source={...} block',
    /^\/system\/script\/add name=awg-proxy-1-update comment=awg-proxy-1 source=\{/.test(upd) &&
    upd.trim().endsWith('}'));
 
+/* ------------- 9c. RouterOS must not decide to pull on its own */
+// This is what actually bricked a live container: a container that carries both
+// file= and remote-image= is "changed" in RouterOS eyes, so it downloads the image
+// by itself - on `set remote-image`, and on 7.23 at other moments too. If that
+// download breaks (broken tar), the container is left with no image and the tunnel
+// is down. A pull must only ever happen because something asked for one.
+ok('the update script pins ignore-remote-image-change before pulling',
+   /:do \{ \[:parse "\/container\/set \$cid ignore-remote-image-change=yes"\] \} on-error=\{\}/.test(upd));
+ok('and again on a container it rebuilds',
+   upd.indexOf('ignore-remote-image-change=yes"] } on-error={}') > 0);
+// 7.22 and older have no such property: :parse defers it to runtime so the script
+// still parses there, and :do swallows the "no such argument" error.
+ok('it is written so older RouterOS still parses the script',
+   /\[:parse "[^"]*ignore-remote-image-change/.test(upd));
+
 /* ------------------------- 10. the safety net is actually installed alongside */
 w.clearAll();
 const ta = w.document.getElementById('conf-input');

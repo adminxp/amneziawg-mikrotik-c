@@ -145,9 +145,19 @@ const picked = generateNow();
 eq('picked Google: /ip/dns/set follows the pick', serversLine(picked.main), '8.8.8.8,8.8.4.4');
 ok('picked Google: the swap is spelled out in the script',
    picked.main.indexOf('# NOTE: servers follow the DNS-forwarder picked in the configurator') >= 0);
-ok('picked Google: DNS routes point at the picked servers',
-   picked.main.indexOf('/ip/route/add dst-address=8.8.8.8/32 gateway=wg-awg-proxy-1') >= 0 &&
-   picked.main.indexOf('/ip/route/add dst-address=8.8.4.4/32 gateway=wg-awg-proxy-1') >= 0);
+// Раньше сюда ставился /32-маршрут через wg-интерфейс. Такой маршрут переживает
+// смерть туннеля — WG-интерфейс не уходит в down — и резолв упирается в дохлый
+// туннель, унося с собой всё, что работало бы напрямую. Теперь DNS идёт общим
+// путём: политикой в активный туннель, а при падении всех — по default.
+// Ищем именно исполняемые строки: в NEXT STEPS такой маршрут показан внутри :put
+// как пример ручной команды, и он к делу не относится.
+const realRoutes = picked.main.split(NL)
+    .filter(l => l.indexOf(':put') < 0 && /^\s*\/ip\/route\/add /.test(l));
+ok('picked Google: DNS не прибит к туннелю /32-маршрутом',
+   !realRoutes.some(l => /dst-address=(8\.8\.8\.8|8\.8\.4\.4)\/32.*gateway=wg-/.test(l)),
+   realRoutes.join(' | ').slice(0, 160));
+ok('picked Google: и это объяснено в самом скрипте',
+   picked.main.indexOf('идёт общим маршрутом') >= 0);
 ok('picked Google: nothing points at the .conf resolver any more',
    picked.main.indexOf('1.1.1.1') < 0, lineWith(picked.main, '1.1.1.1'));
 ok('picked Google: DoH forwarder is Google too',
@@ -206,8 +216,14 @@ w.validate(parsed);
 const standalone = w.buildStandaloneCommands(parsed, '192.168.88.5', 'awg-proxy-1',
                                              w.getTunnelNetwork('awg-proxy-1'), 'dns-fwd');
 eq('standalone follows the pick too', serversLine(standalone), '9.9.9.9,149.112.112.112');
-ok('standalone pins the picked servers into the tunnel',
-   standalone.indexOf('/ip/route/add dst-address=9.9.9.9/32 gateway=wg-awg-proxy-1') >= 0);
+const realRoutesSa = standalone.split(NL)
+    .filter(l => l.indexOf(':put') < 0 && /^\s*\/ip\/route\/add /.test(l));
+ok('standalone тоже не прибивает DNS к туннелю',
+   !realRoutesSa.some(l => /dst-address=9\.9\.9\.9\/32.*gateway=wg-/.test(l)),
+   realRoutesSa.join(' | ').slice(0, 160));
+// Смысл выбора DNS при этом сохраняется: сервера подставлены в /ip/dns/set.
+ok('но выбранные сервера по-прежнему прописаны',
+   serversLine(standalone) === '9.9.9.9,149.112.112.112');
 
 console.log(NL + passes + '/' + (passes + fails) + ' checks passed' + (fails ? ', ' + fails + ' FAILED' : ''));
 process.exit(fails ? 1 : 0);

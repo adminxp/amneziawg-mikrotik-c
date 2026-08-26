@@ -147,6 +147,13 @@ ok('guarded by the free-space check',
 ok('all three sources feed one /container/start',
    lineWith(script, '/container/start [find where interface=veth-awg-proxy-1]').length === 1);
 
+// A fresh install must not leave RouterOS free to re-pull whenever it feels like
+// it: that is what left a live container with a broken image and a dead tunnel.
+ok('the install pins ignore-remote-image-change on the container',
+   /\[:parse "\/container\/set \[find where interface=veth-awg-proxy-1\] ignore-remote-image-change=yes"\]/.test(script));
+ok('wrapped so RouterOS 7.22 and older still parse the script',
+   /:do \{ \[:parse "[^"]*ignore-remote-image-change[^"]*"\] \} on-error=\{\}/.test(script));
+
 /* ---- the update script ---- */
 ok('an update script is created', /\/system\/script\/add name=awg-proxy-1-update /.test(script));
 ok('it calls repull', /\/container\/repull \$cid/.test(script));
