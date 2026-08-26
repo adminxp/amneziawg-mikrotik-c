@@ -3078,15 +3078,28 @@
             src.push('            :set newVer [:pick $tagRest 0 [:find $tagRest "\\""]]');
             src.push('          }');
             src.push('          :do { /file/remove [find where name=$verPath] } on-error={}');
-            src.push('        } on-error={ :put "Could not read the published version - pulling anyway" }');
+            src.push('        } on-error={ :put "Could not read the published version" }');
         }
         src.push('        :local curVer ""');
         src.push('        :do { :set curVer [/container/envs/get [find where list="' + env + '" key="AWG_IMAGE_VER"] value] } on-error={}');
-        // The health flag overrides the version match: a bricked container is pulled
-        // again even when it claims to be on the newest release.
-        src.push('        :if ($healthy && $newVer != "" && $newVer = $curVer) do={');
-        src.push('          :put ("Already on " . $curVer . " - nothing to pull, tunnel untouched")');
-        src.push('        } else={');
+        // A healthy container is only ever pulled against a version we actually
+        // confirmed. If the release API is unreachable or rate-limited, doing it
+        // anyway would restart the tunnel nightly for nothing and hammer the
+        // registry with anonymous pulls from every router at once.
+        // The health flag is what overrides all of this: a bricked container is
+        // pulled again even when it claims to be on the newest release.
+        src.push('        :local doPull true');
+        src.push('        :if ($healthy) do={');
+        src.push('          :if ($newVer = "") do={');
+        src.push('            :set doPull false');
+        src.push('            :put "Published version unknown - leaving the healthy container alone"');
+        src.push('          }');
+        src.push('          :if ($newVer != "" && $newVer = $curVer) do={');
+        src.push('            :set doPull false');
+        src.push('            :put ("Already on " . $curVer . " - nothing to pull, tunnel untouched")');
+        src.push('          }');
+        src.push('        }');
+        src.push('        :if ($doPull) do={');
         src.push('          :if (!$healthy) do={');
         src.push('            :put "Container is not healthy - pulling the image again"');
         src.push('            :log warning "' + name + ': container unhealthy, forcing a pull"');

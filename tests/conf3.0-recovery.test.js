@@ -35,7 +35,28 @@ function ok(name, cond, extra) {
     else { fails++; console.log('  FAIL  ' + name + (extra ? ': ' + extra : '')); }
 }
 
-const dom = new JSDOM(html, { runScripts: 'dangerously', url: 'https://example.invalid/' });
+// The page must never reach the network from a test run, so every way out is
+// replaced with a throw before the document is parsed. jsdom already refuses to
+// load subresources (no `resources: "usable"`), and `example.invalid` is a
+// reserved TLD - this covers the rest, and turns a future fetch() added to the
+// configurator into a failed test rather than traffic from CI.
+const netCalls = [];
+function offlineGuard(win) {
+    const boom = name => function () {
+        netCalls.push(name);
+        throw new Error('test tried to use the network via ' + name);
+    };
+    for (const name of ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource']) {
+        try { win[name] = boom(name); } catch (e) { /* read-only in some builds */ }
+    }
+    try { win.navigator.sendBeacon = boom('sendBeacon'); } catch (e) { /* ignore */ }
+}
+
+const dom = new JSDOM(html, {
+    runScripts: 'dangerously',
+    url: 'https://example.invalid/',
+    beforeParse: offlineGuard,
+});
 const w = dom.window;
 
 const need = ['buildUpdateScriptSource', 'buildUpdateSchedulerLines', 'generate', 'clearAll'];
@@ -55,15 +76,24 @@ const at = needle => upd.indexOf(needle);
 // The whole failure mode is a version check that runs first and short-circuits.
 const healthAt = at(':local healthy true');
 const versionAt = at(':local curVer ""');
-const decisionAt = at(':if ($healthy && $newVer != "" && $newVer = $curVer) do={');
+const decisionAt = at(':local doPull true');
 ok('health is established before the version is even read',
    healthAt > 0 && versionAt > healthAt, 'health@' + healthAt + ' version@' + versionAt);
 ok('and the skip decision comes after both',
    decisionAt > versionAt, 'decision@' + decisionAt);
 
 /* ------------------------------------------------- 2. sickness beats version */
+// Every skip lives inside `:if ($healthy)`, so an unhealthy container always pulls.
 ok('a sick container is never skipped as up to date',
-   /:if \(\$healthy && \$newVer != "" && \$newVer = \$curVer\) do=\{/.test(upd));
+   /:local doPull true[\s\S]{0,40}:if \(\$healthy\) do=\{[\s\S]{0,400}:if \(\$doPull\) do=\{/.test(upd));
+// An unreachable release API must not turn into a nightly pull on every router:
+// that is a restart the tunnel does not need and anonymous registry traffic nobody
+// asked for. A healthy container is only pulled against a version we confirmed.
+ok('an unknown published version leaves a healthy container alone',
+   /:if \(\$newVer = ""\) do=\{[\s\S]{0,120}:set doPull false/.test(upd) &&
+   upd.indexOf('leaving the healthy container alone') > 0);
+ok('and the pull only happens when something actually says so',
+   /:if \(\$doPull\) do=\{/.test(upd));
 ok('and says out loud that it is forcing a pull',
    at(':if (!$healthy) do={') > 0 && at('container unhealthy, forcing a pull') > 0);
 ok('an empty image-id counts as sick',
@@ -224,6 +254,16 @@ ok('a bricked container therefore costs a disabled route, not a dead router',
 ok('and the uninstall takes the update job out with everything else',
    script.indexOf('/system/scheduler/remove [find where comment~"' + P + '"]') >= 0 &&
    script.indexOf('/system/script/remove [find where comment~"' + P + '"') >= 0);
+
+/* ---------------------------------------------- the tests stay offline */
+// Not a promise in a comment: if the page ever grows a fetch() or a CDN <script>,
+// these fail instead of quietly making network calls wherever the tests run.
+ok('no network call was made while running the page', netCalls.length === 0,
+   netCalls.join(', '));
+ok('the page pulls in no external subresources',
+   !/<script[^>]+src=|<link[^>]+href="https?:|@import\s+url\(https?:/i.test(html));
+ok('and no runtime network APIs are used in its source',
+   !/\bfetch\s*\(|XMLHttpRequest|navigator\.sendBeacon|new\s+WebSocket/.test(html));
 
 console.log('');
 console.log(passes + '/' + (passes + fails) + ' checks passed');

@@ -33,7 +33,28 @@ function ok(name, cond, extra) {
 }
 function eq(name, a, b) { ok(name, a === b, JSON.stringify(a) + ' !== ' + JSON.stringify(b)); }
 
-const dom = new JSDOM(html, { runScripts: 'dangerously', url: 'https://example.invalid/' });
+// The page must never reach the network from a test run, so every way out is
+// replaced with a throw before the document is parsed. jsdom already refuses to
+// load subresources (no `resources: "usable"`), and `example.invalid` is a
+// reserved TLD - this covers the rest, and turns a future fetch() added to the
+// configurator into a failed test rather than traffic from CI.
+const netCalls = [];
+function offlineGuard(win) {
+    const boom = name => function () {
+        netCalls.push(name);
+        throw new Error('test tried to use the network via ' + name);
+    };
+    for (const name of ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource']) {
+        try { win[name] = boom(name); } catch (e) { /* read-only in some builds */ }
+    }
+    try { win.navigator.sendBeacon = boom('sendBeacon'); } catch (e) { /* ignore */ }
+}
+
+const dom = new JSDOM(html, {
+    runScripts: 'dangerously',
+    url: 'https://example.invalid/',
+    beforeParse: offlineGuard,
+});
 const w = dom.window;
 
 const need = ['generate', 'clearAll', 'buildImageSetupLines', 'buildUpdateScriptSource',
@@ -137,7 +158,7 @@ ok('it refuses politely below 7.22',
 // repull restarts the container every time, so a version check is what keeps the
 // nightly job from dropping the tunnel for nothing.
 ok('it compares the published release before pulling',
-   /:if \(\$healthy && \$newVer != "" && \$newVer = \$curVer\) do=\{/.test(script));
+   /:if \(\$newVer != "" && \$newVer = \$curVer\) do=\{[\s\S]{0,80}:set doPull false/.test(script));
 ok('and says so instead of pulling', script.indexOf('nothing to pull, tunnel untouched') >= 0);
 ok('the release version is read from the GitHub API',
    /\/tool\/fetch url="https:\/\/api\.github\.com\/repos\/[^"]+\/releases\/latest"/.test(script));
@@ -227,6 +248,16 @@ ok('auto storage still picks the disk at runtime',
 // buildCommands and the server/S2S generators used to carry a verbatim copy each.
 eq('only one place fetches the release archive',
    (html.match(/tool\/fetch url=\$url dst-path=\$filePath/g) || []).length, 1);
+
+/* ---------------------------------------------- the tests stay offline */
+// Not a promise in a comment: if the page ever grows a fetch() or a CDN <script>,
+// these fail instead of quietly making network calls wherever the tests run.
+ok('no network call was made while running the page', netCalls.length === 0,
+   netCalls.join(', '));
+ok('the page pulls in no external subresources',
+   !/<script[^>]+src=|<link[^>]+href="https?:|@import\s+url\(https?:/i.test(html));
+ok('and no runtime network APIs are used in its source',
+   !/\bfetch\s*\(|XMLHttpRequest|navigator\.sendBeacon|new\s+WebSocket/.test(html));
 
 console.log('');
 console.log(passes + '/' + (passes + fails) + ' checks passed');
