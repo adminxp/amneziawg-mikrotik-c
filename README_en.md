@@ -975,6 +975,31 @@ is retried once, and if the container still does not come back it is rebuilt fro
 with the same parameters: a failed `repull` leaves the container stopped with no image at all,
 which means the tunnel stays down until someone intervenes.
 
+### Self-repair
+
+The script looks at the container's state before it looks at the version - otherwise an
+update that bricked the container would stay that way forever: the version is already
+recorded, so the next night the script would answer "already up to date" over a dead tunnel.
+
+The order is:
+
+1. Container running, image present - compare versions and take it from there.
+2. Container stopped but the image is intact - just start it. Cheap, and it works below
+   RouterOS 7.22 too, where `repull` does not exist.
+3. No image, or it would not come up - pull again **regardless of version**, then retry,
+   then rebuild from the registry.
+4. Nothing worked - one `:log error` and out. The scheduler runs the script again the
+   next night and the attempt repeats.
+
+`AWG_IMAGE_VER` is only written once the container is actually back up. While the tunnel is
+down, the netwatch failover (the "Netwatch failover" box) disables its route, so the router
+stays online through the next tunnel or directly. The update script itself never touches
+netwatch, routes or the WireGuard interface.
+
+A container installed from a file is left alone - with one exception: if such a container is
+dead and RouterOS is 7.22+, the script points it at the registry and repairs it with a pull.
+That is the only way to bring it back automatically.
+
 The "Check for container updates daily" box (ticked by default) adds a scheduler at 04:30
 alongside the script. If `scheduler` is forbidden by device-mode the install survives it and
 simply says there will be no daily check — update by hand with the same command.

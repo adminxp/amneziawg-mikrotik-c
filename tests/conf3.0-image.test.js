@@ -137,7 +137,7 @@ ok('it refuses politely below 7.22',
 // repull restarts the container every time, so a version check is what keeps the
 // nightly job from dropping the tunnel for nothing.
 ok('it compares the published release before pulling',
-   /:if \(\$newVer != "" && \$newVer = \$curVer\) do=\{/.test(script));
+   /:if \(\$healthy && \$newVer != "" && \$newVer = \$curVer\) do=\{/.test(script));
 ok('and says so instead of pulling', script.indexOf('nothing to pull, tunnel untouched') >= 0);
 ok('the release version is read from the GitHub API',
    /\/tool\/fetch url="https:\/\/api\.github\.com\/repos\/[^"]+\/releases\/latest"/.test(script));
@@ -147,9 +147,9 @@ ok('the parsed tag is remembered in AWG_IMAGE_VER',
 // A pull that dies leaves the container stopped with no image at all.
 ok('a failed pull is retried once', script.indexOf('Pull failed - retrying once in 15s') >= 0);
 ok('a container that was running is started again',
-   /:if \(\$wasRunning\) do=\{/.test(script));
+   /:if \(\$wantRunning\) do=\{/.test(script));
 ok('and a twice-failed pull is logged as an error',
-   /:log error "awg-proxy-1-update: pull failed, container has no image"/.test(script));
+   /:log error "awg-proxy-1-update: rebuild failed, tunnel is down"/.test(script));
 
 // An image-id is not proof of life: a pull that ends in "skip importing same
 // version" can leave root-dir empty, and the container then dies on execvpe.

@@ -2960,20 +2960,46 @@
     // ============================================================
     // Update script (/container/repull)
     // ============================================================
-    // repull restarts the container every single time, even when the digest has not
-    // moved, and a failed pull leaves it stopped with an empty image-id - the tunnel
-    // stays down until someone pulls again. So: check the published release first,
-    // pull only when the version actually changed, and verify afterwards.
-    function buildUpdateScriptSource(prefix) {
-        var env = prefix + '-env';
+    // Two jobs in one script, and the order between them is the whole point.
+    //
+    // 1. Health first. A container can be alive-but-bricked: an interrupted pull
+    //    leaves it with no image-id, and RouterOS can also leave root-dir empty
+    //    after a "skip importing same version" pull, so it starts, dies on execvpe
+    //    and stops. If the version check ran first it would answer "already on
+    //    vX - nothing to pull" and walk away from a dead tunnel, every night,
+    //    forever. So a container that is supposed to be running and is not gets
+    //    repaired regardless of what version it claims to be.
+    // 2. Version second. repull restarts the container every single time, even
+    //    when the digest has not moved, and the tunnel is down for ~10s while it
+    //    does - so a healthy container is left alone unless the release moved.
+    //
+    // Nothing here touches netwatch, routes or the WireGuard interface: while the
+    // container is down the netwatch failover is what keeps the router online, and
+    // it has to keep working through every repair attempt.
+    // opts lets an existing installation - where the veth and env list were named by
+    // an older configurator - reuse this exact script instead of a hand-written copy.
+    function buildUpdateScriptSource(prefix, opts) {
+        opts = opts || {};
+        var veth = opts.veth || ('veth-' + prefix);
+        var env = opts.envlist || (prefix + '-env');
+        var name = opts.name || (prefix + '-update');
+        var comment = opts.comment || prefix;
+        var addArgs = 'interface=' + veth + ' envlist=' + env + ' hostname=' + prefix +
+            ' root-dir=$rootDirOrig logging=no start-on-boot=yes comment=' + comment;
         var src = [];
-        src.push('/system/script/add name=' + prefix + '-update comment=' + prefix + ' source={');
-        src.push('  :local cids [/container/find where interface=veth-' + prefix + ']');
+        src.push('/system/script/add name=' + name + ' comment=' + comment + ' source={');
+        // An installation upgraded in place keeps the previous container on the same
+        // veth, stopped, as a fallback - so "the container" is the running one, or
+        // failing that the one meant to boot, and only then whatever is left. The
+        // newest id wins the tie: that is the one a reinstall added last.
+        src.push('  :local cids [/container/find where interface=' + veth + ' and !stopped]');
+        src.push('  :if ([:len $cids] = 0) do={ :set cids [/container/find where interface=' + veth + ' and start-on-boot=yes] }');
+        src.push('  :if ([:len $cids] = 0) do={ :set cids [/container/find where interface=' + veth + '] }');
         src.push('  :if ([:len $cids] = 0) do={');
         src.push('    :put "Container ' + prefix + ' not found"');
-        src.push('    :log warning "' + prefix + '-update: container not found"');
+        src.push('    :log warning "' + name + ': container not found"');
         src.push('  } else={');
-        src.push('    :local cid [:pick $cids 0]');
+        src.push('    :local cid [:pick $cids ([:len $cids] - 1)]');
         src.push('    :local img [/container/get $cid remote-image]');
         src.push('    :local ver [/system/resource/get version]');
         src.push('    :local dotPos [:find $ver "."]');
@@ -2981,12 +3007,50 @@
         src.push('    :local endPos [:find $rest "."]');
         src.push('    :if ([:typeof $endPos] = "nil") do={ :set endPos [:find $rest " "] }');
         src.push('    :local minor [:tonum [:pick $rest 0 $endPos]]');
+
+        // --- how the container is doing right now -------------------------------
+        src.push('    :local wantRunning true');
+        src.push('    :do { :if ([/container/get $cid start-on-boot] != true) do={ :set wantRunning false } } on-error={}');
+        src.push('    :local healthy true');
+        src.push('    :if ([:len [/container/get $cid image-id]] = 0) do={ :set healthy false }');
+        src.push('    :if ($wantRunning) do={');
+        src.push('      :do { :if ([/container/get $cid stopped] = true) do={ :set healthy false } } on-error={}');
+        src.push('    }');
+        // A plain start is the cheapest repair and costs nothing when it works.
+        src.push('    :if (!$healthy && $wantRunning && [:len [/container/get $cid image-id]] > 0) do={');
+        src.push('      :put "Container is down - trying to start it"');
+        src.push('      :do { /container/start $cid } on-error={}');
+        src.push('      :delay 8s');
+        src.push('      :set healthy true');
+        src.push('      :do { :if ([/container/get $cid stopped] = true) do={ :set healthy false } } on-error={}');
+        src.push('      :if ($healthy) do={');
+        src.push('        :put "Container is back up"');
+        src.push('        :log info "' + prefix + ': container restarted by the update script"');
+        src.push('      }');
+        src.push('    }');
+
+        // --- a file install can still be repaired, and that repair is the migration
+        src.push('    :if ($img = "" && $minor >= 22 && !$healthy) do={');
+        src.push('      :local imgTag "latest"');
+        src.push('      :local rbModel ""');
+        src.push('      :do { :set rbModel [[:parse ":return [/system/routerboard/get model]"]] } on-error={}');
+        src.push('      :local bName [/system/resource/get board-name]');
+        src.push('      :if ($rbModel~"E50UG" || $rbModel~"E60iUGS" || $bName~"E50UG" || $bName~"E60iUGS" || $bName~"^hEX") do={');
+        src.push('        :set imgTag "latest-armv5"');
+        src.push('      }');
+        src.push('      :set img ("' + REPO.ghcr + ':" . $imgTag)');
+        src.push('      :put ("Container is down and was installed from a file - pointing it at " . $img)');
+        src.push('      :log warning "' + name + ': broken file install, switching to the registry"');
+        src.push('      :do { /container/set $cid remote-image=$img } on-error={}');
+        src.push('    }');
+
         src.push('    :if ($img = "") do={');
         src.push('      :put "Installed from a local image file - /container/repull only updates registry installs."');
         src.push('      :put "Reinstall with the configurator on RouterOS 7.22+ to switch to one-command updates."');
         src.push('    } else={');
         src.push('      :if ($minor < 22) do={');
         src.push('        :put ("/container/repull needs RouterOS 7.22+, this router runs " . $ver)');
+        src.push('        :if (!$healthy) do={ :log error ("' + name + ': container is down, and " . $ver . " has no /container/repull") }');
         src.push('      } else={');
         // Layers are unpacked through tmpdir, so it has to live on the same disk as
         // root-dir. On a 16MB-flash router with the container on USB, the default
@@ -3018,14 +3082,21 @@
         }
         src.push('        :local curVer ""');
         src.push('        :do { :set curVer [/container/envs/get [find where list="' + env + '" key="AWG_IMAGE_VER"] value] } on-error={}');
-        src.push('        :if ($newVer != "" && $newVer = $curVer) do={');
+        // The health flag overrides the version match: a bricked container is pulled
+        // again even when it claims to be on the newest release.
+        src.push('        :if ($healthy && $newVer != "" && $newVer = $curVer) do={');
         src.push('          :put ("Already on " . $curVer . " - nothing to pull, tunnel untouched")');
         src.push('        } else={');
+        src.push('          :if (!$healthy) do={');
+        src.push('            :put "Container is not healthy - pulling the image again"');
+        src.push('            :log warning "' + name + ': container unhealthy, forcing a pull"');
+        src.push('          }');
         src.push('          :put ("Updating " . $img . " ...")');
         src.push('          :log info "' + prefix + ': repull started"');
+        // Stale .backup copies from an earlier pull confuse the rename dance RouterOS
+        // does around root-dir: it can move the live directory aside and never put it
+        // back, which is exactly how a container ends up bricked.
         src.push('          :do { /file/remove [find where name~($disk . "/' + prefix + '.backup")] } on-error={}');
-        src.push('          :local wasRunning true');
-        src.push('          :do { :if ([/container/get $cid stopped] = true) do={ :set wasRunning false } } on-error={}');
         src.push('          /container/repull $cid');
         src.push('          :local waited 0');
         src.push('          :while ([:len [/container/get $cid image-id]] = 0 && $waited < 180) do={');
@@ -3042,57 +3113,61 @@
         src.push('              :set waited ($waited + 3)');
         src.push('            }');
         src.push('          }');
+        src.push('          :local backUp false');
         src.push('          :if ([:len [/container/get $cid image-id]] > 0) do={');
-        // repull restarts a container that was running; one that was stopped when the
-        // pull failed stays stopped, so start it back explicitly.
-        src.push('            :local backUp true');
-        src.push('            :if ($wasRunning) do={');
+        src.push('            :set backUp true');
+        src.push('            :if ($wantRunning) do={');
         src.push('              :delay 3s');
         src.push('              :do { /container/start $cid } on-error={}');
-        src.push('              :delay 5s');
+        src.push('              :delay 8s');
         src.push('              :set backUp false');
         src.push('              :do { :if ([/container/get $cid stopped] != true) do={ :set backUp true } } on-error={}');
         src.push('            }');
-        // Last resort: rebuild it from the registry with the same parameters. Losing
-        // ten more seconds beats leaving the tunnel down until someone notices.
-        src.push('            :if (!$backUp) do={');
-        src.push('              :put "Container did not come back up - rebuilding it from the registry"');
-        src.push('              :log warning "' + prefix + '-update: container did not come back, rebuilding"');
-        src.push('              :do { /container/stop $cid } on-error={}');
-        src.push('              :delay 5s');
-        src.push('              :do { /container/remove $cid } on-error={}');
-        src.push('              :delay 3s');
-        src.push('              :do { /file/remove [find where name~($disk . "/' + prefix + '.backup")] } on-error={}');
-        src.push('              /container/add remote-image=$img interface=veth-' + prefix + ' envlist=' + prefix + '-env hostname=' + prefix + ' root-dir=$rootDirOrig logging=no start-on-boot=yes comment=' + prefix);
-        src.push('              :set waited 0');
-        src.push('              :local newCids [/container/find where interface=veth-' + prefix + ']');
-        src.push('              :while ([:len $newCids] > 0 && [:len [/container/get [:pick $newCids 0] image-id]] = 0 && $waited < 180) do={');
-        src.push('                :delay 3s');
-        src.push('                :set waited ($waited + 3)');
-        src.push('              }');
-        src.push('              :if ([:len $newCids] > 0 && [:len [/container/get [:pick $newCids 0] image-id]] > 0) do={');
-        src.push('                :do { /container/set [:pick $newCids 0] shm-size=4M } on-error={}');
-        src.push('                /container/start [:pick $newCids 0]');
-        src.push('                :put "Container rebuilt"');
-        src.push('                :log info "' + prefix + ': container rebuilt after update"');
-        src.push('              } else={');
-        src.push('                :put "Rebuild failed - reinstall with the configurator."');
-        src.push('                :log error "' + prefix + '-update: rebuild failed"');
-        src.push('              }');
-        src.push('            }');
-        src.push('            :if ($newVer != "") do={');
-        src.push('              :do { /container/envs/remove [find where list="' + env + '" key="AWG_IMAGE_VER"] } on-error={}');
-        src.push('              /container/envs/add list=' + env + ' key=AWG_IMAGE_VER value=$newVer');
-        src.push('            }');
-        // repull renames the old root-dir aside (.backup, .backup1, ...) and never
-        // clears it: on a 16MB flash those copies add up.
+        src.push('          }');
+        // Last resort: rebuild it from the registry with the same parameters. Ten
+        // more seconds of downtime beats a tunnel that stays dead until someone looks.
+        src.push('          :if (!$backUp) do={');
+        src.push('            :put "Container did not come back up - rebuilding it from the registry"');
+        src.push('            :log warning "' + name + ': container did not come back, rebuilding"');
+        src.push('            :do { /container/stop $cid } on-error={}');
+        src.push('            :delay 5s');
+        src.push('            :do { /container/remove $cid } on-error={}');
+        src.push('            :delay 3s');
         src.push('            :do { /file/remove [find where name~($disk . "/' + prefix + '.backup")] } on-error={}');
+        src.push('            :do { /container/add remote-image=$img ' + addArgs + ' } on-error={}');
+        src.push('            :set waited 0');
+        src.push('            :local newCids [/container/find where interface=' + veth + ' and start-on-boot=yes]');
+        src.push('            :if ([:len $newCids] = 0) do={ :set newCids [/container/find where interface=' + veth + '] }');
+        src.push('            :while ([:len $newCids] > 0 && [:len [/container/get [:pick $newCids ([:len $newCids] - 1)] image-id]] = 0 && $waited < 180) do={');
+        src.push('              :delay 3s');
+        src.push('              :set waited ($waited + 3)');
+        src.push('            }');
+        src.push('            :if ([:len $newCids] > 0 && [:len [/container/get [:pick $newCids ([:len $newCids] - 1)] image-id]] > 0) do={');
+        src.push('              :do { /container/set [:pick $newCids ([:len $newCids] - 1)] shm-size=4M } on-error={}');
+        src.push('              :do { /container/start [:pick $newCids ([:len $newCids] - 1)] } on-error={}');
+        src.push('              :delay 8s');
+        src.push('              :do { :if ([/container/get [:pick $newCids ([:len $newCids] - 1)] stopped] != true) do={ :set backUp true } } on-error={}');
+        src.push('            }');
+        src.push('            :if ($backUp) do={');
+        src.push('              :put "Container rebuilt"');
+        src.push('              :log info "' + prefix + ': container rebuilt after update"');
+        src.push('            } else={');
+        src.push('              :put "Rebuild failed - the tunnel is down. Netwatch keeps the router online meanwhile."');
+        src.push('              :put "This script runs again on the next schedule and will retry."');
+        src.push('              :log error "' + name + ': rebuild failed, tunnel is down"');
+        src.push('            }');
+        src.push('          }');
+        // Only record the version once the container is actually up. Writing it after
+        // a failed repair would make the next nightly run say "already up to date"
+        // and leave the tunnel dead.
+        src.push('          :if ($backUp && $newVer != "") do={');
+        src.push('            :do { /container/envs/remove [find where list="' + env + '" key="AWG_IMAGE_VER"] } on-error={}');
+        src.push('            :do { /container/envs/add list=' + env + ' key=AWG_IMAGE_VER value=$newVer } on-error={}');
+        src.push('          }');
+        src.push('          :do { /file/remove [find where name~($disk . "/' + prefix + '.backup")] } on-error={}');
+        src.push('          :if ($backUp) do={');
         src.push('            :put ("Update done: " . $img)');
         src.push('            :log info "' + prefix + ': update done"');
-        src.push('          } else={');
-        src.push('            :put "Pull failed twice - the container has no image and the tunnel is down."');
-        src.push('            :put "Retry: /system/script/run ' + prefix + '-update"');
-        src.push('            :log error "' + prefix + '-update: pull failed, container has no image"');
         src.push('          }');
         src.push('        }');
         src.push('      }');
