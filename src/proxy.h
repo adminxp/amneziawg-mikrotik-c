@@ -124,6 +124,20 @@ typedef struct {
     socklen_t len;
 } awg_addr_t;
 
+/* Ports AWG_REMOTE allows. A server that redirects a whole band of ports to
+ * its AmneziaWG port lets the client pick a fresh one per connection, so one
+ * blocked port stops being fatal. 32 ranges is well past what such a setup
+ * hands out (20 blocks today) and keeps the set a flat, cheap struct. */
+#define AWG_MAX_PORT_RANGES 32
+
+typedef struct { uint16_t lo, hi; } port_range_t;   /* lo == hi — single port */
+
+typedef struct {
+    port_range_t r[AWG_MAX_PORT_RANGES];
+    uint8_t  n;
+    uint32_t total;      /* sum of (hi-lo+1) — the weight for a uniform draw */
+} portset_t;
+
 typedef struct {
     /* === Hot fields === */
     awg_config_t *cfg;              /* 8B */
@@ -199,7 +213,8 @@ typedef struct {
     awg_addr_t remote;              /* endpoint behind remote_fd */
     awg_addr_t remote_alt;          /* endpoint behind remote_fd2 (probe) */
     char remote_host[256];
-    uint16_t remote_port;
+    uint16_t remote_port;            /* the port this connection is dialing */
+    portset_t remote_ports;          /* every port AWG_REMOTE allows */
     int auto_src_port;
     int local_port;
 
@@ -405,6 +420,18 @@ int state_write_prefer6(const char *path, int prefer6);
 /* Split "host:port" / "[v6addr]:port". A bare IPv6 literal is rejected: the
  * port is mandatory, so brackets are the only unambiguous form. */
 int parse_host_port(const char *s, char *host, int hostmax, uint16_t *port);
+
+/* Same split, but the part after the colon is a set: "443", "443,8080",
+ * "20150-20299,21500-21649". A comma cannot appear in a host — not in an IPv4
+ * literal, not in a name, not inside brackets — so the two never collide.
+ * Rejects an empty token, a non-digit, port 0, a port above 65535, a reversed
+ * range and more than AWG_MAX_PORT_RANGES tokens. */
+int parse_host_ports(const char *s, char *host, int hostmax, portset_t *ps);
+
+/* Draw a port uniformly over the ports of the set, not over its ranges, so a
+ * 150-port block does not weigh the same as a single port. `avoid` (the port
+ * just abandoned) gets one redraw. */
+uint16_t portset_pick(const portset_t *ps, fastrand_t *rng, uint16_t avoid);
 
 /* Largest WireGuard MTU whose full-size transport packet still fits a
  * 1500-byte path:

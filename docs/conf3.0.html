@@ -1584,6 +1584,11 @@
         var lines = text.split(/\r?\n/);
         for (var i = 0; i < lines.length; i++) {
             var line = lines[i].trim();
+            // The band of server ports this client may use rides in a comment:
+            // the .conf still has to import into any WireGuard client as is,
+            // and only awg-proxy knows what to do with a list.
+            var ap = /^[#;]\s*AllowedPorts\s*=\s*(.+)$/i.exec(line);
+            if (ap) result.allowedPorts = ap[1].trim();
             if (!line || line[0] === '#' || line[0] === ';') continue;
             if (line === '[Interface]') {
                 section = 'interface';
@@ -1712,6 +1717,39 @@
         var m = /^\[([^\]]+)\]:\d+$/.exec(s);
         if (m) return m[1];
         return s.replace(/:[\d]+$/, '');
+    }
+
+    // The port half of AWG_REMOTE may name a whole band: "443", "443,8080",
+    // "20150-20299,21500-21649". Same grammar the proxy parses — 1-65535, no
+    // reversed range, at most 32 tokens — so anything this accepts starts.
+    function isValidPortSpec(s) {
+        var toks = String(s || '').split(',');
+        if (toks.length > 32) return false;
+        for (var i = 0; i < toks.length; i++) {
+            var m = /^(\d{1,5})(?:-(\d{1,5}))?$/.exec(toks[i]);
+            if (!m) return false;
+            var lo = Number(m[1]);
+            var hi = m[2] === undefined ? lo : Number(m[2]);
+            if (lo < 1 || hi > 65535 || hi < lo) return false;
+        }
+        return true;
+    }
+
+    // Endpoint with its single port replaced by a whole spec, brackets kept.
+    function endpointWithPorts(endpoint, spec) {
+        var host = endpointHost(endpoint);
+        return host ? endpointJoin(host, spec) : String(endpoint || '');
+    }
+
+    // What AWG_REMOTE gets: the allowed band when the .conf carried a valid
+    // one, the plain endpoint otherwise. Everything else — the route that
+    // excludes the server from the tunnel, the AAAA probe — keeps reading
+    // Endpoint, which stays an ordinary host:port.
+    function remoteEndpoint(parsed) {
+        var spec = parsed.allowedPorts;
+        return (spec && isValidPortSpec(spec))
+            ? endpointWithPorts(parsed.peer.Endpoint, spec)
+            : parsed.peer.Endpoint;
     }
 
     function ipv6Enabled() {
@@ -3163,7 +3201,7 @@
             '',
             '# 4. Container environment variables',
             '/container/envs/add list=' + prefix + '-env key=AWG_LISTEN value=":51820"',
-            '/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + p.Endpoint + '"',
+            '/container/envs/add list=' + prefix + '-env key=AWG_REMOTE value="' + remoteEndpoint(parsed) + '"',
             '/container/envs/add list=' + prefix + '-env key=AWG_JC value="' + i.Jc + '"',
             '/container/envs/add list=' + prefix + '-env key=AWG_JMIN value="' + i.Jmin + '"',
             '/container/envs/add list=' + prefix + '-env key=AWG_JMAX value="' + i.Jmax + '"',
@@ -3449,7 +3487,7 @@
         lines.push('  :put ""');
         lines.push('  :put "2. Set environment variables and run:"');
         lines.push('  :put "export AWG_LISTEN=\\":51820\\""');
-        lines.push('  :put "export AWG_REMOTE=\\"' + p.Endpoint + '\\""');
+        lines.push('  :put "export AWG_REMOTE=\\"' + remoteEndpoint(parsed) + '\\""');
         lines.push('  :put "export AWG_JC=\\"' + i.Jc + '\\""');
         lines.push('  :put "export AWG_JMIN=\\"' + i.Jmin + '\\""');
         lines.push('  :put "export AWG_JMAX=\\"' + i.Jmax + '\\""');

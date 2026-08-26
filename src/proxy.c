@@ -201,7 +201,10 @@ int resolve_addr_check(const char *host, const struct sockaddr *cur) {
     return found ? 0 : 1;
 }
 
-int parse_host_port(const char *s, char *host, int hostmax, uint16_t *port) {
+/* Host half of "host:port" plus a pointer to whatever follows the colon —
+ * a single port for AWG_LISTEN, a whole set for AWG_REMOTE. */
+static int split_host_port(const char *s, char *host, int hostmax,
+                           const char **portstr) {
     const char *hstart = s, *hend = NULL, *colon;
 
     if (*s == '[') {
@@ -228,14 +231,83 @@ int parse_host_port(const char *s, char *host, int hostmax, uint16_t *port) {
     host[hlen] = '\0';
 
     if (!colon[1]) return -1;
+    *portstr = colon + 1;
+    return 0;
+}
+
+int parse_host_port(const char *s, char *host, int hostmax, uint16_t *port) {
+    const char *pstr;
+    if (split_host_port(s, host, hostmax, &pstr) < 0) return -1;
+
     uint32_t v = 0;
-    for (const char *q = colon + 1; *q; q++) {
+    for (const char *q = pstr; *q; q++) {
         if (*q < '0' || *q > '9') return -1;
         v = v * 10 + (uint32_t)(*q - '0');
         if (v > 65535) return -1;
     }
     *port = (uint16_t)v;
     return 0;
+}
+
+/* One token: "443" or "20150-20299". A reversed range is a typo (a swapped
+ * pair of digits in a config), and quietly turning it around would hide the
+ * mistake instead of reporting it. */
+static const char *parse_port_num(const char *q, uint32_t *out) {
+    uint32_t v = 0;
+    int digits = 0;
+    for (; *q >= '0' && *q <= '9'; q++) {
+        v = v * 10 + (uint32_t)(*q - '0');
+        if (v > 65535) return NULL;
+        digits++;
+    }
+    if (!digits || v == 0) return NULL;
+    *out = v;
+    return q;
+}
+
+static int parse_port_set(const char *s, portset_t *ps) {
+    ps->n = 0;
+    ps->total = 0;
+    for (const char *q = s;;) {
+        uint32_t lo, hi;
+        if (!(q = parse_port_num(q, &lo))) return -1;
+        hi = lo;
+        if (*q == '-' && !(q = parse_port_num(q + 1, &hi))) return -1;
+        if (hi < lo) return -1;
+        if (ps->n >= AWG_MAX_PORT_RANGES) return -1;
+        ps->r[ps->n].lo = (uint16_t)lo;
+        ps->r[ps->n].hi = (uint16_t)hi;
+        ps->n++;
+        ps->total += hi - lo + 1;
+        if (!*q) return 0;
+        if (*q != ',') return -1;
+        q++;
+    }
+}
+
+int parse_host_ports(const char *s, char *host, int hostmax, portset_t *ps) {
+    const char *pstr;
+    if (split_host_port(s, host, hostmax, &pstr) < 0) return -1;
+    return parse_port_set(pstr, ps);
+}
+
+/* idx-th port of the set, counting through the ranges in order. */
+static uint16_t portset_at(const portset_t *ps, uint32_t idx) {
+    for (uint8_t i = 0; i < ps->n; i++) {
+        uint32_t sz = (uint32_t)ps->r[i].hi - ps->r[i].lo + 1;
+        if (idx < sz) return (uint16_t)(ps->r[i].lo + idx);
+        idx -= sz;
+    }
+    return ps->r[0].lo;   /* unreachable while total matches the ranges */
+}
+
+uint16_t portset_pick(const portset_t *ps, fastrand_t *rng, uint16_t avoid) {
+    uint16_t port = portset_at(ps, (uint32_t)fastrand_intn(rng, (int)ps->total));
+    /* A single redraw, not a loop: on a two-port set the loop would spin, and
+     * landing on the dead port twice in a row only costs one more hop. */
+    if (port == avoid && ps->total > 1)
+        port = portset_at(ps, (uint32_t)fastrand_intn(rng, (int)ps->total));
+    return port;
 }
 
 static int create_udp_socket(int family, int blocking) {
@@ -513,6 +585,14 @@ static void he_learn(proxy_t *p, int prefer6) {
  * preference learned by an earlier run, which flips the order so a site whose
  * IPv4 is dead stops paying the probe delay on every single reconnect. */
 static int dial_remote(proxy_t *p, int blocking) {
+    /* A fresh port for every dial. Both callers — the startup dial, before the
+     * threads exist, and do_reconnect() from the s2c thread — are serialised
+     * by construction, so rng_s2c needs no locking, and every reconnect there
+     * is (timeout, socket error, a new IP from DNS, a fallback stage, the
+     * rebind of AWG_SRC_PORT=auto) moves off the port that just failed. With a
+     * single-port AWG_REMOTE this is a no-op. */
+    p->remote_port = portset_pick(&p->remote_ports, &p->rng_s2c, p->remote_port);
+
     awg_addr_t v4, v6;
     if (resolve_addr(p->remote_host, p->remote_port, &v4, &v6) < 0)
         return -1;
@@ -1030,9 +1110,20 @@ int proxy_init(proxy_t *p, awg_config_t *cfg,
     }
     p->cli_len = cliaddr_len(&p->listen_addr);
 
-    /* Parse remote address */
-    if (parse_host_port(remote_str, p->remote_host, sizeof(p->remote_host), &p->remote_port) < 0)
+    /* Parse remote address. The port half may be a set — dial_remote() draws
+     * from it on every connect; until then the first port stands. */
+    if (parse_host_ports(remote_str, p->remote_host, sizeof(p->remote_host),
+                         &p->remote_ports) < 0) {
+        log_error("AWG_REMOTE: bad host or port list");
         return -1;
+    }
+    p->remote_port = p->remote_ports.r[0].lo;
+    if (p->remote_ports.total > 1) {
+        char nb[12];
+        const char *parts[] = { "remote port is picked per connection out of ",
+                                u32_to_str(nb, p->remote_ports.total), " ports" };
+        log_infon(parts, 3);
+    }
 
     if (src_port > 0) {
         p->local_port = src_port;
@@ -2543,6 +2634,15 @@ int proxy_run(proxy_t *p) {
     int silent_ticks = 0;      /* consecutive ticks with nothing from the remote */
     int init_unanswered = 0;   /* ...during which the client asked to handshake */
 
+    /* Port hopping. When AWG_REMOTE names more than one port, a port that a
+     * DPI box has cut must not cost the full AWG_TIMEOUT: three ticks is
+     * 15 seconds, room for three WireGuard handshake retries on one port,
+     * after which the next port gets its turn. A single-port remote keeps the
+     * old behaviour exactly — hop_checks stays 0 and the branch is dead. */
+#define PORT_HOP_CHECKS 3
+    int hop_checks = (p->remote_ports.total > 1) ? PORT_HOP_CHECKS : 0;
+    int hop_rounds = 0;
+
     /* Fallback probing (initiator side of a dual-profile s2s config): after
      * fb_after seconds of the client sending but the remote staying silent,
      * switch to the other profile and reconnect. Biased to the primary — we
@@ -2676,10 +2776,28 @@ int proxy_run(proxy_t *p) {
                 if (had_remote_rx) {
                     silent_ticks = 0;
                     init_unanswered = 0;
+                    hop_rounds = 0;
                 } else {
                     if (had_init) init_unanswered = 1;
                     if (silent_ticks < checks_needed) silent_ticks++;
-                    if (silent_ticks >= checks_needed && init_unanswered) {
+                    if (hop_checks && init_unanswered && silent_ticks >= hop_checks) {
+                        log_info("no answer on this port, trying another one");
+                        /* he_reset means "the family we settled on may be the
+                         * dead one" — a verdict that needs a long silence, not
+                         * one short hop. Raise it once per AWG_TIMEOUT worth of
+                         * hops so the hop keeps its own, faster clock. */
+                        if (++hop_rounds * hop_checks >= checks_needed) {
+                            hop_rounds = 0;
+                            atomic_store_explicit(&p->he_reset, 1, memory_order_relaxed);
+                        }
+                        int rfd2 = atomic_load_explicit(&p->remote_fd, memory_order_acquire);
+                        if (rfd2 >= 0) {
+                            atomic_store_explicit(&p->reconnect_needed, 1, memory_order_relaxed);
+                            shutdown(rfd2, SHUT_RDWR);
+                        }
+                        silent_ticks = 0;
+                        init_unanswered = 0;
+                    } else if (silent_ticks >= checks_needed && init_unanswered) {
                         log_info("remote silent while the tunnel is handshaking, "
                                  "triggering reconnect");
                         atomic_store_explicit(&p->he_reset, 1, memory_order_relaxed);

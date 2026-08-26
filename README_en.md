@@ -450,7 +450,7 @@ With 3+ clients, this is easier to automate with a script on the server.
 | Variable | Required | Default | Description |
 |----------|:---:|:---:|-------------|
 | `AWG_LISTEN` | Yes | -- | Listen address |
-| `AWG_REMOTE` | Yes | -- | AWG server address |
+| `AWG_REMOTE` | Yes | -- | AWG server address; the port may be a list or a range |
 | `AWG_JC` | Yes | -- | Junk packet count |
 | `AWG_JMIN` | Yes | -- | Min junk packet size |
 | `AWG_JMAX` | Yes | -- | Max junk packet size |
@@ -602,6 +602,20 @@ AWG_REMOTE=1.2.3.4:443            # IPv4 + port
 AWG_REMOTE=[2001:db8::1]:443      # IPv6 + port (brackets required)
 AWG_REMOTE=vpn.example.com:51820  # domain + port
 ```
+
+Instead of a single port you can list several -- comma-separated, ranges with a dash (up to 32 items):
+
+```
+AWG_REMOTE=1.2.3.4:443,8080                    # two ports
+AWG_REMOTE=1.2.3.4:20150-20299                 # a range
+AWG_REMOTE=1.2.3.4:20150-20299,21500-21649     # several ranges
+AWG_REMOTE=[2001:db8::1]:6000-6100             # same for IPv6
+```
+
+The port is drawn from the list **at random, anew on every connection** -- at startup and on every reconnect (timeout, a new IP from DNS, an `AWG_FB_*` stage switch). Two reasons. First, a fixed port is a distinctive detail for DPI, all the more so when every client of the server sits on the same one; a random port out of a wide range offers no such handle. Second, a blocked port stops being fatal: when the server stays silent, the proxy moves to another port after **15 seconds** instead of waiting out the full `AWG_TIMEOUT` (60 seconds by default). The log shows `no answer on this port, trying another one`, and the port in use as `connected to <address> port <port>`.
+
+This only works if the **server really accepts every listed port** -- that is, it DNATs/REDIRECTs all of them to its AmneziaWG port. Listing ports nothing is listening on buys silence and endless hopping. The web configurator fills these ranges into `AWG_REMOTE` when the `.conf` carries an `# AllowedPorts = ...` line (written by the bot that issued the key).
+
 
 Note that IPv6 is supported **on the server-facing leg only**. `AWG_LISTEN` (receiving from the router's WireGuard client) stays IPv4 — it is a local veth inside the router, where a second stack buys nothing.
 
@@ -1253,7 +1267,11 @@ Artifacts are created in the `builds/` directory.
 The configurator has its own jsdom-based checks (dev only — the proxy itself has no dependencies):
 
 ```bash
-npm install jsdom && node tests/conf3.0-ipv6.test.js
+npm install jsdom
+node tests/conf3.0-ipv6.test.js
+node tests/conf3.0-dns.test.js
+node tests/conf3.0-ports.test.js
+node tests/conf3.1.test.js
 ```
 
 ## License

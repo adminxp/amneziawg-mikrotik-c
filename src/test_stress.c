@@ -464,7 +464,8 @@ static void make_awg_init(uint8_t *buf, uint32_t sender_index) {
         buf[TEST_S1 + i] = (uint8_t)(i ^ (sender_index & 0xFF));
 }
 
-/* make_awg_response not needed — burst test only needs transport */
+/* An AWG-format handshake response is only needed by the port-hop scenario —
+ * make_awg_response lives down there, beside it. */
 
 /* AWG-format transport: H4 type + transport payload */
 static void make_awg_transport(uint8_t *buf, uint32_t receiver_index,
@@ -2884,6 +2885,219 @@ static void test_default_src_port_is_ephemeral(void) {
     close(server_fd);
 }
 
+/* ---- Scenario 24: AWG_REMOTE names a band of ports ----
+ *
+ * A server that redirects a whole band of UDP ports to its AmneziaWG port lets
+ * the client draw a fresh one per connection, so a single port cut by a DPI box
+ * stops being fatal. Two claims to prove: the port really is redrawn on every
+ * dial, and a port that answers nothing costs one hop window (15 s) instead of
+ * the whole AWG_TIMEOUT.
+ *
+ * By far the slowest scenario in this file — the hop window is fixed in the
+ * binary and cannot be shortened from outside, so proving it costs ~30 real
+ * seconds on top of the eight restarts. */
+static char *slurp_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)len + 1);
+    if (buf) {
+        len = (long)fread(buf, 1, (size_t)len, f);
+        buf[len] = 0;
+    }
+    fclose(f);
+    return buf;
+}
+
+/* Ports of every "connected to 127.0.0.1 port N" line, in order. */
+static int log_connected_ports(const char *log, int *out, int max) {
+    static const char needle[] = "connected to 127.0.0.1 port ";
+    int n = 0;
+    for (const char *s = log; (s = strstr(s, needle)) != NULL; ) {
+        s += sizeof(needle) - 1;
+        if (n < max) out[n++] = atoi(s);
+    }
+    return n;
+}
+
+/* AWG-format handshake response: S2 padding + H2 type + response body */
+static void make_awg_response(uint8_t *buf, uint32_t receiver_index) {
+    for (int i = 0; i < TEST_S2; i++) buf[i] = (uint8_t)(i * 11);
+    uint32_t h = TEST_H2;
+    memcpy(buf + TEST_S2, &h, 4);
+    memcpy(buf + TEST_S2 + 4, &receiver_index, 4);
+    for (int i = 8; i < WG_RESP_SIZE; i++)
+        buf[TEST_S2 + i] = (uint8_t)(i ^ 0x5A);
+}
+
+static void test_port_set_hop(void) {
+    enum { NPORTS = 4, RESTARTS = 8 };
+    int ports[NPORTS], fds[NPORTS];
+    char spec[128];
+    int off = 0;
+    for (int i = 0; i < NPORTS; i++) {
+        ports[i] = find_free_port();
+        ASSERT(ports[i] > 0);
+        /* Bound and forever silent: a closed port would answer ICMP and the
+         * run would reconnect on the error instead of on the hop timer. */
+        fds[i] = make_udp_socket(ports[i]);
+        ASSERT(fds[i] >= 0);
+        off += snprintf(spec + off, sizeof(spec) - (size_t)off, "%s%d",
+                        i ? "," : "", ports[i]);
+    }
+
+    char logpath[96];
+    snprintf(logpath, sizeof(logpath), "/tmp/awg-hop-%d", (int)getpid());
+    unlink(logpath);
+
+    /* Part 1: the port is drawn per connection, so restarts spread out. */
+    int listen_port = find_free_port();
+    ASSERT(listen_port > 0);
+    char remote_env[160];
+    snprintf(remote_env, sizeof(remote_env), "127.0.0.1:%s", spec);
+
+    int seen[NPORTS] = { 0 };
+    int distinct = 0;
+    for (int r = 0; r < RESTARTS; r++) {
+        g_proxy_log = logpath;
+        g_log_level = "info";
+        pid_t proxy = start_proxy_remote("normal", listen_port, remote_env, NULL);
+        g_proxy_log = NULL;
+        g_log_level = "error";
+        ASSERT(proxy > 0);
+        stop_proxy(proxy);
+
+        char *log = slurp_file(logpath);
+        ASSERT(log != NULL);
+        int got[4];
+        int n = log_connected_ports(log, got, 4);
+        free(log);
+        ASSERT(n >= 1);
+        int idx = -1;
+        for (int i = 0; i < NPORTS; i++) if (ports[i] == got[0]) idx = i;
+        ASSERT(idx >= 0);            /* never outside the set */
+        if (!seen[idx]++) distinct++;
+    }
+    fprintf(stderr, "          (%d restarts landed on %d of %d ports)\n",
+            RESTARTS, distinct, NPORTS);
+    ASSERT(distinct >= 2);
+
+    for (int i = 0; i < NPORTS; i++) close(fds[i]);
+
+    /* Part 2: one port dead, one alive. AWG_TIMEOUT is 60 s, so anything that
+     * comes up sooner came up through the hop. */
+    int dead_port = find_free_port();
+    int live_port = find_free_port();
+    ASSERT(dead_port > 0 && live_port > 0);
+    int dead_fd = make_udp_socket(dead_port);
+    int live_fd = make_udp_socket(live_port);
+    ASSERT(dead_fd >= 0 && live_fd >= 0);
+    snprintf(remote_env, sizeof(remote_env), "127.0.0.1:%d,%d", dead_port, live_port);
+
+    listen_port = find_free_port();
+    ASSERT(listen_port > 0);
+
+    /* The draw is random, and the dead-first case is the one under test —
+     * restart until it comes up. */
+    pid_t proxy = -1;
+    int first_port = 0;
+    for (int attempt = 0; attempt < 12 && first_port != dead_port; attempt++) {
+        if (proxy > 0) stop_proxy(proxy);
+        g_proxy_log = logpath;
+        g_log_level = "info";
+        g_timeout = "60";
+        proxy = start_proxy_remote("normal", listen_port, remote_env, NULL);
+        g_proxy_log = NULL;
+        g_log_level = "error";
+        g_timeout = "30";
+        ASSERT(proxy > 0);
+        char *log = slurp_file(logpath);
+        ASSERT(log != NULL);
+        int got[4];
+        if (log_connected_ports(log, got, 4) >= 1) first_port = got[0];
+        free(log);
+    }
+    ASSERT(proxy > 0);
+    if (first_port != dead_port) {
+        fprintf(stderr, "          (never drew the dead port first, skipped)\n");
+        stop_proxy(proxy);
+        goto done;
+    }
+
+    int client_fd = make_client_socket();
+    ASSERT(client_fd >= 0);
+    struct sockaddr_in proxy_addr = make_addr(listen_port);
+    uint8_t init_buf[WG_INIT_SIZE];
+    make_wg_init(init_buf, 0x9100);
+
+    int64_t began = now_us(), next_init = 0;
+    int got_resp = 0;
+    while (!got_resp && now_us() - began < 75000000) {
+        if (now_us() >= next_init) {
+            /* Repeated inits are what tells the watchdog the tunnel is trying
+             * to come up rather than sitting idle. */
+            sendto(client_fd, init_buf, WG_INIT_SIZE, 0,
+                   (struct sockaddr *)&proxy_addr, sizeof(proxy_addr));
+            next_init = now_us() + 5000000;
+        }
+        struct pollfd pfd[3] = {
+            { .fd = dead_fd,   .events = POLLIN },
+            { .fd = live_fd,   .events = POLLIN },
+            { .fd = client_fd, .events = POLLIN },
+        };
+        if (poll(pfd, 3, 200) <= 0) continue;
+
+        if (pfd[0].revents & POLLIN) drain_socket(dead_fd);
+        if (pfd[1].revents & POLLIN) {
+            uint8_t rb[2048];
+            struct sockaddr_storage from;
+            socklen_t fl = sizeof(from);
+            int n = (int)recvfrom(live_fd, rb, sizeof(rb), MSG_DONTWAIT,
+                                  (struct sockaddr *)&from, &fl);
+            uint32_t h = 0;
+            if (n == TEST_S1 + WG_INIT_SIZE) memcpy(&h, rb + TEST_S1, 4);
+            if (h == TEST_H1) {
+                uint8_t resp[TEST_S2 + WG_RESP_SIZE];
+                make_awg_response(resp, 0x9100);
+                sendto(live_fd, resp, sizeof(resp), 0,
+                       (struct sockaddr *)&from, fl);
+            }
+        }
+        if (pfd[2].revents & POLLIN) {
+            uint8_t rb[2048];
+            int n = (int)recvfrom(client_fd, rb, sizeof(rb), MSG_DONTWAIT, NULL, NULL);
+            uint32_t t = 0;
+            if (n == WG_RESP_SIZE) memcpy(&t, rb, 4);
+            if (t == WG_HANDSHAKE_RESPONSE) got_resp = 1;
+        }
+    }
+    int64_t took = (now_us() - began) / 1000000;
+    stop_proxy(proxy);
+
+    char *log = slurp_file(logpath);
+    ASSERT(log != NULL);
+    int hops = 0;
+    for (const char *s = log; (s = strstr(s, "no answer on this port")) != NULL; s += 22)
+        hops++;
+    int got[8];
+    int nports = log_connected_ports(log, got, 8);
+    fprintf(stderr, "          (dead port first, tunnel up after %d s, hops=%d)\n",
+            (int)took, hops);
+    ASSERT(got_resp);
+    ASSERT(hops >= 1);
+    ASSERT(nports >= 2);
+    ASSERT_EQ(got[nports - 1], live_port);
+    free(log);
+    close(client_fd);
+
+done:
+    close(dead_fd);
+    close(live_fd);
+    unlink(logpath);
+}
+
 int main(void) {
     fprintf(stderr, "=== stress tests ===\n");
     RUN_TEST(normal_burst);
@@ -2909,5 +3123,6 @@ int main(void) {
     RUN_TEST(remote_address_moves);
     RUN_TEST(server_listen6);
     RUN_TEST(default_src_port_is_ephemeral);
+    RUN_TEST(port_set_hop);
     TEST_MAIN_END();
 }
