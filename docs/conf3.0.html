@@ -791,6 +791,11 @@
             <span data-i18n="v6blockLabel">Force IPv4 (block native IPv6 past the tunnel)</span></label>
             <div class="hint" data-i18n="v6blockHint">Only IPv4 goes into the tunnel. If the ISP hands the router native IPv6, every IPv6 flow leaves straight out of WAN and the routing policy never sees it: the site opens past the VPN, or hangs for about 10 seconds until the client falls back to IPv4. These rules reject such connections (TCP with a reset, so the fallback is instant). Anything that must keep speaking IPv6 directly goes into the ...-v6-direct address list.</div>
         </div>
+        <div id="autoupdate-row" style="margin-top:8px">
+            <label><input type="checkbox" id="autoupdate-enable" checked>
+            <span data-i18n="autoUpdateLabel">Check for container updates daily</span></label>
+            <div class="hint" data-i18n="autoUpdateHint">Adds a scheduler that runs the <code>&lt;prefix&gt;-update</code> script at 04:30. The script compares the published release with the installed one and only calls <code>/container/repull</code> when the version actually changed &mdash; a pull restarts the container and the tunnel is down for about ten seconds. Needs RouterOS 7.22+ and an install from the registry; the script itself is always created, so you can update by hand with <code>/system/script/run &lt;prefix&gt;-update</code>.</div>
+        </div>
         <div id="df-row" style="margin-top:8px">
             <label><input type="checkbox" id="df-enable">
             <span data-i18n="dfLabel">Clear DF bit on UDP (DPI workaround)</span></label>
@@ -1106,11 +1111,19 @@
             var dl = m[2] === 'gitlab'
                 ? base + '/-/releases/permalink/latest/downloads/'
                 : base + '/releases/latest/download/';
-            return { base: base, dl: dl };
+            // Container registry and release API only exist on the GitHub side; a GitLab
+            // mirror keeps the archive path and loses the /container/repull shortcut.
+            return {
+                base: base, dl: dl,
+                ghcr: m[2] === 'github' ? 'ghcr.io/' + m[1] + '/awg-proxy' : '',
+                api: m[2] === 'github' ? 'https://api.github.com/repos/' + m[1] + '/' + p + '/releases/latest' : ''
+            };
         }
         return {
             base: 'https://github.com/timbrs/amneziawg-mikrotik-c',
-            dl: 'https://github.com/timbrs/amneziawg-mikrotik-c/releases/latest/download/'
+            dl: 'https://github.com/timbrs/amneziawg-mikrotik-c/releases/latest/download/',
+            ghcr: 'ghcr.io/timbrs/awg-proxy',
+            api: 'https://api.github.com/repos/timbrs/amneziawg-mikrotik-c/releases/latest'
         };
     })();
 
@@ -1179,6 +1192,8 @@
             netwatchHint: 'Monitors tunnel availability by pinging 8.8.8.8 through the WG interface (via a pinned probe route). If the tunnel is down, disables its route \u2014 traffic falls back to the next tunnel (by distance) or goes direct. Re-enables when the tunnel recovers.',
             v6blockLabel: 'Force IPv4 (block native IPv6 past the tunnel)',
             v6blockHint: 'Only IPv4 goes into the tunnel. If the ISP hands the router native IPv6, every IPv6 flow leaves straight out of WAN and the routing policy never sees it: the site opens past the VPN, or hangs for about 10 seconds until the client falls back to IPv4. These rules reject such connections (TCP with a reset, so the fallback is instant). Anything that must keep speaking IPv6 directly goes into the ...-v6-direct address list.',
+            autoUpdateLabel: 'Check for container updates daily',
+            autoUpdateHint: 'Adds a scheduler that runs the <prefix>-update script at 04:30. The script compares the published release with the installed one and only calls /container/repull when the version actually changed \u2014 a pull restarts the container and the tunnel is down for about ten seconds. Needs RouterOS 7.22+ and an install from the registry; the script itself is always created, so you can update by hand with /system/script/run <prefix>-update.',
             dfLabel: 'Clear DF bit on UDP (DPI workaround)',
             dfHint: 'Adds AWG_NO_DF=1 to the container ENV: the proxy clears the Don\u2019t Fragment bit on its UDP packets. Some DPI equipment passes DF=0 UDP better than DF=1. Enable only if the tunnel has connectivity issues \u2014 with DF=0 large packets may be fragmented along the path.',
             ipv6Label: 'Server is reachable over IPv6',
@@ -1382,6 +1397,8 @@
             netwatchHint: '\u041f\u0440\u043e\u0432\u0435\u0440\u044f\u0435\u0442 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0441\u0442\u044c \u0442\u0443\u043d\u043d\u0435\u043b\u044f \u043f\u0438\u043d\u0433\u043e\u043c 8.8.8.8 \u0447\u0435\u0440\u0435\u0437 WG-\u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441 (\u0447\u0435\u0440\u0435\u0437 \u0437\u0430\u043a\u0440\u0435\u043f\u043b\u0451\u043d\u043d\u044b\u0439 probe-\u043c\u0430\u0440\u0448\u0440\u0443\u0442). \u0415\u0441\u043b\u0438 \u0442\u0443\u043d\u043d\u0435\u043b\u044c \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u2014 \u043e\u0442\u043a\u043b\u044e\u0447\u0430\u0435\u0442 \u0435\u0433\u043e \u043c\u0430\u0440\u0448\u0440\u0443\u0442, \u0442\u0440\u0430\u0444\u0438\u043a \u043f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0442\u0443\u043d\u043d\u0435\u043b\u044c (\u043f\u043e distance) \u0438\u043b\u0438 \u0438\u0434\u0451\u0442 \u043d\u0430\u043f\u0440\u044f\u043c\u0443\u044e. \u041f\u0440\u0438 \u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0438 \u043c\u0430\u0440\u0448\u0440\u0443\u0442 \u0432\u043a\u043b\u044e\u0447\u0430\u0435\u0442\u0441\u044f \u043e\u0431\u0440\u0430\u0442\u043d\u043e.',
             v6blockLabel: '\u0424\u043e\u0440\u0441\u0438\u0440\u043e\u0432\u0430\u0442\u044c IPv4 (\u043d\u0435 \u043f\u0443\u0441\u043a\u0430\u0442\u044c IPv6 \u043c\u0438\u043c\u043e \u0442\u0443\u043d\u043d\u0435\u043b\u044f)',
             v6blockHint: '\u0412 \u0442\u0443\u043d\u043d\u0435\u043b\u044c \u0437\u0430\u0432\u043e\u0434\u0438\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e IPv4. \u0415\u0441\u043b\u0438 \u043f\u0440\u043e\u0432\u0430\u0439\u0434\u0435\u0440 \u0432\u044b\u0434\u0430\u043b \u0440\u043e\u0443\u0442\u0435\u0440\u0443 \u043d\u0430\u0442\u0438\u0432\u043d\u044b\u0439 IPv6, \u0432\u0435\u0441\u044c IPv6-\u0442\u0440\u0430\u0444\u0438\u043a \u0443\u0445\u043e\u0434\u0438\u0442 \u043f\u0440\u044f\u043c\u043e \u0432 WAN \u0438 \u043f\u0440\u0430\u0432\u0438\u043b\u0430 \u043c\u0430\u0440\u0448\u0440\u0443\u0442\u0438\u0437\u0430\u0446\u0438\u0438 \u0435\u0433\u043e \u043d\u0435 \u0432\u0438\u0434\u044f\u0442: \u0441\u0430\u0439\u0442 \u043e\u0442\u043a\u0440\u044b\u0432\u0430\u0435\u0442\u0441\u044f \u043c\u0438\u043c\u043e VPN \u0438\u043b\u0438 \u0432\u0438\u0441\u043d\u0435\u0442 \u043e\u043a\u043e\u043b\u043e 10 \u0441\u0435\u043a\u0443\u043d\u0434, \u043f\u043e\u043a\u0430 \u043a\u043b\u0438\u0435\u043d\u0442 \u043d\u0435 \u043e\u0442\u043a\u0430\u0442\u0438\u0442\u0441\u044f \u043d\u0430 IPv4. \u041f\u0440\u0430\u0432\u0438\u043b\u0430 \u043e\u0442\u0431\u0438\u0432\u0430\u044e\u0442 \u0442\u0430\u043a\u0438\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u044f (TCP \u2014 \u0447\u0435\u0440\u0435\u0437 reset, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 \u043e\u0442\u043a\u0430\u0442 \u043c\u0433\u043d\u043e\u0432\u0435\u043d\u043d\u044b\u0439). \u0422\u043e, \u0447\u0442\u043e \u0434\u043e\u043b\u0436\u043d\u043e \u0445\u043e\u0434\u0438\u0442\u044c \u043f\u043e IPv6 \u043d\u0430\u043f\u0440\u044f\u043c\u0443\u044e, \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0439\u0442\u0435 \u0432 \u0430\u0434\u0440\u0435\u0441-\u043b\u0438\u0441\u0442 ...-v6-direct.',
+            autoUpdateLabel: '\u0415\u0436\u0435\u0434\u043d\u0435\u0432\u043d\u043e \u043f\u0440\u043e\u0432\u0435\u0440\u044f\u0442\u044c \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u0430',
+            autoUpdateHint: '\u0414\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442 scheduler, \u043a\u043e\u0442\u043e\u0440\u044b\u0439 \u0432 04:30 \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442 \u0441\u043a\u0440\u0438\u043f\u0442 <prefix>-update. \u0421\u043a\u0440\u0438\u043f\u0442 \u0441\u0432\u0435\u0440\u044f\u0435\u0442 \u043e\u043f\u0443\u0431\u043b\u0438\u043a\u043e\u0432\u0430\u043d\u043d\u044b\u0439 \u0440\u0435\u043b\u0438\u0437 \u0441 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043d\u044b\u043c \u0438 \u0432\u044b\u0437\u044b\u0432\u0430\u0435\u0442 /container/repull \u0442\u043e\u043b\u044c\u043a\u043e \u043a\u043e\u0433\u0434\u0430 \u0432\u0435\u0440\u0441\u0438\u044f \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u0441\u043c\u0435\u043d\u0438\u043b\u0430\u0441\u044c \u2014 \u043f\u0435\u0440\u0435\u043a\u0430\u0447\u043a\u0430 \u043f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440, \u0442\u0443\u043d\u043d\u0435\u043b\u044c \u043b\u0435\u0436\u0438\u0442 \u043e\u043a\u043e\u043b\u043e \u0434\u0435\u0441\u044f\u0442\u0438 \u0441\u0435\u043a\u0443\u043d\u0434. \u041d\u0443\u0436\u0435\u043d RouterOS 7.22+ \u0438 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043a\u0430 \u0438\u0437 \u0440\u0435\u0435\u0441\u0442\u0440\u0430; \u0441\u0430\u043c \u0441\u043a\u0440\u0438\u043f\u0442 \u0441\u043e\u0437\u0434\u0430\u0451\u0442\u0441\u044f \u0432\u0441\u0435\u0433\u0434\u0430, \u0442\u0430\u043a \u0447\u0442\u043e \u043e\u0431\u043d\u043e\u0432\u0438\u0442\u044c \u0432\u0440\u0443\u0447\u043d\u0443\u044e \u043c\u043e\u0436\u043d\u043e \u043a\u043e\u043c\u0430\u043d\u0434\u043e\u0439 /system/script/run <prefix>-update.',
             dfLabel: '\u0423\u0431\u0440\u0430\u0442\u044c DF-\u0431\u0438\u0442 \u0441 UDP (\u043e\u0431\u0445\u043e\u0434 \u0422\u0421\u041f\u0423)',
             dfHint: '\u0414\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442 AWG_NO_DF=1 \u0432 \u043f\u0435\u0440\u0435\u043c\u0435\u043d\u043d\u044b\u0435 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u0430: \u043f\u0440\u043e\u043a\u0441\u0438 \u0441\u043d\u0438\u043c\u0430\u0435\u0442 Don\u2019t Fragment \u0431\u0438\u0442 \u0441\u043e \u0441\u0432\u043e\u0438\u0445 UDP-\u043f\u0430\u043a\u0435\u0442\u043e\u0432. \u0427\u0430\u0441\u0442\u044c DPI-\u043e\u0431\u043e\u0440\u0443\u0434\u043e\u0432\u0430\u043d\u0438\u044f (\u0422\u0421\u041f\u0423) \u043b\u0443\u0447\u0448\u0435 \u043f\u0440\u043e\u043f\u0443\u0441\u043a\u0430\u0435\u0442 UDP \u0441 DF=0. \u0412\u043a\u043b\u044e\u0447\u0430\u0439\u0442\u0435 \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0440\u0438 \u043f\u0440\u043e\u0431\u043b\u0435\u043c\u0430\u0445 \u0441\u043e \u0441\u0432\u044f\u0437\u044c\u044e \u2014 \u0441 DF=0 \u043a\u0440\u0443\u043f\u043d\u044b\u0435 \u043f\u0430\u043a\u0435\u0442\u044b \u043c\u043e\u0433\u0443\u0442 \u0444\u0440\u0430\u0433\u043c\u0435\u043d\u0442\u0438\u0440\u043e\u0432\u0430\u0442\u044c\u0441\u044f \u043f\u043e \u043f\u0443\u0442\u0438.',
             ipv6Label: '\u0421\u0435\u0440\u0432\u0435\u0440 \u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u043f\u043e IPv6',
@@ -2940,6 +2957,174 @@
     // ============================================================
     // Generate uninstall script as /system/script/add command (container mode)
     // ============================================================
+    // ============================================================
+    // Update script (/container/repull)
+    // ============================================================
+    // repull restarts the container every single time, even when the digest has not
+    // moved, and a failed pull leaves it stopped with an empty image-id - the tunnel
+    // stays down until someone pulls again. So: check the published release first,
+    // pull only when the version actually changed, and verify afterwards.
+    function buildUpdateScriptSource(prefix) {
+        var env = prefix + '-env';
+        var src = [];
+        src.push('/system/script/add name=' + prefix + '-update comment=' + prefix + ' source={');
+        src.push('  :local cids [/container/find where interface=veth-' + prefix + ']');
+        src.push('  :if ([:len $cids] = 0) do={');
+        src.push('    :put "Container ' + prefix + ' not found"');
+        src.push('    :log warning "' + prefix + '-update: container not found"');
+        src.push('  } else={');
+        src.push('    :local cid [:pick $cids 0]');
+        src.push('    :local img [/container/get $cid remote-image]');
+        src.push('    :local ver [/system/resource/get version]');
+        src.push('    :local dotPos [:find $ver "."]');
+        src.push('    :local rest [:pick $ver ($dotPos + 1) [:len $ver]]');
+        src.push('    :local endPos [:find $rest "."]');
+        src.push('    :if ([:typeof $endPos] = "nil") do={ :set endPos [:find $rest " "] }');
+        src.push('    :local minor [:tonum [:pick $rest 0 $endPos]]');
+        src.push('    :if ($img = "") do={');
+        src.push('      :put "Installed from a local image file - /container/repull only updates registry installs."');
+        src.push('      :put "Reinstall with the configurator on RouterOS 7.22+ to switch to one-command updates."');
+        src.push('    } else={');
+        src.push('      :if ($minor < 22) do={');
+        src.push('        :put ("/container/repull needs RouterOS 7.22+, this router runs " . $ver)');
+        src.push('      } else={');
+        // Layers are unpacked through tmpdir, so it has to live on the same disk as
+        // root-dir. On a 16MB-flash router with the container on USB, the default
+        // (internal flash) has no room at all.
+        src.push('        :local rootDir [/container/get $cid root-dir]');
+        src.push('        :if ([:pick $rootDir 0 1] = "/") do={ :set rootDir [:pick $rootDir 1 [:len $rootDir]] }');
+        src.push('        :local rootDirOrig $rootDir');
+        src.push('        :local slashPos [:find $rootDir "/"]');
+        src.push('        :local disk $rootDir');
+        src.push('        :if ([:typeof $slashPos] != "nil") do={ :set disk [:pick $rootDir 0 $slashPos] }');
+        src.push('        :local verPath "awg-update-check.json"');
+        src.push('        :if ($disk != "disk1") do={');
+        src.push('          :do { /file/make-directory ($disk . "/pull") } on-error={}');
+        src.push('          /container/config set tmpdir=($disk . "/pull")');
+        src.push('          :set verPath ($disk . "/pull/awg-update-check.json")');
+        src.push('        }');
+        src.push('        :local newVer ""');
+        if (REPO.api) {
+            src.push('        :do {');
+            src.push('          /tool/fetch url="' + REPO.api + '" dst-path=$verPath http-max-redirect-count=10');
+            src.push('          :local relJson [/file/get [find where name=$verPath] contents]');
+            src.push('          :local tagPos [:find $relJson "\\"tag_name\\":\\""]');
+            src.push('          :if ([:typeof $tagPos] != "nil") do={');
+            src.push('            :local tagRest [:pick $relJson ($tagPos + 12) [:len $relJson]]');
+            src.push('            :set newVer [:pick $tagRest 0 [:find $tagRest "\\""]]');
+            src.push('          }');
+            src.push('          :do { /file/remove [find where name=$verPath] } on-error={}');
+            src.push('        } on-error={ :put "Could not read the published version - pulling anyway" }');
+        }
+        src.push('        :local curVer ""');
+        src.push('        :do { :set curVer [/container/envs/get [find where list="' + env + '" key="AWG_IMAGE_VER"] value] } on-error={}');
+        src.push('        :if ($newVer != "" && $newVer = $curVer) do={');
+        src.push('          :put ("Already on " . $curVer . " - nothing to pull, tunnel untouched")');
+        src.push('        } else={');
+        src.push('          :put ("Updating " . $img . " ...")');
+        src.push('          :log info "' + prefix + ': repull started"');
+        src.push('          :do { /file/remove [find where name~($disk . "/' + prefix + '.backup")] } on-error={}');
+        src.push('          :local wasRunning true');
+        src.push('          :do { :if ([/container/get $cid stopped] = true) do={ :set wasRunning false } } on-error={}');
+        src.push('          /container/repull $cid');
+        src.push('          :local waited 0');
+        src.push('          :while ([:len [/container/get $cid image-id]] = 0 && $waited < 180) do={');
+        src.push('            :delay 3s');
+        src.push('            :set waited ($waited + 3)');
+        src.push('          }');
+        src.push('          :if ([:len [/container/get $cid image-id]] = 0) do={');
+        src.push('            :put "Pull failed - retrying once in 15s"');
+        src.push('            :delay 15s');
+        src.push('            /container/repull $cid');
+        src.push('            :set waited 0');
+        src.push('            :while ([:len [/container/get $cid image-id]] = 0 && $waited < 180) do={');
+        src.push('              :delay 3s');
+        src.push('              :set waited ($waited + 3)');
+        src.push('            }');
+        src.push('          }');
+        src.push('          :if ([:len [/container/get $cid image-id]] > 0) do={');
+        // repull restarts a container that was running; one that was stopped when the
+        // pull failed stays stopped, so start it back explicitly.
+        src.push('            :local backUp true');
+        src.push('            :if ($wasRunning) do={');
+        src.push('              :delay 3s');
+        src.push('              :do { /container/start $cid } on-error={}');
+        src.push('              :delay 5s');
+        src.push('              :set backUp false');
+        src.push('              :do { :if ([/container/get $cid stopped] != true) do={ :set backUp true } } on-error={}');
+        src.push('            }');
+        // Last resort: rebuild it from the registry with the same parameters. Losing
+        // ten more seconds beats leaving the tunnel down until someone notices.
+        src.push('            :if (!$backUp) do={');
+        src.push('              :put "Container did not come back up - rebuilding it from the registry"');
+        src.push('              :log warning "' + prefix + '-update: container did not come back, rebuilding"');
+        src.push('              :do { /container/stop $cid } on-error={}');
+        src.push('              :delay 5s');
+        src.push('              :do { /container/remove $cid } on-error={}');
+        src.push('              :delay 3s');
+        src.push('              :do { /file/remove [find where name~($disk . "/' + prefix + '.backup")] } on-error={}');
+        src.push('              /container/add remote-image=$img interface=veth-' + prefix + ' envlist=' + prefix + '-env hostname=' + prefix + ' root-dir=$rootDirOrig logging=no start-on-boot=yes comment=' + prefix);
+        src.push('              :set waited 0');
+        src.push('              :local newCids [/container/find where interface=veth-' + prefix + ']');
+        src.push('              :while ([:len $newCids] > 0 && [:len [/container/get [:pick $newCids 0] image-id]] = 0 && $waited < 180) do={');
+        src.push('                :delay 3s');
+        src.push('                :set waited ($waited + 3)');
+        src.push('              }');
+        src.push('              :if ([:len $newCids] > 0 && [:len [/container/get [:pick $newCids 0] image-id]] > 0) do={');
+        src.push('                :do { /container/set [:pick $newCids 0] shm-size=4M } on-error={}');
+        src.push('                /container/start [:pick $newCids 0]');
+        src.push('                :put "Container rebuilt"');
+        src.push('                :log info "' + prefix + ': container rebuilt after update"');
+        src.push('              } else={');
+        src.push('                :put "Rebuild failed - reinstall with the configurator."');
+        src.push('                :log error "' + prefix + '-update: rebuild failed"');
+        src.push('              }');
+        src.push('            }');
+        src.push('            :if ($newVer != "") do={');
+        src.push('              :do { /container/envs/remove [find where list="' + env + '" key="AWG_IMAGE_VER"] } on-error={}');
+        src.push('              /container/envs/add list=' + env + ' key=AWG_IMAGE_VER value=$newVer');
+        src.push('            }');
+        // repull renames the old root-dir aside (.backup, .backup1, ...) and never
+        // clears it: on a 16MB flash those copies add up.
+        src.push('            :do { /file/remove [find where name~($disk . "/' + prefix + '.backup")] } on-error={}');
+        src.push('            :put ("Update done: " . $img)');
+        src.push('            :log info "' + prefix + ': update done"');
+        src.push('          } else={');
+        src.push('            :put "Pull failed twice - the container has no image and the tunnel is down."');
+        src.push('            :put "Retry: /system/script/run ' + prefix + '-update"');
+        src.push('            :log error "' + prefix + '-update: pull failed, container has no image"');
+        src.push('          }');
+        src.push('        }');
+        src.push('      }');
+        src.push('    }');
+        src.push('  }');
+        src.push('}');
+        return src.join('\n');
+    }
+
+    // Daily check. repull with no new version costs two HTTP requests and leaves the
+    // container alone, so the schedule is cheap; 04:30 keeps it clear of the
+    // <prefix>-ru-daily job at 04:00.
+    function buildUpdateSchedulerLines(prefix) {
+        if (!isAutoUpdateEnabled()) return [];
+        // device-mode can forbid /system/scheduler entirely, and a bare add would
+        // abort the whole install script right here. Same guard the RU list uses.
+        return [
+            '# Daily update check. Skipped if scheduler is not allowed by device-mode',
+            '{',
+            '  :local schedOk true',
+            '  :do { :set schedOk [/system/device-mode/get scheduler] } on-error={}',
+            '  :if ($schedOk) do={',
+            '    /system/scheduler/add name=' + prefix + '-update on-event="/system/script/run ' + prefix + '-update" start-time=04:30:00 interval=1d comment=' + prefix,
+            '  } else={',
+            '    :put "WARNING: scheduler not allowed by device-mode, no daily update check."',
+            '    :put "Update by hand: /system/script/run ' + prefix + '-update"',
+            '    :put "To allow it: /system/device-mode/update scheduler=yes"',
+            '  }',
+            '}',
+        ];
+    }
+
     function buildUninstallScriptSource(hasDNS, storageDisk, prefix, net, scenario) {
         var isAuto = storageDisk === '__auto';
         var src = [];
@@ -2965,6 +3150,8 @@
         if (hasDNS) {
             src.push('  /ip/route/remove [find where comment=' + prefix + '-dns]');
         }
+        src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
+        src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
         if (scenario !== 'tunnel') {
             // Health-check (netwatch) гасим ПЕРВЫМ, чтобы он не дёргал маршруты во время чистки.
             // Probe-таблицу/маршрут/правило (comment=<tag>-probe) подхватит общий prefix-sweep
@@ -2983,8 +3170,6 @@
             // Форс IPv4 (buildV6ForceIpv4) живёт в /ipv6 — общий prefix-sweep по /ip его не видит.
             src.push('  :do { /ipv6/firewall/filter/remove [find where comment~"' + prefix + '-v6-force4"] } on-error={}');
             src.push('  :do { /ipv6/firewall/address-list/remove [find where list="' + prefix + '-v6-direct"] } on-error={}');
-            src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
-            src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
             src = src.concat(buildFasttrackRestore(prefix));
         }
         src.push('  /container/stop [find where interface=veth-' + prefix + ']');
@@ -3058,6 +3243,8 @@
         if (hasDNS) {
             src.push('  /ip/route/remove [find where comment=' + prefix + '-dns]');
         }
+        src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
+        src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
         if (scenario !== 'tunnel') {
             // Health-check (netwatch) гасим ПЕРВЫМ, чтобы он не дёргал маршруты во время чистки.
             // Probe-таблицу/маршрут/правило (comment=<tag>-probe) подхватит общий prefix-sweep
@@ -3076,8 +3263,6 @@
             // Форс IPv4 (buildV6ForceIpv4) живёт в /ipv6 — общий prefix-sweep по /ip его не видит.
             src.push('  :do { /ipv6/firewall/filter/remove [find where comment~"' + prefix + '-v6-force4"] } on-error={}');
             src.push('  :do { /ipv6/firewall/address-list/remove [find where list="' + prefix + '-v6-direct"] } on-error={}');
-            src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
-            src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
             src = src.concat(buildFasttrackRestore(prefix));
         }
         src.push('  /ip/firewall/nat/remove [find where out-interface="wg-' + prefix + '"]');
@@ -3173,9 +3358,11 @@
             ]);
         }
 
-        lines.push('# 1. Uninstall script');
+        lines.push('# 1. Uninstall and update scripts');
 
         lines.push(buildUninstallScriptSource(hasDNS, storageDisk, prefix, net, scenario));
+        lines.push(buildUpdateScriptSource(prefix));
+        lines = lines.concat(buildUpdateSchedulerLines(prefix));
 
         var net6 = ipv6Enabled() ? getTunnelNetwork6(prefix) : null;
         lines = lines.concat([
@@ -3255,109 +3442,14 @@
             '',
             '# ' + (hasDNS ? '6' : '5') + '. Download, create and start container',
         ]);
-        var isAuto = storageDisk === '__auto';
-        var isExternal = storageDisk !== 'disk1' && !isAuto;
-        if (isAuto) {
-            lines.push('/container/envs/add list=' + prefix + '-env key=AWG_STORAGE value=$awgDisk');
-            lines.push(':if ($awgDisk != "disk1") do={');
-            lines.push('  :local tmpPath ($awgDisk . "/pull")');
-            lines.push('  /container/envs/add list=' + prefix + '-env key=AWG_PREV_TMPDIR value=[/container/config/get tmpdir]');
-            lines.push('  /container/config set tmpdir=$tmpPath memory-high=200M');
-            lines.push('}');
-        } else if (isExternal) {
-            lines.push(':local prevTmpdir [/container/config/get tmpdir]');
-            lines.push('/container/envs/add list=' + prefix + '-env key=AWG_PREV_TMPDIR value=$prevTmpdir');
-            lines.push('/container/config set tmpdir=' + storageDisk + '/pull memory-high=200M');
-        }
-        lines = lines.concat([
-            '{',
-            '  :local arch [/system/resource/get architecture-name]',
-            '  :local ver [/system/resource/get version]',
-            '  :local dotPos [:find $ver "."]',
-            '  :local rest [:pick $ver ($dotPos + 1) [:len $ver]]',
-            '  :local endPos [:find $rest "."]',
-            '  :if ([:typeof $endPos] = "nil") do={ :set endPos [:find $rest " "] }',
-            '  :local minor [:tonum [:pick $rest 0 $endPos]]',
-            '  :local suffix ""',
-            '  :if ($minor <= 20) do={ :set suffix "-7.20-Docker" }',
-            '  :local file ""',
-            '  :if ($arch = "arm64") do={ :set file ("awg-proxy-arm64" . $suffix . ".tar.gz") }',
-            '  :if ($arch = "arm") do={',
-            '    :set file ("awg-proxy-arm" . $suffix . ".tar.gz")',
-            '    :local rbModel ""',
-            // /system/routerboard does not exist on CHR: RouterOS fails while parsing
-            // the script, before on-error can catch anything, and the whole block dies.
-            // :parse defers the lookup to runtime, so :do handles the missing menu.
-            '    :do { :set rbModel [[:parse ":return [/system/routerboard/get model]"]] } on-error={}',
-            '    :local bName [/system/resource/get board-name]',
-            '    :if ($rbModel~"E50UG" || $rbModel~"E60iUGS" || $bName~"E50UG" || $bName~"E60iUGS" || $bName~"^hEX") do={',
-            '      :set file ("awg-proxy-armv5" . $suffix . ".tar.gz")',
-            '    }',
-            '  }',
-            '  :if ($arch ~ "x86") do={ :set file ("awg-proxy-amd64" . $suffix . ".tar.gz") }',
-            '  :if ($file = "") do={ :error "Unsupported architecture: $arch" }',
-            '  :local url "' + REPO.dl + '$file"',
-        ]);
-        if (isAuto) {
-            lines.push('  :local filePath $file');
-            lines.push('  :if ($awgDisk != "disk1") do={');
-            lines.push('    :set filePath ($awgDisk . "/pull/" . $file)');
-            lines.push('    :do { /file/make-directory ($awgDisk . "/pull") } on-error={}');
-            lines.push('  }');
-        } else if (isExternal) {
-            lines.push('  :local filePath ("' + storageDisk + '/pull/" . $file)');
-            lines.push('  :do { /file/make-directory ' + storageDisk + '/pull } on-error={}');
-        } else {
-            lines.push('  :local filePath $file');
-        }
-        lines = lines.concat([
-            '  :if ([:len [/file/find where name=$filePath]] = 0) do={',
-            '    :local freeStorage 0',
-        ]);
-        if (isAuto) {
-            lines.push('    :if ($awgDisk = "disk1") do={');
-            lines.push('      :set freeStorage [/system/resource/get free-hdd-space]');
-            lines.push('    } else={');
-            lines.push('      :do { :set freeStorage [/disk/get [find where mount-point=$awgDisk] free] } on-error={}');
-            lines.push('    }');
-        } else if (storageDisk === 'disk1') {
-            lines.push('    :set freeStorage [/system/resource/get free-hdd-space]');
-        } else {
-            lines.push('    :do { :set freeStorage [/disk/get [find where mount-point="' + storageDisk + '"] free] } on-error={}');
-        }
-        lines = lines.concat([
-            '    :if ($freeStorage < 262144) do={',
-            '      :put ("WARNING: Low disk space (" . ($freeStorage / 1024) . "KB free). Need at least 256KB.")',
-            '      :put "See: ' + REPO.base + '#insufficient-disk-space"',
-            '      :error "Insufficient disk space"',
-            '    }',
-            '    :put ("Fetching: $url -> " . $filePath)',
-            '    /tool/fetch url=$url dst-path=$filePath http-max-redirect-count=10',
-            '  } else={',
-            '    :put ("File already exists: " . $filePath)',
-            '  }',
-        ]);
-        if (isAuto) {
-            lines.push('  :local rootDir ($awgDisk . "/' + prefix + '")');
-            lines.push('  /container/add file=$filePath interface=veth-' + prefix + ' envlist=' + prefix + '-env hostname=' + prefix + ' root-dir=$rootDir logging=no start-on-boot=yes comment=' + prefix);
-        } else {
-            lines.push('  /container/add file=$filePath interface=veth-' + prefix + ' envlist=' + prefix + '-env hostname=' + prefix + ' root-dir=' + storageDisk + '/' + prefix + ' logging=no start-on-boot=yes comment=' + prefix);
-        }
-        lines = lines.concat([
-            '  :if ($minor > 20) do={ [:parse "/container/set [find where interface=veth-' + prefix + '] shm-size=4M"] }',
-            '  /file/remove $filePath',
-            '  :local freeMem [/system/resource/get free-memory]',
-            '  :if ($freeMem < 16777216) do={',
-            '    :put ("WARNING: Low memory (" . ($freeMem / 1048576) . "MB free). 16MB+ recommended.")',
-            '  }',
-            '  /container/start [find where interface=veth-' + prefix + ']',
-            '  :do { /file/remove [find where name="console-dump.txt"] } on-error={}',
-            '  :put "Waiting for container to start..."',
-            '  :delay 5s',
-            '  /interface/wireguard/enable wg-' + prefix,
-            '  :put "WireGuard interface enabled"',
-            '  :put "Installation complete!"',
-        ]);
+        lines = lines.concat(buildImageSetupLines(prefix, storageDisk, {
+            leaveOpen: true, memCheck: true, docLink: true,
+            completionLines: [
+                '/interface/wireguard/enable wg-' + prefix,
+                ':put "WireGuard interface enabled"',
+                ':put "Installation complete!"',
+            ],
+        }));
 
         if (hasDNS) {
             var firstDNS = dnsServers[0];
@@ -3397,6 +3489,9 @@
             '  :put ""',
             '  :put "  Show all tunnel routes:"',
             '  :put "    /ip/route/print where comment=' + prefix + '-tunnel"',
+            '  :put ""',
+            '  :put "  Update the container:"',
+            '  :put "    /system/script/run ' + prefix + '-update"',
             '  :put ""',
             '  :put "  Uninstall:"',
             '  :put "    /system/script/run ' + prefix + '-uninstall"',
@@ -3438,7 +3533,7 @@
             '# ' + new Date().toISOString().slice(0, 19).replace('T', ' '),
             '# ============================================================',
             '',
-            '# 1. Uninstall script',
+            '# 1. Uninstall and update scripts',
         ];
 
         lines.push(buildStandaloneUninstallScriptSource(hasDNS, prefix, scenario));
@@ -3537,6 +3632,9 @@
             '  :put "  Show all tunnel routes:"',
             '  :put "    /ip/route/print where comment=' + prefix + '-tunnel"',
             '  :put ""',
+            '  :put "  Update the container:"',
+            '  :put "    /system/script/run ' + prefix + '-update"',
+            '  :put ""',
             '  :put "  Uninstall:"',
             '  :put "    /system/script/run ' + prefix + '-uninstall"',
             '  :put "================================"',
@@ -3573,6 +3671,11 @@
 
     function dfEnabled() {
         var el = document.getElementById('df-enable');
+        return !!(el && el.checked);
+    }
+
+    function isAutoUpdateEnabled() {
+        var el = document.getElementById('autoupdate-enable');
         return !!(el && el.checked);
     }
 
@@ -4380,6 +4483,8 @@
         src.push('/system/script/add name=' + prefix + '-uninstall comment=' + prefix + ' source={');
         src.push('  :put "Uninstalling AWG Proxy Server..."');
         src.push('  :log info "Uninstalling AWG Proxy Server..."');
+        src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
+        src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
         if (isAuto) {
             src.push('  :local storageDisk "disk1"');
             src.push('  :do { :set storageDisk [/container/envs/get [find where list="' + prefix + '-env" key="AWG_STORAGE"] value] } on-error={}');
@@ -4508,6 +4613,8 @@
 
         ls.push('# 1. Uninstall script');
         ls.push(buildServerUninstallSource(prefix, storageServer, net));
+        ls.push(buildUpdateScriptSource(prefix));
+        ls = ls.concat(buildUpdateSchedulerLines(prefix));
         ls.push('');
 
         // The hub answers on IPv6 when the endpoint clients dial is IPv6. Its
@@ -4574,7 +4681,7 @@
         }
         serverCompletion.push(':put "Server installation complete!"');
         ls.push('# 6. Download, create and start container');
-        ls = ls.concat(buildContainerDownload(prefix, storageServer, serverCompletion));
+        ls = ls.concat(buildImageSetupLines(prefix, storageServer, { completionLines: serverCompletion }));
         ls.push('');
 
         // === CLIENT CONFIG ===
@@ -4598,6 +4705,8 @@
 
         lc.push('# 1. Uninstall script');
         lc.push(buildServerUninstallSource(prefix, storageClient, getTunnelNetwork(prefix)));
+        lc.push(buildUpdateScriptSource(prefix));
+        lc = lc.concat(buildUpdateSchedulerLines(prefix));
         lc.push('');
 
         lc.push('# 2. Network infrastructure');
@@ -4646,7 +4755,7 @@
         clientCompletion.push(':put "Ping test: ' + tunServerIP + ' (server WG address)"');
         clientCompletion.push('/ping ' + tunServerIP + ' count=5');
         lc.push('# 5. Download, create and start container');
-        lc = lc.concat(buildContainerDownload(prefix, storageClient, clientCompletion));
+        lc = lc.concat(buildImageSetupLines(prefix, storageClient, { completionLines: clientCompletion }));
         lc.push('');
 
         return {
@@ -4723,6 +4832,8 @@
 
         lc.push('# 1. Uninstall script');
         lc.push(buildServerUninstallSource(prefix, storageClient, getTunnelNetwork(prefix)));
+        lc.push(buildUpdateScriptSource(prefix));
+        lc = lc.concat(buildUpdateSchedulerLines(prefix));
         lc.push('');
 
         var cnet = getTunnelNetwork(prefix);
@@ -4771,7 +4882,7 @@
         addClientCompletion.push(':put "Ping test: ' + tunServerIP + ' (server WG address)"');
         addClientCompletion.push('/ping ' + tunServerIP + ' count=5');
         lc.push('# 5. Download, create and start container');
-        lc = lc.concat(buildContainerDownload(prefix, storageClient, addClientCompletion));
+        lc = lc.concat(buildImageSetupLines(prefix, storageClient, { completionLines: addClientCompletion }));
         lc.push('');
 
         return {
@@ -4946,6 +5057,8 @@
         // Uninstall script
         la.push('# 1. Uninstall script');
         la.push(buildS2SUninstallSource(prefix, storageA, net, false));
+        la.push(buildUpdateScriptSource(prefix));
+        la = la.concat(buildUpdateSchedulerLines(prefix));
         la.push('');
 
         // Network
@@ -4982,12 +5095,12 @@
 
         // Download + start
         la.push('# 5. Download, create and start container');
-        la = la.concat(buildContainerDownload(prefix, storageA, [
+        la = la.concat(buildImageSetupLines(prefix, storageA, { completionLines: [
             '/interface/wireguard/enable wg-' + prefix,
             ':put "Side A installation complete!"',
             ':put "Ping test: ' + sn.ip2 + ' (Side B WG address)"',
             '/ping ' + sn.ip2 + ' count=5',
-        ]));
+        ] }));
         la.push('');
 
         // === Side B (reverse) ===
@@ -5012,6 +5125,8 @@
         // Uninstall
         lb.push('# 1. Uninstall script');
         lb.push(buildS2SUninstallSource(prefix, storageB, net, true));
+        lb.push(buildUpdateScriptSource(prefix));
+        lb = lb.concat(buildUpdateSchedulerLines(prefix));
         lb.push('');
 
         // Network
@@ -5057,12 +5172,12 @@
 
         // Download + start
         lb.push('# 6. Download, create and start container');
-        lb = lb.concat(buildContainerDownload(prefix, storageB, [
+        lb = lb.concat(buildImageSetupLines(prefix, storageB, { completionLines: [
             '/interface/wireguard/enable wg-' + prefix,
             ':put "Side B installation complete!"',
             ':put "Ping test: ' + sn.ip1 + ' (Side A WG address)"',
             '/ping ' + sn.ip1 + ' count=5',
-        ]));
+        ] }));
         lb.push('');
 
         result.sideA = la.join('\n');
@@ -5080,6 +5195,8 @@
         src.push('/system/script/add name=' + prefix + '-uninstall comment=' + prefix + ' source={');
         src.push('  :put "Uninstalling AWG Proxy Site-to-Site..."');
         src.push('  :log info "Uninstalling AWG Proxy Site-to-Site..."');
+        src.push('  :do { /system/scheduler/remove [find where comment~"' + prefix + '"] } on-error={}');
+        src.push('  :do { /system/script/remove [find where comment~"' + prefix + '" and name!="' + prefix + '-uninstall"] } on-error={}');
         if (isAuto) {
             src.push('  :local storageDisk "disk1"');
             src.push('  :do { :set storageDisk [/container/envs/get [find where list="' + prefix + '-env" key="AWG_STORAGE"] value] } on-error={}');
@@ -5134,9 +5251,20 @@
         return src.join('\n');
     }
 
-    function buildContainerDownload(prefix, storageDisk, completionLines) {
+    // ============================================================
+    // Container image: one generator for every scenario
+    // ============================================================
+    // Three sources, in order: an archive already on the router (offline, kept in
+    // place), the GHCR registry (RouterOS 7.22+, the only path /container/repull can
+    // update later), and finally the release archive over /tool/fetch.
+    // opts: { completionLines, leaveOpen, memCheck, docLink }
+    function buildImageSetupLines(prefix, storageDisk, opts) {
+        opts = opts || {};
         var isAuto = storageDisk === '__auto';
         var isExternal = storageDisk !== 'disk1' && !isAuto;
+        var addArgs = 'interface=veth-' + prefix + ' envlist=' + prefix + '-env hostname=' +
+            prefix + ' root-dir=$rootDir logging=no start-on-boot=yes comment=' + prefix;
+        var find = '[/container/find where interface=veth-' + prefix + ']';
         var lines = [];
 
         if (isAuto) {
@@ -5163,16 +5291,21 @@
         lines.push('  :local suffix ""');
         lines.push('  :if ($minor <= 20) do={ :set suffix "-7.20-Docker" }');
         lines.push('  :local file ""');
+        // armv5 has no place in the multi-arch index (arm32v5/debian only), so it
+        // rides its own registry tag.
+        lines.push('  :local imgTag "latest"');
         lines.push('  :if ($arch = "arm64") do={ :set file ("awg-proxy-arm64" . $suffix . ".tar.gz") }');
         lines.push('  :if ($arch = "arm") do={');
         lines.push('    :set file ("awg-proxy-arm" . $suffix . ".tar.gz")');
         lines.push('    :local rbModel ""');
-        // See the note above: :parse keeps the CHR/x86 parser from choking on
-        // /system/routerboard, which only exists on RouterBOARD hardware.
+        // /system/routerboard does not exist on CHR: RouterOS fails while parsing
+        // the script, before on-error can catch anything, and the whole block dies.
+        // :parse defers the lookup to runtime, so :do handles the missing menu.
         lines.push('    :do { :set rbModel [[:parse ":return [/system/routerboard/get model]"]] } on-error={}');
         lines.push('    :local bName [/system/resource/get board-name]');
         lines.push('    :if ($rbModel~"E50UG" || $rbModel~"E60iUGS" || $bName~"E50UG" || $bName~"E60iUGS" || $bName~"^hEX") do={');
         lines.push('      :set file ("awg-proxy-armv5" . $suffix . ".tar.gz")');
+        lines.push('      :set imgTag "latest-armv5"');
         lines.push('    }');
         lines.push('  }');
         lines.push('  :if ($arch ~ "x86") do={ :set file ("awg-proxy-amd64" . $suffix . ".tar.gz") }');
@@ -5181,18 +5314,78 @@
 
         if (isAuto) {
             lines.push('  :local filePath $file');
+            lines.push('  :local altPath ("disk1/" . $file)');
+            lines.push('  :local rootDir ($awgDisk . "/' + prefix + '")');
             lines.push('  :if ($awgDisk != "disk1") do={');
             lines.push('    :set filePath ($awgDisk . "/pull/" . $file)');
+            lines.push('    :set altPath ($awgDisk . "/" . $file)');
             lines.push('    :do { /file/make-directory ($awgDisk . "/pull") } on-error={}');
             lines.push('  }');
         } else if (isExternal) {
             lines.push('  :local filePath ("' + storageDisk + '/pull/" . $file)');
+            lines.push('  :local altPath ("' + storageDisk + '/" . $file)');
+            lines.push('  :local rootDir "' + storageDisk + '/' + prefix + '"');
             lines.push('  :do { /file/make-directory ' + storageDisk + '/pull } on-error={}');
         } else {
             lines.push('  :local filePath $file');
+            lines.push('  :local altPath ("disk1/" . $file)');
+            lines.push('  :local rootDir "' + storageDisk + '/' + prefix + '"');
+        }
+        lines.push('  :if ([:len [/file/find where name=$filePath]] = 0 && [:len [/file/find where name=$altPath]] > 0) do={');
+        lines.push('    :set filePath $altPath');
+        lines.push('  }');
+
+        lines.push('  :local added false');
+        lines.push('  :local fetched false');
+
+        // 1. Offline: the archive is already here. It belongs to the user, so it stays.
+        lines.push('  :if ([:len [/file/find where name=$filePath]] > 0) do={');
+        lines.push('    :put ("Using image already on the router: " . $filePath)');
+        lines.push('    /container/add file=$filePath ' + addArgs);
+        lines.push('    :set added true');
+        lines.push('  }');
+
+        // 2. Registry. /container/add returns before the pull even starts and never
+        // raises, so :do/on-error sees nothing: the only signal is image-id filling in
+        // (success) or staying empty while the container flips to download-failed.
+        if (REPO.ghcr) {
+            lines.push('  :if (!$added && $minor >= 22) do={');
+            lines.push('    :local img ("' + REPO.ghcr + ':" . $imgTag)');
+            lines.push('    :put ("Pulling " . $img)');
+            lines.push('    /container/add remote-image=$img ' + addArgs);
+            lines.push('    :local cids ' + find);
+            lines.push('    :local waited 0');
+            lines.push('    :while ([:len $cids] > 0 && [:len [/container/get [:pick $cids 0] image-id]] = 0 && $waited < 120) do={');
+            lines.push('      :delay 2s');
+            lines.push('      :set waited ($waited + 2)');
+            lines.push('    }');
+            lines.push('    :if ([:len $cids] > 0 && [:len [/container/get [:pick $cids 0] image-id]] > 0) do={');
+            lines.push('      :set added true');
+            lines.push('      :put ("Pulled from registry in " . $waited . "s")');
+            // Remember what the registry served, so <prefix>-update can tell whether a
+            // repull is worth a restart. Left empty on failure: the update script then
+            // just repulls, which is what it would have done anyway.
+            if (REPO.api) {
+                lines.push('      :do {');
+                lines.push('        :local verPath ($filePath . ".rel")');
+                lines.push('        /tool/fetch url="' + REPO.api + '" dst-path=$verPath http-max-redirect-count=10');
+                lines.push('        :local relJson [/file/get [find where name=$verPath] contents]');
+                lines.push('        :local tagPos [:find $relJson "\\"tag_name\\":\\""]');
+                lines.push('        :local tagRest [:pick $relJson ($tagPos + 12) [:len $relJson]]');
+                lines.push('        /container/envs/add list=' + prefix + '-env key=AWG_IMAGE_VER value=[:pick $tagRest 0 [:find $tagRest "\\""]]');
+                lines.push('        /file/remove [find where name=$verPath]');
+                lines.push('      } on-error={}');
+            }
+            lines.push('    } else={');
+            lines.push('      :put "Registry unavailable, falling back to the release archive"');
+            lines.push('      :do { /container/remove $cids } on-error={}');
+            lines.push('      :delay 2s');
+            lines.push('    }');
+            lines.push('  }');
         }
 
-        lines.push('  :if ([:len [/file/find where name=$filePath]] = 0) do={');
+        // 3. Release archive. This one we downloaded, so this one we clean up.
+        lines.push('  :if (!$added) do={');
         lines.push('    :local freeStorage 0');
         if (isAuto) {
             lines.push('    :if ($awgDisk = "disk1") do={');
@@ -5207,34 +5400,40 @@
         }
         lines.push('    :if ($freeStorage < 262144) do={');
         lines.push('      :put ("WARNING: Low disk space (" . ($freeStorage / 1024) . "KB free). Need at least 256KB.")');
+        if (opts.docLink) {
+            lines.push('      :put "See: ' + REPO.base + '#insufficient-disk-space"');
+        }
         lines.push('      :error "Insufficient disk space"');
         lines.push('    }');
         lines.push('    :put ("Fetching: $url -> " . $filePath)');
         lines.push('    /tool/fetch url=$url dst-path=$filePath http-max-redirect-count=10');
-        lines.push('  } else={');
-        lines.push('    :put ("File already exists: " . $filePath)');
+        lines.push('    /container/add file=$filePath ' + addArgs);
+        lines.push('    :set fetched true');
         lines.push('  }');
 
-        if (isAuto) {
-            lines.push('  :local rootDir ($awgDisk . "/' + prefix + '")');
-            lines.push('  /container/add file=$filePath interface=veth-' + prefix + ' envlist=' + prefix + '-env hostname=' + prefix + ' root-dir=$rootDir logging=no start-on-boot=yes comment=' + prefix);
-        } else {
-            lines.push('  /container/add file=$filePath interface=veth-' + prefix + ' envlist=' + prefix + '-env hostname=' + prefix + ' root-dir=' + storageDisk + '/' + prefix + ' logging=no start-on-boot=yes comment=' + prefix);
-        }
-
         lines.push('  :if ($minor > 20) do={ [:parse "/container/set [find where interface=veth-' + prefix + '] shm-size=4M"] }');
-        lines.push('  /file/remove $filePath');
+        // Only remove what this script downloaded: an archive the user dropped on the
+        // router by hand is their offline copy.
+        lines.push('  :if ($fetched) do={ /file/remove $filePath }');
+        if (opts.memCheck) {
+            lines.push('  :local freeMem [/system/resource/get free-memory]');
+            lines.push('  :if ($freeMem < 16777216) do={');
+            lines.push('    :put ("WARNING: Low memory (" . ($freeMem / 1048576) . "MB free). 16MB+ recommended.")');
+            lines.push('  }');
+        }
         lines.push('  /container/start [find where interface=veth-' + prefix + ']');
         lines.push('  :do { /file/remove [find where name="console-dump.txt"] } on-error={}');
         lines.push('  :put "Waiting for container to start..."');
         lines.push('  :delay 5s');
-        if (completionLines) {
-            for (var i = 0; i < completionLines.length; i++) {
-                lines.push('  ' + completionLines[i]);
+
+        if (opts.completionLines) {
+            for (var i = 0; i < opts.completionLines.length; i++) {
+                lines.push('  ' + opts.completionLines[i]);
             }
         }
-        lines.push('}');
-
+        if (!opts.leaveOpen) {
+            lines.push('}');
+        }
         return lines;
     }
 
@@ -5427,6 +5626,7 @@
         document.getElementById('prefix-select').value = 'awg-proxy-1';
         document.getElementById('netwatch-enable').checked = true;
         document.getElementById('df-enable').checked = false;
+        document.getElementById('autoupdate-enable').checked = true;
         document.getElementById('ipv6-enable').checked = false;
         document.getElementById('prefix-custom').style.display = 'none';
         document.getElementById('prefix-custom').value = '';

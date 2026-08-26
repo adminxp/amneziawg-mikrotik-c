@@ -36,17 +36,44 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/awg-proxy
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
 
+      # RouterOS parses the OCI index itself and chokes on the unknown/unknown
+      # attestation manifests buildx adds by default, so provenance/sbom stay off.
       - uses: docker/build-push-action@v6
         with:
           context: .
-          # linux/arm/v5 не собирается: debian:bookworm-slim больше не публикуется
-          # для этой платформы. Образ armv5 выпускается локально через build-c.sh
-          # и прикладывается к релизу отдельным архивом.
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
+          provenance: false
+          sbom: false
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # armv5 ships as its own single-arch tag: debian:bookworm-slim is no longer
+      # published for that platform, so the build has to name arm32v5/debian
+      # explicitly (same trick as build-c.sh:base_for) and cannot join the index above.
+      - id: meta-armv5
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/awg-proxy
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}},suffix=-armv5
+            type=raw,value=latest-armv5,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm/v5
+          push: true
+          provenance: false
+          sbom: false
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            BASE=arm32v5/debian:bookworm-slim
+          tags: ${{ steps.meta-armv5.outputs.tags }}
+          labels: ${{ steps.meta-armv5.outputs.labels }}

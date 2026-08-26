@@ -19,6 +19,7 @@ Lightweight Docker container that allows MikroTik routers to connect to AmneziaW
 - [Server Mode (1:N) — Detailed Setup](#server-mode-1n--detailed-setup)
   - [Routing Between Clients](#routing-between-clients)
 - [Additional Settings](#additional-settings)
+- [Updating](#updating)
 - [Uninstallation](#uninstallation)
 - [Troubleshooting](#troubleshooting)
   - [execvpe /awg-proxy: No such file or directory](#execvpe-awg-proxy-no-such-file-or-directory)
@@ -123,6 +124,22 @@ Or download directly on the router (replace URL with the actual one):
 ```routeros
 /tool/fetch url="https://github.com/timbrs/amneziawg-mikrotik-c/releases/latest/download/awg-proxy-arm64.tar.gz" dst-path=awg-proxy-arm64.tar.gz
 ```
+
+**RouterOS 7.22+: straight from the registry, no file to download.** The image is published
+to GHCR, the architecture is picked automatically, and a container installed this way can be
+updated with a single command later (see [Updating](#updating)):
+
+```routeros
+/container/add remote-image=ghcr.io/timbrs/awg-proxy:latest ...
+```
+
+No need to touch `/container/config`: the registry host is read straight from the string.
+hEX refresh (E50UG) and hEX S 2025 (E60iUGS) take their own tag,
+`ghcr.io/timbrs/awg-proxy:latest-armv5` — those CPUs only execute arm32v5, which cannot live
+in the shared multi-arch index.
+
+> On routers with 16 MB of flash, point `tmpdir` at the disk that holds the container: layers
+> are downloaded there, not into root-dir — `/container/config set tmpdir=usb1/pull`.
 
 ### 3. Network Setup
 
@@ -923,6 +940,62 @@ NAT for marked traffic:
 
 Now all traffic to addresses in the `to_vpn` list will go through the tunnel. Add addresses to the list as needed.
 
+## Updating
+
+RouterOS 7.22 brought `/container/repull`: it re-downloads the image from the registry and
+restarts the container with the same parameters — environment variables, veth, root-dir and
+comment all survive. WireGuard keys and tunnel settings are not touched.
+
+It only works for a container installed **from a registry** (`remote-image=`). A file install
+(`file=`) cannot be updated this way — there is nothing for RouterOS to re-pull. To check
+which one you have:
+
+```routeros
+/container/print detail where comment=awg-proxy-1
+```
+
+A non-empty `remote-image` means updates are available.
+
+### Through the configurator
+
+The configurator installs a `<prefix>-update` script on the router:
+
+```routeros
+/system/script/run awg-proxy-1-update
+```
+
+The script first asks GitHub which release is published and compares it with the installed
+version. If they match it does nothing and leaves the tunnel alone. That matters: `repull`
+restarts the container **every time**, even when the image has not changed, and the tunnel is
+down for about ten seconds while it does.
+
+When the version has moved, the script re-pulls, waits for the result, brings the container
+back up and clears the `<root-dir>.backup` directories `repull` leaves behind. A failed pull
+is retried once, and if the container still does not come back it is rebuilt from the registry
+with the same parameters: a failed `repull` leaves the container stopped with no image at all,
+which means the tunnel stays down until someone intervenes.
+
+The "Check for container updates daily" box (ticked by default) adds a scheduler at 04:30
+alongside the script. If `scheduler` is forbidden by device-mode the install survives it and
+simply says there will be no daily check — update by hand with the same command.
+
+### By hand
+
+```routeros
+/container/set [find where comment=awg-proxy-1] remote-image=ghcr.io/timbrs/awg-proxy:latest
+/container/repull [find where comment=awg-proxy-1]
+```
+
+Afterwards make sure the container is running (`R` in `/container/print`) and delete the
+leftover `<root-dir>.backup`: RouterOS keeps it around, and on 16 MB of flash those copies add
+up quickly.
+
+### From an older file install
+
+`repull` is not available for it. The simplest path is a reinstall through the configurator on
+RouterOS 7.22+: it installs from the registry, and updates become one command from then on.
+Keys and tunnel parameters are regenerated, so the server side needs updating too.
+
 ## Uninstallation
 
 If installed via the configurator:
@@ -931,7 +1004,7 @@ If installed via the configurator:
 /system/script/run awg-proxy-uninstall
 ```
 
-The script removes the container, WireGuard interface, NAT rules, routes, environment variables, restores DNS settings, and deletes itself.
+The script removes the container, WireGuard interface, NAT rules, routes, environment variables, the update script with its scheduler, restores DNS settings, and deletes itself.
 
 ## Troubleshooting
 
@@ -1095,10 +1168,17 @@ Checklist:
    /disk/format-drive usb1 file-system=ext4 label=usb1
    ```
 
-5. **Load from file** -- on devices with 16 MB flash, load the image from a file instead of remote-image:
+5. **Room for the layers** -- on devices with 16 MB flash the internal storage usually has no
+   room to unpack into. Either load the image from a file:
    ```routeros
    /container add file=awg-proxy-arm.tar.gz ...
    ```
+   or, when installing from the registry (`remote-image`, RouterOS 7.22+), move the temporary
+   directory onto the USB stick first — layers are downloaded into `tmpdir`, not root-dir:
+   ```routeros
+   /container/config set tmpdir=usb1/pull
+   ```
+   The configurator does this on its own whenever the container goes somewhere other than `disk1`.
 
 ### exited with signal 4 (Illegal instruction)
 
