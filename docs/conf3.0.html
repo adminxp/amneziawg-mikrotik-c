@@ -3254,7 +3254,12 @@
             src.push('  :do { /ip/firewall/mangle/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /routing/rule/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /routing/table/remove [find where comment~"' + prefix + '"] } on-error={}');
-            src.push('  :do { /ip/firewall/address-list/remove [find where list=RU and comment=RIPE-RU] } on-error={}');
+            // Список RU — общий на весь роутер: он ничей, его наполняет <prefix>-ru-update,
+            // и на него смотрят правила ВСЕХ установок (dst-address-list=!RU). Снести его
+            // при удалении одной установки — значит отправить весь российский трафик в
+            // туннель у всех остальных, причём восстановить сможет только тот, у кого
+            // остался скрипт обновления списка. Записи, действительно принадлежащие
+            // этой установке, помечены её префиксом и убираются ниже.
             src.push('  :do { /ip/firewall/address-list/remove [find where comment~"' + prefix + '-private"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where list="' + prefix + '-vpn-server"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where comment~"' + prefix + '-excl-ip"] } on-error={}');
@@ -3347,7 +3352,12 @@
             src.push('  :do { /ip/firewall/mangle/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /routing/rule/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /routing/table/remove [find where comment~"' + prefix + '"] } on-error={}');
-            src.push('  :do { /ip/firewall/address-list/remove [find where list=RU and comment=RIPE-RU] } on-error={}');
+            // Список RU — общий на весь роутер: он ничей, его наполняет <prefix>-ru-update,
+            // и на него смотрят правила ВСЕХ установок (dst-address-list=!RU). Снести его
+            // при удалении одной установки — значит отправить весь российский трафик в
+            // туннель у всех остальных, причём восстановить сможет только тот, у кого
+            // остался скрипт обновления списка. Записи, действительно принадлежащие
+            // этой установке, помечены её префиксом и убираются ниже.
             src.push('  :do { /ip/firewall/address-list/remove [find where comment~"' + prefix + '-private"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where list="' + prefix + '-vpn-server"] } on-error={}');
             src.push('  :do { /ip/firewall/address-list/remove [find where comment~"' + prefix + '-excl-ip"] } on-error={}');
