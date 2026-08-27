@@ -985,7 +985,11 @@ The order is:
 
 1. Container running, image present - compare versions and take it from there.
 2. Container stopped but the image is intact - just start it. Cheap, and it works below
-   RouterOS 7.22 too, where `repull` does not exist.
+   RouterOS 7.22 too, where `repull` does not exist. On RouterOS 7.23+ it rarely gets that
+   far: the container carries `restart-policy=on-failure` (`restart-interval=30s`,
+   `restart-max-count=10`), so RouterOS brings a crashed process back within half a minute
+   on its own - no script, scheduler or netwatch involved. Older versions have no such
+   property, and there the restart stays with the script.
 3. No image, or it would not come up - pull again **regardless of version**, then retry,
    then rebuild from the registry.
 4. Nothing worked - one `:log error` and out. The scheduler runs the script again the

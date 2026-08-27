@@ -220,6 +220,10 @@ ok('and again on a container it rebuilds',
    upd.indexOf('ignore-remote-image-change=yes"] } on-error={}') > 0);
 // 7.22 and older have no such property: :parse defers it to runtime so the script
 // still parses there, and :do swallows the "no such argument" error.
+// A container the script had to rebuild gets the same treatment, otherwise it would
+// be the one container on the router without an auto-restart.
+ok('a rebuilt container gets the restart policy too',
+   /\[:parse "\/container\/set \[find where interface=veth-awg-proxy-1\] restart-policy=on-failure restart-interval=30s restart-max-count=10"\]/.test(upd));
 ok('it is written so older RouterOS still parses the script',
    /\[:parse "[^"]*ignore-remote-image-change/.test(upd));
 

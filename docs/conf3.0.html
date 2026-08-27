@@ -3159,6 +3159,7 @@
         src.push('            :if ([:len $newCids] > 0 && [:len [/container/get [:pick $newCids ([:len $newCids] - 1)] image-id]] > 0) do={');
         src.push('              :do { /container/set [:pick $newCids ([:len $newCids] - 1)] shm-size=4M } on-error={}');
         src.push('              :do { [:parse "/container/set [find where interface=' + veth + '] ignore-remote-image-change=yes"] } on-error={}');
+        src.push('              :do { [:parse "/container/set [find where interface=' + veth + '] restart-policy=on-failure restart-interval=30s restart-max-count=10"] } on-error={}');
         src.push('              :do { /container/start [:pick $newCids ([:len $newCids] - 1)] } on-error={}');
         src.push('              :delay 8s');
         src.push('              :do { :if ([/container/get [:pick $newCids ([:len $newCids] - 1)] stopped] != true) do={ :set backUp true } } on-error={}');
@@ -5515,6 +5516,7 @@
         // Параметр появился в 7.23, на 7.22 и ниже его нет - :parse откладывает разбор
         // до выполнения, иначе скрипт не прочитается целиком на старых версиях.
         lines.push('  :do { [:parse "/container/set [find where interface=veth-' + prefix + '] ignore-remote-image-change=yes"] } on-error={}');
+        lines.push('  :do { [:parse "/container/set [find where interface=veth-' + prefix + '] restart-policy=on-failure restart-interval=30s restart-max-count=10"] } on-error={}');
         // Only remove what this script downloaded: an archive the user dropped on the
         // router by hand is their offline copy.
         lines.push('  :if ($fetched) do={ /file/remove $filePath }');

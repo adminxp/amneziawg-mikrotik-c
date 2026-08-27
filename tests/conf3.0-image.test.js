@@ -154,6 +154,14 @@ ok('the install pins ignore-remote-image-change on the container',
 ok('wrapped so RouterOS 7.22 and older still parse the script',
    /:do \{ \[:parse "[^"]*ignore-remote-image-change[^"]*"\] \} on-error=\{\}/.test(script));
 
+// RouterOS restarts a crashed container by itself when told to: on-failure fires on
+// a non-zero exit (how the proxy dies) and leaves a hand-stopped container alone.
+// Ten tries half a minute apart, then <prefix>-update takes over.
+ok('the install asks RouterOS to restart a crashed container',
+   /\[:parse "\/container\/set \[find where interface=veth-awg-proxy-1\] restart-policy=on-failure restart-interval=30s restart-max-count=10"\]/.test(script));
+ok('and that line is also deferred for RouterOS older than 7.23',
+   /:do \{ \[:parse "[^"]*restart-policy[^"]*"\] \} on-error=\{\}/.test(script));
+
 /* ---- the update script ---- */
 ok('an update script is created', /\/system\/script\/add name=awg-proxy-1-update /.test(script));
 ok('it calls repull', /\/container\/repull \$cid/.test(script));
