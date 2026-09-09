@@ -115,19 +115,28 @@ ta.dispatchEvent(new w.Event('input', { bubbles: true }));
 ok('textarea input unticks the box', box.checked === false);
 
 /* ---- :resolve block ---- */
-const noProbe4 = w.ipv6MtuProbeLines('awg-proxy-1', '198.51.100.1:443', 0);
+const noProbe4 = w.ipv6MtuProbeLines('awg-proxy-1', '198.51.100.1:443', { S4: 0 });
 eq('no :resolve for an ipv4 literal', noProbe4.length, 0);
-const noProbe6 = w.ipv6MtuProbeLines('awg-proxy-1', '[2001:db8::1]:443', 0);
+const noProbe6 = w.ipv6MtuProbeLines('awg-proxy-1', '[2001:db8::1]:443', { S4: 0 });
 eq('no :resolve for an ipv6 literal', noProbe6.length, 0);
-const probe = w.ipv6MtuProbeLines('awg-proxy-1', 'vpn.example.com:443', 16).join('\n');
+const probe = w.ipv6MtuProbeLines('awg-proxy-1', 'vpn.example.com:443', { S4: 16 }).join('\n');
 ok(':resolve emitted for a hostname', probe.indexOf(':resolve vpn.example.com type=ipv6') >= 0, probe);
 ok(':resolve guarded by on-error', /:do \{[\s\S]*\} on-error=\{\}/.test(probe), probe);
 ok(':resolve sets the lowered mtu', probe.indexOf('mtu=1392') >= 0, probe);
+
+/* An MTU carried by the config must survive the AAAA probe too: the probe may
+ * only lower it further, never raise it back to the S4 ceiling. */
+const probeConf = w.ipv6MtuProbeLines('awg-proxy-1', 'vpn.example.com:443', { S4: 16, MTU: 1300 }).join('\n');
+ok(':resolve keeps a lower MTU from the config', probeConf.indexOf('mtu=1300') >= 0, probeConf);
 ok(':resolve targets the right interface',
    probe.indexOf('/interface/wireguard/set [find name=wg-awg-proxy-1]') >= 0, probe);
 
 /* ---- generated script, end to end ---- */
 function generateWith(endpoint) {
+    // A hostname endpoint now requires a container resolver (AWG_DNS); the
+    // literal cases below leave the field empty on purpose.
+    w.document.getElementById('awg-dns').value =
+        /^\[?[0-9a-fA-F:.]+\]?:\d+$/.test(endpoint) ? '' : '192.168.88.1';
     w.document.getElementById('conf-input').value = [
         '[Interface]',
         'PrivateKey = ' + 'A'.repeat(43) + '=',
@@ -275,7 +284,13 @@ ok('inbound-only leg: also gets a default route via RA',
    inLines.indexOf('/ipv6/nd/add interface=veth-awg-server-1') >= 0 &&
    inLines.indexOf('autonomous=no') >= 0, inLines);
 ok('inbound-only leg: replies are accepted above any local policy',
-   inLines.indexOf('/ipv6/firewall/filter/add chain=forward action=accept in-interface=veth-awg-server-1 place-before=0') >= 0, inLines);
+   inLines.indexOf('/ipv6/firewall/filter/add chain=forward action=accept in-interface=veth-awg-server-1 comment=awg-server-1-v6-out') >= 0, inLines);
+// place-before=0 is only used when the table already has a rule; an empty
+// /ipv6/firewall/filter rejects it outright (#64).
+ok('inbound-only leg: guarded by a non-empty check',
+   inLines.indexOf(':if ([:len [/ipv6/firewall/filter/find]] > 0) do={') >= 0, inLines);
+ok('inbound-only leg: still placed on top when there is something to place before',
+   inLines.indexOf('comment=awg-server-1-v6-out place-before=0') >= 0, inLines);
 const undo = w.containerV6UninstallLines('awg-proxy-1', '  ').join('\n');
 ['-v6-nat', '-dstnat6', '-v6-out', '-awg-in6', '-v6'].forEach(function (tag) {
     ok('uninstall removes ' + tag, undo.indexOf('awg-proxy-1' + tag + ']') >= 0, undo);

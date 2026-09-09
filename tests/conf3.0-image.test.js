@@ -271,6 +271,19 @@ ok('no network call was made while running the page', netCalls.length === 0,
    netCalls.join(', '));
 ok('the page pulls in no external subresources',
    !/<script[^>]+src=|<link[^>]+href="https?:|@import\s+url\(https?:/i.test(html));
+/* i18n values are applied with textContent, so markup inside one shows up as
+ * literal <strong> on the page. The English fallback in the HTML may carry tags
+ * (it is never displayed once a language is applied); the string table may not. */
+['ru', 'en'].forEach(function (lang) {
+    w.setLang(lang);
+    const bad = [];
+    w.document.querySelectorAll('[data-i18n]').forEach(function (el) {
+        if (/<(strong|code|b|i|br|em)/i.test(el.textContent)) bad.push(el.getAttribute('data-i18n'));
+    });
+    ok('no literal markup on the page in ' + lang, bad.length === 0, bad.join(', '));
+});
+w.setLang('ru');
+
 ok('and no runtime network APIs are used in its source',
    !/\bfetch\s*\(|XMLHttpRequest|navigator\.sendBeacon|new\s+WebSocket/.test(html));
 

@@ -806,6 +806,27 @@
             <span data-i18n="ipv6Label">Server is reachable over IPv6</span></label>
             <div class="hint" data-i18n="ipv6Hint">The IPv6 header is 40 bytes instead of 20, so a full-size packet no longer fits a 1500-byte path and the WireGuard MTU has to come down. Ticked automatically when the endpoint is an IPv6 literal. For a DNS name the box stays off (IPv4 MTU) &mdash; tick it yourself if you know the name has an AAAA record; the generated script also asks the router with <code>:resolve type=ipv6</code> and lowers the MTU if it answers.</div>
         </div>
+        <div id="extratime-row" style="margin-top:8px">
+            <label><input type="checkbox" id="extratime-enable">
+            <span data-i18n="extraTimeLabel">Hold DNS address-list entries past their TTL</span></label>
+            <input type="text" id="extratime-value" value="30m" style="max-width:6em;margin-left:6px">
+            <div class="hint" data-i18n="extraTimeHint">Sets <code>/ip/dns address-list-extra-time</code>. Services behind Cloudflare and other CDNs hand out very short TTLs, so an address can drop out of the list while the browser is still using it and the connection leaves the tunnel. This is a <strong>router-wide</strong> DNS setting, not a per-list one: it is only applied if the router still has the default <code>0s</code>, and the uninstall script only resets it if it is still exactly the value set here.</div>
+        </div>
+        <div id="offline-row" style="margin-top:8px">
+            <label><input type="checkbox" id="offline-enable">
+            <span data-i18n="offlineLabel">Offline mode</span></label>
+            <div class="hint" data-i18n="offlineHint">Adds a step 0 to the output: a script that changes nothing and prints exactly which files to download and where to put them. Download them elsewhere, upload them to the router, then run the install. Nothing is fetched from GitHub &mdash; no registry pull, no release download, and the RU list stops waiting a minute for a name that will never resolve.</div>
+        </div>
+        <div id="dns-row" style="margin-top:8px">
+            <label for="awg-dns" data-i18n="awgDnsLabel">Container DNS server (required if the endpoint is a domain)</label>
+            <input type="text" id="awg-dns" placeholder="e.g. 192.168.88.1">
+            <div class="hint" data-i18n="awgDnsHint">Written to the container as AWG_DNS. The container image is scratch and has no resolver of its own, so a hostname endpoint cannot be resolved without this. It has to be reachable from the container <strong>without</strong> the tunnel &mdash; the router itself or a public resolver, not the DNS from the config, which usually lives inside the tunnel.</div>
+        </div>
+        <div id="path-mtu-row" style="margin-top:8px">
+            <label for="path-mtu" data-i18n="pathMtuLabel">Underlay path MTU</label>
+            <input type="number" id="path-mtu" value="1500" min="1280" max="1500" step="1">
+            <div class="hint" data-i18n="pathMtuHint">The MTU of the link the outer UDP datagram has to cross: 1500 for plain Ethernet, <strong>1492 for PPPoE</strong>, lower for PPPoE over VLAN.</div>
+        </div>
         <div id="storage-row" style="margin-top:14px">
             <label for="storage-select" data-i18n="storageLabel">Container storage</label>
             <select id="storage-select">
@@ -1014,6 +1035,15 @@
         <button class="btn-expand" id="expand-output" onclick="toggleCollapse('output','expand-output')" data-i18n="btnExpand" style="display:none">Show all</button>
     </div>
 
+    <div id="offline-section" class="card" style="display:none">
+        <div class="output-header">
+            <div class="card-title" style="margin-bottom:0" data-i18n="offlineTitle">Step 0: What to download</div>
+            <button class="btn btn-secondary" id="copy-offline-btn" onclick="copyOutput('offline-output','copy-offline-btn')" data-i18n="btnCopyOffline">Copy step 0</button>
+        </div>
+        <div class="alert alert-warning" data-i18n="offlineNote">Run this FIRST. It only prints file names. Download the files it names, upload them to the router, and only then run step 1.</div>
+        <pre id="offline-output"></pre>
+    </div>
+
     <div id="routing-section" class="card" style="display:none">
         <div class="output-header">
             <div class="card-title" style="margin-bottom:0" data-i18n="routingTitle">Step 2: Routing Setup</div>
@@ -1140,6 +1170,19 @@
             v3NotesSkip: 'ContentPaddingAddition and the timing parameters (RekeyAfterTime, RekeyTimeout, KeepaliveTimeout, MaxHandshakeAttempts) are carried into the container but not applied. The proxy holds no session keys, so it cannot touch encrypted payload, and it forwards packets as they arrive instead of pacing them. All of these are enforced by the sender only — the server never validates them, so the tunnel works either way. What is lost is disguise, not connectivity: packet sizes stay multiples of 16 and the WireGuard rhythm (5 s retries, 10 s keepalive, 120 s rekey) stays visible.',
             v3RejectWarn: 'RejectAfterTime has a lower bound below 150 s. MikroTik starts rekeying at 120 s and keeps the old keypair until 180 s, so the peer may start rejecting a key MikroTik still considers live. Expect the tunnel to drop periodically — this one cannot be worked around in the proxy.',
             v3MtuNote: 'This S4 pushes the outer datagram past 1500 bytes, so the WireGuard MTU is lowered to keep it from fragmenting.',
+            mtuNoteConf: 'The MTU from the config is kept as is — it is lower than the ceiling this transport allows.',
+            mtuNotePath: 'The WireGuard MTU is lowered to fit the underlay path MTU of',
+            extraTimeLabel: 'Hold DNS address-list entries past their TTL',
+            extraTimeHint: 'Sets /ip/dns address-list-extra-time. Services behind Cloudflare and other CDNs hand out very short TTLs, so an address can drop out of the list while the browser is still using it and the connection leaves the tunnel. This is a router-wide DNS setting, not a per-list one: it is only applied if the router still has the default 0s, and the uninstall script only resets it if it is still exactly the value set here.',
+            offlineLabel: 'Offline mode',
+            offlineHint: 'Adds a step 0 to the output: a script that changes nothing and prints exactly which files to download and where to put them. Download them elsewhere, upload them to the router, then run the install. Nothing is fetched from GitHub — no registry pull, no release download, and the RU list stops waiting a minute for a name that will never resolve.',
+            offlineTitle: 'Step 0: What to download',
+            btnCopyOffline: 'Copy step 0',
+            offlineNote: 'Run this FIRST. It only prints file names. Download the files it names, upload them to the router, and only then run step 1.',
+            awgDnsLabel: 'Container DNS server (required if the endpoint is a domain)',
+            awgDnsHint: 'Written to the container as AWG_DNS. The container image is scratch and has no resolver of its own, so a hostname endpoint cannot be resolved without this. It has to be reachable from the container without the tunnel — the router itself or a public resolver, not the DNS from the config, which usually lives inside the tunnel.',
+            pathMtuLabel: 'Underlay path MTU',
+            pathMtuHint: 'The MTU of the link the outer UDP datagram has to cross: 1500 for plain Ethernet, 1492 for PPPoE, lower for PPPoE over VLAN. With S4 set, a 1500-byte assumption on a 1492-byte path fragments every full-size packet, and a TCP MSS clamp does not help — the overflow is on the outer UDP datagram and hits QUIC too.',
             v3UpdateTitle: 'Updating an existing installation',
             v3UpdateBody: 'A container built before 3.0 does not understand header protection: adding the new variables is not enough. Pull the new image and recreate the container — the script below already does both.',
             linkFromOlder: 'This link was created by the previous configurator and cannot be opened here. Open it in',
@@ -1345,6 +1388,19 @@
             v3NotesSkip: 'ContentPaddingAddition и параметры таймингов (RekeyAfterTime, RekeyTimeout, KeepaliveTimeout, MaxHandshakeAttempts) переносятся в контейнер, но не применяются. У прокси нет сессионных ключей, поэтому он не может изменить зашифрованный payload, и он пересылает пакеты сразу, а не выдерживает паузы. Всё это проверяет только отправитель — сервер их не валидирует, так что туннель работает в любом случае. Теряется маскировка, а не связь: размеры пакетов остаются кратными 16, а ритм WireGuard (ретраи 5 с, keepalive 10 с, ре-кей 120 с) остаётся заметным.',
             v3RejectWarn: 'Нижняя граница RejectAfterTime меньше 150 с. MikroTik начинает ре-кей на 120-й секунде и держит старый keypair до 180-й, поэтому пир может начать отвергать ключ, который MikroTik ещё считает живым. Ждите периодических обрывов — это единственное, что нельзя обойти на стороне прокси.',
             v3MtuNote: 'При таком S4 внешняя датаграмма выходит за 1500 байт, поэтому MTU WireGuard понижается, чтобы не было фрагментации.',
+            mtuNoteConf: 'MTU из конфига оставлен как есть — он ниже потолка, который допускает этот транспорт.',
+            mtuNotePath: 'MTU WireGuard понижен, чтобы уложиться в MTU нижележащего канала',
+            extraTimeLabel: 'Держать записи DNS address-list дольше TTL',
+            extraTimeHint: 'Задаёт /ip/dns address-list-extra-time. У сервисов за Cloudflare и другими CDN очень короткий TTL, поэтому адрес успевает выпасть из списка, пока браузер им ещё пользуется, и соединение уходит мимо туннеля. Это настройка на весь роутер, а не на конкретный список: она применяется, только если там всё ещё дефолтные 0s, а скрипт удаления сбрасывает её, только если значение осталось ровно тем, что задано здесь.',
+            offlineLabel: 'Офлайн-режим',
+            offlineHint: 'Добавляет в вывод шаг 0: скрипт, который ничего не меняет и печатает, какие именно файлы скачать и куда их положить. Скачайте их там, где есть доступ, загрузите на роутер и только потом запускайте установку. С GitHub ничего не качается — ни образ из реестра, ни релизный архив, а обновление RU-списка перестаёт ждать минуту имя, которое всё равно не зарезолвится.',
+            offlineTitle: 'Шаг 0: что скачать',
+            btnCopyOffline: 'Копировать шаг 0',
+            offlineNote: 'Запустите ЭТО первым. Скрипт только печатает имена файлов. Скачайте названные файлы, загрузите их на роутер и только после этого запускайте шаг 1.',
+            awgDnsLabel: 'DNS-сервер для контейнера (обязателен, если endpoint — домен)',
+            awgDnsHint: 'Записывается в контейнер как AWG_DNS. Образ контейнера — scratch, своего резолвера в нём нет, поэтому без этого hostname в endpoint не резолвится. Адрес должен быть доступен из контейнера без туннеля — сам роутер или публичный резолвер, но не DNS из конфига: тот обычно живёт внутри туннеля.',
+            pathMtuLabel: 'MTU нижележащего канала',
+            pathMtuHint: 'MTU канала, по которому идёт внешняя UDP-датаграмма: 1500 для обычного Ethernet, 1492 для PPPoE, меньше для PPPoE поверх VLAN. При заданном S4 расчёт на 1500 в канале с 1492 фрагментирует каждый полноразмерный пакет, и TCP MSS clamp тут не помогает — переполняется внешняя UDP-датаграмма, задевая в том числе QUIC.',
             v3UpdateTitle: 'Обновление существующей установки',
             v3UpdateBody: 'Контейнер, собранный до 3.0, не понимает шифрование заголовка: добавить новые переменные недостаточно. Нужно скачать новый образ и пересоздать контейнер — скрипт ниже делает и то, и другое.',
             linkFromOlder: 'Эта ссылка создана предыдущим конфигуратором и здесь не открывается. Откройте её в',
@@ -1629,7 +1685,7 @@
     var IFACE_REQUIRED = ['PrivateKey', 'Address', 'Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'];
     // AWG 3.0 keys are optional: a v2 config stays valid, and a v3 config is
     // rendered with its extra keys instead of being flagged as unknown.
-    var IFACE_OPTIONAL = ['DNS', 'S3', 'S4', 'I1', 'I2', 'I3', 'I4', 'I5',
+    var IFACE_OPTIONAL = ['DNS', 'MTU', 'S3', 'S4', 'I1', 'I2', 'I3', 'I4', 'I5',
         'HeaderProtectionKey', 'ContentPaddingAddition', 'RekeyAfterTime',
         'RekeyTimeout', 'RejectAfterTime', 'KeepaliveTimeout', 'MaxHandshakeAttempts',
         'RandomTrailers', 'DisableCookies'];
@@ -1674,21 +1730,163 @@
     }
 
     // Outer datagram = IP hdr + 8 (UDP) + S4 + 16 (header) + round_up(MTU,16)
-    // + 16 (tag). Over IPv4 the header is 20 bytes, so the stock 1420 costs
-    // 1484 + S4 and anything up to S4 = 16 still fits a 1500-byte path. Over
-    // IPv6 the header is 40, which puts the same config at 1504 + S4 — already
-    // over the limit at S4 = 0, so there the MTU always has to come down.
-    function wgMtuForS4(s4, ipv6) {
+    // + 16 (tag), so the WireGuard MTU that still fits a given path is
+    //   path - (20|40) - 8 - S4 - 32, rounded down to a multiple of 16.
+    // Over IPv4 on a 1500-byte path the stock 1420 costs 1484 + S4 and anything
+    // up to S4 = 16 still fits. Over IPv6 the header is 40, which puts the same
+    // config at 1504 + S4 — already over at S4 = 0, so there the MTU always has
+    // to come down. PPPoE is the other way this goes wrong: on a 1492-byte path
+    // S4 = 12 already needs 1408, and returning "default is fine" there is what
+    // fragments every full-size packet.
+    var DEFAULT_PATH_MTU = 1500;
+
+    // The largest WireGuard MTU whose outer datagram still fits the path.
+    // Always a number; 1420 is the practical ceiling (RouterOS default).
+    function wgMtuCeiling(s4, ipv6, pathMtu) {
         var n = Number(s4) || 0;
-        if (!ipv6 && n <= 16) return 0; // no mtu= needed, RouterOS default is fine
-        var m = Math.floor(((ipv6 ? 1420 : 1440) - n) / 16) * 16;
+        var path = Number(pathMtu) || DEFAULT_PATH_MTU;
+        var m = Math.floor((path - (ipv6 ? 40 : 20) - 8 - n - 32) / 16) * 16;
         if (m > 1420) m = 1420;
         if (m < 1280) m = 1280;
         return m;
     }
 
+    // 0 means "leave mtu= off": the RouterOS default is already correct.
+    function wgMtuForS4(s4, ipv6, pathMtu) {
+        var m = wgMtuCeiling(s4, ipv6, pathMtu);
+        return m >= 1420 ? 0 : m;
+    }
+
+    // The underlay the outer UDP datagram has to cross. 1500 for plain
+    // Ethernet, 1492 for PPPoE, lower for PPPoE-over-VLAN and the like.
+    function pathMtuValue() {
+        var el = document.getElementById('path-mtu');
+        var v = el ? Number(el.value) : 0;
+        if (!v || v < 1280 || v > 1500) return DEFAULT_PATH_MTU;
+        return v;
+    }
+
+    // The resolver the container itself uses for AWG_REMOTE. The image is
+    // scratch: without this there is no /etc/resolv.conf and a hostname
+    // endpoint never resolves, which is the whole of #54.
+    function awgDnsValue() {
+        var el = document.getElementById('awg-dns');
+        return el ? el.value.trim() : '';
+    }
+
+    // /ip dns address-list-extra-time keeps a DNS-generated address-list entry
+    // alive past its TTL. Services behind a CDN publish TTLs of a few seconds,
+    // so an address can expire out of the list while a browser is still using
+    // it and the next connection leaves the tunnel (#49).
+    //
+    // It is a single router-wide setting, so it cannot simply be set and later
+    // reset: another tool, or the user, may be relying on it. Rather than
+    // stashing the old value somewhere and hoping it survives, it is only ever
+    // changed when the router still has the RouterOS default of 0s -- which
+    // makes 0s the only value an uninstall would ever restore, and makes the
+    // whole snapshot unnecessary.
+    function extraTimeEnabled() {
+        var el = document.getElementById('extratime-enable');
+        return !!(el && el.checked);
+    }
+
+    function extraTimeValue() {
+        var el = document.getElementById('extratime-value');
+        var v = el ? el.value.trim() : '';
+        return /^[0-9]+[smhd]$/.test(v) ? v : '30m';
+    }
+
+    function extraTimeSetLines(prefix) {
+        if (!extraTimeEnabled()) return [];
+        var v = extraTimeValue();
+        return [
+            '# Keep DNS address-list entries ' + v + ' past their TTL (short-TTL CDNs).',
+            '# Router-wide setting: only touched if it is still at the default.',
+            '{',
+            '  :local cur [/ip/dns/get address-list-extra-time]',
+            '  :if ($cur = 0s) do={',
+            '    /ip/dns/set address-list-extra-time=' + v,
+            '    :put "DNS address-list-extra-time set to ' + v + '"',
+            '  } else={',
+            '    :put ("DNS address-list-extra-time is already " . $cur . " - left alone")',
+            '  }',
+            '}'
+        ];
+    }
+
+    // Only undo our own change, and only if it is still ours.
+    function extraTimeResetLines(indent) {
+        if (!extraTimeEnabled()) return [];
+        var v = extraTimeValue();
+        return [
+            indent + ':if ([/ip/dns/get address-list-extra-time] = ' + v + ') do={',
+            indent + '  /ip/dns/set address-list-extra-time=0s',
+            indent + '}'
+        ];
+    }
+
+    // A firewall rule that has to sit above whatever is already there.
+    // place-before=0 needs an existing rule to place before: on an empty
+    // /ip/firewall/filter RouterOS rejects the command outright, and since the
+    // script keeps running past a failed line the install ends up half applied
+    // (#64). So the parameter is only used when there is something to place
+    // before.
+    //
+    // Adding the rule and then moving it to the top looks tidier and is wrong:
+    // with fasttrack on, index 0 is a dynamic builtin ("special dummy rule to
+    // show fasttrack counters") and /move refuses with "cannot move builtin" --
+    // an on-error would swallow that while the rule stayed at the bottom, which
+    // is a worse failure than the one being fixed. Verified on RouterOS 7.24.2:
+    // place-before=0 succeeds there, /move does not.
+    function firewallTopRule(table, args, comment) {
+        var add = table + '/add ' + args + ' comment=' + comment;
+        return [
+            ':if ([:len [' + table + '/find]] > 0) do={',
+            '  ' + add + ' place-before=0',
+            '} else={',
+            '  ' + add,
+            '}'
+        ].join('\n');
+    }
+
+    // RouterOS rejects in-interface-list=<name> when the list does not exist,
+    // one command at a time, so a missing WAN or LAN leaves half a
+    // configuration behind instead of stopping (#17, #64). Checked before the
+    // first command that changes anything.
+    function interfaceListPreflightLines(names) {
+        var lines = [];
+        for (var i = 0; i < names.length; i++) {
+            var n = names[i];
+            lines.push('# Required interface list: ' + n);
+            lines.push(':if ([:len [/interface/list/find where name="' + n + '"]] = 0) do={');
+            lines.push('  :put "ERROR: interface-list ' + n + ' does not exist - nothing has been changed."');
+            lines.push('  :put "Create it and add the matching interfaces, then run this script again:"');
+            lines.push('  :put "  /interface/list/add name=' + n + '"');
+            lines.push('  :put "  /interface/list/member/add list=' + n +
+                ' interface=<your ' + (n === 'WAN' ? 'uplink' : 'LAN') + ' interface>"');
+            lines.push('  :error "interface-list ' + n + ' not found"');
+            lines.push('}');
+        }
+        return lines;
+    }
+
+    // A config may carry its own MTU. That value is the server operator's
+    // choice and has to survive the import; the S4/transport ceiling may only
+    // lower it further, never raise it back up.
+    function explicitMtu(iface) {
+        var v = Number(iface && iface.MTU) || 0;
+        return (v >= 576 && v <= 1500) ? v : 0;
+    }
+
+    function effectiveWgMtu(iface, ipv6) {
+        if (ipv6 === undefined) ipv6 = ipv6Enabled();
+        var m = Math.min(wgMtuCeiling(iface.S4, ipv6, pathMtuValue()),
+                         explicitMtu(iface) || 1420);
+        return m >= 1420 ? 0 : m;
+    }
+
     function wgMtuOpt(iface) {
-        var m = wgMtuForS4(iface.S4, ipv6Enabled());
+        var m = effectiveWgMtu(iface);
         return m ? ' mtu=' + m : '';
     }
 
@@ -1789,10 +1987,10 @@
     // The AAAA question the browser refuses to ask, asked on the router. Older
     // RouterOS 7.x may not accept type= on :resolve; on-error keeps the install
     // going and simply leaves the IPv4 MTU in place.
-    function ipv6MtuProbeLines(prefix, endpoint, s4) {
+    function ipv6MtuProbeLines(prefix, endpoint, iface) {
         var host = endpointHost(endpoint);
         if (!host || isIPLiteral(host)) return []; // literal: already decided
-        var mtu = wgMtuForS4(s4, true);
+        var mtu = effectiveWgMtu(iface, true);
         return [
             '',
             '# AAAA check: over IPv6 the header costs 20 bytes more, so a',
@@ -1846,6 +2044,7 @@
         });
         html += '</div>';
         html += renderV3Notes(parsed.interface, proto);
+        html += renderMtuNote(parsed.interface);
         return html;
     }
 
@@ -1867,13 +2066,26 @@
         html += '<div class="alert alert-warning" style="margin-top:8px"><strong>' +
             esc(t('v3UpdateTitle')) + '</strong> ' + esc(t('v3UpdateBody')) + '</div>';
 
-        var v6 = ipv6Enabled();
-        var mtu = wgMtuForS4(iface.S4, v6);
-        if (mtu)
-            html += '<div class="alert alert-warning" style="margin-top:8px">' +
-                esc(t(v6 ? 'ipv6MtuNote' : 'v3MtuNote')) + ' S4=' + esc(String(iface.S4 || 0)) +
-                ' → mtu=' + mtu + '.</div>';
         return html;
+    }
+
+    // Why the generated WireGuard interface gets the MTU it gets. Shown for
+    // every protocol, not just v3: an explicit MTU in the config and a PPPoE
+    // path both lower it on a plain v1 profile too.
+    function renderMtuNote(iface) {
+        var v6 = ipv6Enabled();
+        var path = pathMtuValue();
+        var mtu = effectiveWgMtu(iface, v6);
+        if (!mtu) return '';
+        var explicit = explicitMtu(iface);
+        var reason;
+        if (explicit && explicit <= wgMtuCeiling(iface.S4, v6, path)) reason = t('mtuNoteConf');
+        else if (path < DEFAULT_PATH_MTU) reason = t('mtuNotePath') + ' ' + path + '.';
+        else reason = t(v6 ? 'ipv6MtuNote' : 'v3MtuNote');
+        return '<div class="alert alert-warning" style="margin-top:8px">' + esc(reason) +
+            ' S4=' + esc(String(iface.S4 || 0)) +
+            (explicit ? ', MTU=' + esc(String(explicit)) : '') +
+            ' → mtu=' + mtu + '.</div>';
     }
 
     function renderAWGParamsInline(awgParams) {
@@ -2244,7 +2456,12 @@
         samsung:   {list:'Samsung',   d:['samsung.com','samsungcloud.com','samsungapps.com','samsungdm.com','samsungelectronics.com'], r:[], on:false},
         spotify:   {list:'Spotify',   d:['spotify.com','spoti.fi','scdn.co','spotifycdn.com','spotifycdn.net','byspotify.com','pscdn.co','spotify-everywhere.com','spotify.design','spotifycharts.com','spotifycodes.com','spotifyforbrands.com','spotifyjobs.com'], r:[], on:true},
         steam:     {list:'Steam',     d:['steampowered.com','steamcommunity.com','steamstatic.com','steamcdn-a.akamaihd.net','steamgames.com','steamusercontent.com','valve.software','valvesoftware.com'], r:[], on:false},
-        telegram:  {list:'Telegram',  d:['telegram.org','t.me','telesco.pe','tdesktop.com','telegram.me','telegram.dog','telegra.ph'], r:['telegram'], on:true},
+        // MTProto dials Telegram's own ranges by IP, with no DNS lookup for the
+        // router to see, so the domains alone never route a running client (#41).
+        // Published set for AS62041/AS59930.
+        telegram:  {list:'Telegram',  d:['telegram.org','t.me','telesco.pe','tdesktop.com','telegram.me','telegram.dog','telegra.ph'], r:['telegram'],
+                    ip:['91.108.4.0/22','91.108.8.0/22','91.108.12.0/22','91.108.16.0/22',
+                        '91.108.20.0/22','91.108.56.0/22','149.154.160.0/20','185.76.151.0/24'], on:true},
         tiktok:    {list:'TikTok',    d:['tiktok.com','tiktokcdn.com','tiktokv.com','musical.ly','tiktokcdn-us.com','tiktokd.org','byteoversea.com','ibyteimg.com','ibytedtos.com','byteimg.com'], r:[], on:true},
         twitter:   {list:'Twitter',   d:['twitter.com','x.com','t.co','twimg.com','twitpic.com','vine.co'], r:[], on:true},
         youtube:   {list:'YouTube',   d:['youtube.com','youtu.be','googlevideo.com','ytimg.com','yt3.ggpht.com','yt.be','youtube-nocookie.com','youtubekids.com','youtube-ui.l.google.com'], r:['youtube','googlevideo'], on:true}
@@ -2657,6 +2874,21 @@
         lines.push('# ============================================================');
         lines.push('# DNS-based routing for selected services');
         lines.push('# ============================================================');
+        // Worth saying out loud in the script itself: this whole scheme routes on
+        // addresses RouterOS learned from DNS queries it saw. A client using DoH,
+        // Private DNS, its own resolver or a cached address never produces one,
+        // and its traffic quietly goes around the tunnel (#41).
+        lines.push('# NOTE: this routes what RouterOS learns from DNS queries it handles.');
+        lines.push('#   Clients must use this router as their DNS server. A client on DoH,');
+        lines.push('#   Android Private DNS, a hardcoded 8.8.8.8 or a cached address will');
+        lines.push('#   not appear in these lists and will bypass the tunnel.');
+        lines.push('#   To check: /ip/firewall/address-list/print where list=<Service>');
+        lines.push('#   while the service is in use - an empty list means DNS, not AWG.');
+        // Both mangle chains below match on in-interface-list=LAN, and the
+        // FastTrack rework matches out-interface-list=WAN. Neither exists on
+        // every router (CHR in particular), and RouterOS fails those commands
+        // one by one while the rest of the script carries on (#17, #64).
+        lines = lines.concat(interfaceListPreflightLines(['LAN', 'WAN']));
         lines.push('{');
         if (fwd.isDoH) {
             lines.push('# DoH forwarder');
@@ -2675,6 +2907,16 @@
         var fwdName = fwd.name;
         lines.push('# FWD entries');
         lines = lines.concat(buildFwdEntries(prefix, selectedServices, SERVICES, fwdName));
+        // Services that are also reachable by bare IP (Telegram/MTProto) need
+        // their ranges seeded statically: no DNS query means no address-list
+        // entry, and the mangle rule below never matches. Tagged -excl-ip so the
+        // uninstall script sweeps them up with the rest.
+        var svcIps = buildIpEntries(prefix, selectedServices, SERVICES);
+        if (svcIps.length > 0) {
+            lines.push('# Static IP ranges for services that bypass DNS');
+            lines = lines.concat(svcIps);
+        }
+        lines = lines.concat(extraTimeSetLines(prefix));
         var cDomains = getCustomDomains();
         if (cDomains.length > 0) {
             lines.push('# Custom domain FWD entries');
@@ -2724,6 +2966,7 @@
 
     function buildNonRuScenario(prefix, exclusionKeys, forwarderName, serverHost, storageDisk, deployMode) {
         var fwd = getDohForwarderInfo(forwarderName);
+        var offline = offlineEnabled();
         var isAuto = storageDisk === '__auto';
         var isStandalone = deployMode === 'standalone';
         var lines = [];
@@ -2731,6 +2974,12 @@
         lines.push('# ============================================================');
         lines.push('# Route all non-RU traffic through tunnel');
         lines.push('# ============================================================');
+
+        // Both mangle chains below match on in-interface-list=LAN, and the
+        // FastTrack rework matches out-interface-list=WAN. Neither exists on
+        // every router (CHR in particular), and RouterOS fails those commands
+        // one by one while the rest of the script carries on (#17, #64).
+        lines = lines.concat(interfaceListPreflightLines(['LAN', 'WAN']));
 
         // DNS forwarder + statics (needed for DoH bootstrap in non-RU scenario)
         lines.push('{');
@@ -2752,6 +3001,7 @@
             lines.push('# FWD entries for exclusions');
             lines = lines.concat(buildFwdEntries(prefix, exclusionKeys, EXCLUSIONS, fwd.name));
             lines = lines.concat(buildIpEntries(prefix, exclusionKeys, EXCLUSIONS));
+        lines = lines.concat(extraTimeSetLines(prefix));
         }
 
         lines.push('# Add private/special ranges to RU list (excluded from VPN routing via dst-address-list=!RU)');
@@ -2864,38 +3114,62 @@
         scriptSrc.push(':if (!\\$schedOk) do={ :set rscName \\"ru_ranges.rsc\\"; :log warning \\"RU list: scheduler unavailable, using permanent list\\" }');
         scriptSrc.push(':local rscFile (\\$disk . \\"/\\" . \\$rscName)');
         scriptSrc.push(':local hasCache ([:len [/file/find where name=\\$rscFile]] > 0)');
+        if (offline) {
+            // Which of the two lists the script wants depends on device-mode,
+            // which the user cannot easily predict when downloading by hand.
+            // Offline, take whichever one is actually on the router.
+            scriptSrc.push(':if (!\\$hasCache) do={');
+            scriptSrc.push('  :local altName \\"ru_ranges.rsc\\"');
+            scriptSrc.push('  :if (!\\$schedOk) do={ :set altName \\"ru_ranges_timeout.rsc\\" }');
+            scriptSrc.push('  :local altFile (\\$disk . \\"/\\" . \\$altName)');
+            scriptSrc.push('  :if ([:len [/file/find where name=\\$altFile]] > 0) do={');
+            scriptSrc.push('    :set rscFile \\$altFile');
+            scriptSrc.push('    :set hasCache true');
+            scriptSrc.push('  }');
+            scriptSrc.push('}');
+        }
         scriptSrc.push(':if (\\$hasCache) do={');
         scriptSrc.push('  :do { /ip/firewall/address-list/remove [find where list=RU and comment=RIPE-RU] } on-error={}');
         scriptSrc.push('  :delay 1s');
         scriptSrc.push('  /import file=\\$rscFile');
         scriptSrc.push('  :log info \\"RU list: imported from cache\\"');
         scriptSrc.push('}');
+        // Offline: github.com will never resolve, and retrying it for a
+        // minute on every boot and every daily run buys nothing (#51).
         scriptSrc.push(':local waitNet 0');
-        scriptSrc.push(':while (\\$waitNet < 60) do={');
-        scriptSrc.push('  :do { :resolve \\"github.com\\"; :set waitNet 99 } on-error={ :delay 5s; :set waitNet (\\$waitNet + 5) }');
-        scriptSrc.push('}');
-        scriptSrc.push(':if (\\$waitNet >= 99) do={');
-        scriptSrc.push('  :do {');
-        scriptSrc.push('    /tool/fetch url=(\\"' + RU_RANGES_BASE + '\\" . \\$rscName) dst-path=\\$rscFile mode=https http-header-field=\\"User-Agent: MikroTik\\" http-max-redirect-count=10');
-        scriptSrc.push('    :delay 5s');
-        scriptSrc.push('    :log info \\"RU list: downloaded\\"');
-        scriptSrc.push('    :do { /ip/firewall/address-list/remove [find where list=RU and comment=RIPE-RU] } on-error={}');
-        scriptSrc.push('    :delay 1s');
-        scriptSrc.push('    /import file=\\$rscFile');
-        scriptSrc.push('    :log info \\"RU list: fresh version imported\\"');
-        scriptSrc.push('    :local otherName \\"ru_ranges.rsc\\"');
-        scriptSrc.push('    :if (!\\$schedOk) do={ :set otherName \\"ru_ranges_timeout.rsc\\" }');
-        scriptSrc.push('    :do { /file/remove [find where name=(\\$disk . \\"/\\" . \\$otherName)] } on-error={}');
-        scriptSrc.push('  } on-error={');
-        scriptSrc.push('    :if (!\\$hasCache) do={');
-        scriptSrc.push('      :log error \\"RU list: download failed and no cached file available\\"');
-        scriptSrc.push('    } else={');
-        scriptSrc.push('      :log warning \\"RU list: download failed, keeping cached version\\"');
-        scriptSrc.push('    }');
-        scriptSrc.push('  }');
-        scriptSrc.push('} else={');
-        scriptSrc.push('  :log warning \\"RU list: no network after 60s, skipping download\\"');
-        scriptSrc.push('}');
+        if (offline) {
+            scriptSrc.push(':if (!\\$hasCache) do={ :log error \\"RU list: offline install and no list file on the router\\" }');
+        } else {
+            scriptSrc.push(':while (\\$waitNet < 60) do={');
+            scriptSrc.push('  :do { :resolve \\"github.com\\"; :set waitNet 99 } on-error={ :delay 5s; :set waitNet (\\$waitNet + 5) }');
+            scriptSrc.push('}');
+        }
+        // Offline: nothing to download, and leaving the block in would log a
+        // misleading "no network after 60s" on every boot and every daily run.
+        if (!offline) {
+            scriptSrc.push(':if (\\$waitNet >= 99) do={');
+            scriptSrc.push('  :do {');
+            scriptSrc.push('    /tool/fetch url=(\\"' + RU_RANGES_BASE + '\\" . \\$rscName) dst-path=\\$rscFile mode=https http-header-field=\\"User-Agent: MikroTik\\" http-max-redirect-count=10');
+            scriptSrc.push('    :delay 5s');
+            scriptSrc.push('    :log info \\"RU list: downloaded\\"');
+            scriptSrc.push('    :do { /ip/firewall/address-list/remove [find where list=RU and comment=RIPE-RU] } on-error={}');
+            scriptSrc.push('    :delay 1s');
+            scriptSrc.push('    /import file=\\$rscFile');
+            scriptSrc.push('    :log info \\"RU list: fresh version imported\\"');
+            scriptSrc.push('    :local otherName \\"ru_ranges.rsc\\"');
+            scriptSrc.push('    :if (!\\$schedOk) do={ :set otherName \\"ru_ranges_timeout.rsc\\" }');
+            scriptSrc.push('    :do { /file/remove [find where name=(\\$disk . \\"/\\" . \\$otherName)] } on-error={}');
+            scriptSrc.push('  } on-error={');
+            scriptSrc.push('    :if (!\\$hasCache) do={');
+            scriptSrc.push('      :log error \\"RU list: download failed and no cached file available\\"');
+            scriptSrc.push('    } else={');
+            scriptSrc.push('      :log warning \\"RU list: download failed, keeping cached version\\"');
+            scriptSrc.push('    }');
+            scriptSrc.push('  }');
+            scriptSrc.push('} else={');
+            scriptSrc.push('  :log warning \\"RU list: no network after 60s, skipping download\\"');
+            scriptSrc.push('}');
+        }
 
         lines.push('# RU address list update script');
         lines.push('/system/script/add name=' + prefix + '-ru-update comment=' + prefix + ' source="' + scriptSrc.join('\\n') + '"');
@@ -3198,6 +3472,15 @@
     // <prefix>-ru-daily job at 04:00.
     function buildUpdateSchedulerLines(prefix) {
         if (!isAutoUpdateEnabled()) return [];
+        // Offline install: the update script fetches the release list from
+        // api.github.com, which is exactly what this router cannot reach. A
+        // daily scheduler would fail every night forever, so it is not created.
+        // The script itself still exists and can be run by hand once the router
+        // does have a way out.
+        if (offlineEnabled()) return [
+            '# Daily update check skipped: offline install cannot reach the release API.',
+            '# Run /system/script/run ' + prefix + '-update by hand when the router is online.'
+        ];
         // device-mode can forbid /system/scheduler entirely, and a bare add would
         // abort the whole install script right here. Same guard the RU list uses.
         return [
@@ -3251,6 +3534,7 @@
             src.push('  :do { /ip/route/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /ip/dns/static/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /ip/dns/forwarders/remove [find where comment~"' + prefix + '"] } on-error={}');
+            extraTimeResetLines('  ').forEach(function (l) { src.push(l); });
             src.push('  :do { /ip/firewall/mangle/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /routing/rule/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /routing/table/remove [find where comment~"' + prefix + '"] } on-error={}');
@@ -3349,6 +3633,7 @@
             src.push('  :do { /ip/route/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /ip/dns/static/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /ip/dns/forwarders/remove [find where comment~"' + prefix + '"] } on-error={}');
+            extraTimeResetLines('  ').forEach(function (l) { src.push(l); });
             src.push('  :do { /ip/firewall/mangle/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /routing/rule/remove [find where comment~"' + prefix + '"] } on-error={}');
             src.push('  :do { /routing/table/remove [find where comment~"' + prefix + '"] } on-error={}');
@@ -3484,7 +3769,7 @@
             peerAdd,
             '/ip/address/add address=' + i.Address + ' interface=wg-' + prefix,
         ]);
-        lines = lines.concat(ipv6MtuProbeLines(prefix, p.Endpoint, i.S4));
+        lines = lines.concat(ipv6MtuProbeLines(prefix, p.Endpoint, i));
         lines = lines.concat([
             '',
             '# 4. Container environment variables',
@@ -3510,6 +3795,11 @@
         });
         lines = lines.concat(v3EnvLines(prefix, i));
         if (dfEnabled()) lines.push('/container/envs/add list=' + prefix + '-env key=AWG_NO_DF value="1"');
+        // Without a resolver the container cannot turn a hostname endpoint into
+        // an address; generate() makes this mandatory whenever the endpoint is
+        // not a literal.
+        var awgDns = awgDnsValue();
+        if (awgDns) lines.push('/container/envs/add list=' + prefix + '-env key=AWG_DNS value="' + awgDns + '"');
 
         // Pin the two forwarding threads to their own cores. The receive buffer
         // of a container socket is capped by net.core.rmem_max and cannot be
@@ -3651,7 +3941,7 @@
             peerAdd,
             '/ip/address/add address=' + i.Address + ' interface=wg-' + prefix,
         ]);
-        lines = lines.concat(ipv6MtuProbeLines(prefix, p.Endpoint, i.S4));
+        lines = lines.concat(ipv6MtuProbeLines(prefix, p.Endpoint, i));
         lines.push('');
 
         var stepN = 3;
@@ -3714,6 +4004,8 @@
         });
         lines = lines.concat(v3ExportLines(i));
         if (dfEnabled()) lines.push('  :put "export AWG_NO_DF=\\"1\\""');
+        var saDns = awgDnsValue();
+        if (saDns) lines.push('  :put "export AWG_DNS=\\"' + saDns + '\\""');
 
         lines.push('  :put ""');
         lines.push('  :put "chmod +x awg-proxy-linux-* && ./awg-proxy-linux-<arch>"');
@@ -3973,8 +4265,8 @@
             // hub answers, and the answer dies on the way out. The rule only
             // ever passes traffic leaving our own container, which speaks to
             // nobody but the clients in its session table.
-            '/ipv6/firewall/filter/add chain=forward action=accept in-interface=' + veth +
-                ' place-before=0 comment=' + prefix + '-v6-out'
+            firewallTopRule('/ipv6/firewall/filter',
+                'chain=forward action=accept in-interface=' + veth, prefix + '-v6-out')
         ];
         // Only an initiator masquerades. A hub must not: its replies have to
         // keep the ::2 source that the inbound dst-nat recorded, or conntrack
@@ -4647,28 +4939,51 @@
         return src.join('\n');
     }
 
-    // Build a valid AmneziaWG .conf for a direct full-tunnel client (protocol v1: Jc/Jmin/Jmax/S1/S2/H1-H4).
+    // Every protocol-significant field of a generated AWG profile, in the order
+    // amneziawg-tools' showconf writes them. It lives in one place on purpose:
+    // the container env, the share link and a direct client's .conf all have to
+    // describe the same profile, and the way that breaks is a field being added
+    // to one of the three and forgotten in the others. Keys are the generator's
+    // own lowercase shape (see generateAWGParams), not parsed-.conf casing.
+    function awgProfileConfLines(p) {
+        var lines = [
+            'Jc = ' + p.jc,
+            'Jmin = ' + p.jmin,
+            'Jmax = ' + p.jmax,
+            'S1 = ' + p.s1,
+            'S2 = ' + p.s2
+        ];
+        // v2/v3 only: awg-tools omits S3/S4 rather than writing 0.
+        if (p.s3) lines.push('S3 = ' + p.s3);
+        if (p.s4) lines.push('S4 = ' + p.s4);
+        lines.push('H1 = ' + p.h1);
+        lines.push('H2 = ' + p.h2);
+        lines.push('H3 = ' + p.h3);
+        lines.push('H4 = ' + p.h4);
+        // v3: without the key the client speaks an unprotected header and the
+        // server drops every packet, which is what made #66 look like a
+        // handshake problem rather than a missing line.
+        if (p.hpKey) lines.push('HeaderProtectionKey = ' + p.hpKey);
+        // v3.1
+        if (p.randomTrailers) lines.push('RandomTrailers = ' + p.randomTrailers);
+        if (p.disableCookies) lines.push('DisableCookies = ' + p.disableCookies);
+        // v1.5/v3 CPS templates
+        if (p.cps) {
+            for (var k = 0; k < p.cps.length; k++)
+                lines.push('I' + (k + 1) + ' = ' + p.cps[k]);
+        }
+        return lines;
+    }
+
+    // Build a valid AmneziaWG .conf for a direct full-tunnel client.
     // o: { clientPriv, serverPub, awgParams, endpoint, awgPort, tunClientIP, dnsServer }
     function buildAwgConf(o) {
-        var p = o.awgParams;
         var lines = [];
         lines.push('[Interface]');
         lines.push('PrivateKey = ' + o.clientPriv);
         lines.push('Address = ' + o.tunClientIP + '/32');
         if (o.dnsServer) lines.push('DNS = ' + o.dnsServer);
-        lines.push('Jc = ' + p.jc);
-        lines.push('Jmin = ' + p.jmin);
-        lines.push('Jmax = ' + p.jmax);
-        lines.push('S1 = ' + p.s1);
-        lines.push('S2 = ' + p.s2);
-        lines.push('H1 = ' + p.h1);
-        lines.push('H2 = ' + p.h2);
-        lines.push('H3 = ' + p.h3);
-        lines.push('H4 = ' + p.h4);
-        if (p.cps) {
-            for (var k = 0; k < p.cps.length; k++)
-                lines.push('I' + (k + 1) + ' = ' + p.cps[k]);
-        }
+        lines = lines.concat(awgProfileConfLines(o.awgParams));
         lines.push('');
         lines.push('[Peer]');
         lines.push('PublicKey = ' + o.serverPub);
@@ -4715,6 +5030,10 @@
         ls.push('  :put "Container package is not installed or disabled. Install it and reboot."');
         ls.push('  :error "Usage: /system/device-mode/update container=yes"');
         ls.push('}');
+        // The firewall rules below match in-interface-list=WAN. Checked here,
+        // before anything is created: RouterOS fails those adds one at a time
+        // and the script would otherwise finish half applied (#64).
+        ls = ls.concat(interfaceListPreflightLines(['WAN']));
         ls.push('');
 
         if (storageServer === '__auto') {
@@ -4751,20 +5070,28 @@
         ls.push('');
 
         ls.push('# 4. Firewall: allow AWG port and forward to container');
-        ls.push('/ip/firewall/filter/add chain=forward action=accept protocol=udp dst-port=' + awgPort + ' in-interface-list=WAN place-before=0 comment=' + prefix + '-awg-in');
-        ls.push('/ip/firewall/filter/add chain=input action=accept protocol=udp src-address=' + vethIP + ' dst-port=' + wgPort + ' place-before=0 comment=' + prefix + '-wg-in');
-        ls.push('/ip/firewall/filter/add chain=input action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-wg-mgmt');
+        ls.push(firewallTopRule('/ip/firewall/filter',
+            'chain=forward action=accept protocol=udp dst-port=' + awgPort + ' in-interface-list=WAN',
+            prefix + '-awg-in'));
+        ls.push(firewallTopRule('/ip/firewall/filter',
+            'chain=input action=accept protocol=udp src-address=' + vethIP + ' dst-port=' + wgPort,
+            prefix + '-wg-in'));
+        ls.push(firewallTopRule('/ip/firewall/filter',
+            'chain=input action=accept in-interface=wg-' + prefix, prefix + '-wg-mgmt'));
         ls.push('/ip/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgPort + ' in-interface-list=WAN to-addresses=' + vethIP + ' to-ports=' + awgPort + ' comment=' + prefix + '-dstnat');
         if (srvNet6) {
             // No dst-address here on purpose: an ISP-assigned IPv6 tends to
             // change, and the rule has to survive that. Port plus WAN is
             // specific enough.
-            ls.push('/ipv6/firewall/filter/add chain=forward action=accept protocol=udp dst-port=' + awgPort + ' in-interface-list=WAN place-before=0 comment=' + prefix + '-awg-in6');
+            ls.push(firewallTopRule('/ipv6/firewall/filter',
+                'chain=forward action=accept protocol=udp dst-port=' + awgPort + ' in-interface-list=WAN',
+                prefix + '-awg-in6'));
             ls.push('/ipv6/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgPort + ' in-interface-list=WAN to-address=' + srvNet6.vethAddrBare + ' to-ports=' + awgPort + ' comment=' + prefix + '-dstnat6');
         }
         ls.push('# Full-tunnel egress for direct AmneziaWG clients (no-op for site-to-site peers that don\'t route 0.0.0.0/0)');
         ls.push('/ip/firewall/nat/add chain=srcnat action=masquerade src-address=' + tunnelCidr + ' out-interface-list=WAN comment=' + prefix + '-ft-nat');
-        ls.push('/ip/firewall/filter/add chain=forward action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-ft-fwd');
+        ls.push(firewallTopRule('/ip/firewall/filter',
+            'chain=forward action=accept in-interface=wg-' + prefix, prefix + '-ft-fwd'));
         ls.push('');
 
         ls.push('# 5. Container environment variables');
@@ -4840,7 +5167,8 @@
         lc.push('/interface/wireguard/add name=wg-' + prefix + ' private-key="' + clientKey.privateKey + '" listen-port=' + clientWgPort + ' disabled=yes');
         lc.push('/interface/wireguard/peers/add interface=wg-' + prefix + ' public-key="' + serverKey.publicKey + '" endpoint-address=' + cvethIP + ' endpoint-port=51820 allowed-address=' + clientAllowed + ' persistent-keepalive=' + randomInt(25, 55));
         lc.push('/ip/address/add address=' + tunClientIP + '/24 interface=wg-' + prefix);
-        lc.push('/ip/firewall/filter/add chain=input action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-wg-mgmt');
+        lc.push(firewallTopRule('/ip/firewall/filter',
+            'chain=input action=accept in-interface=wg-' + prefix, prefix + '-wg-mgmt'));
         lc.push('/ip/firewall/nat/add chain=srcnat action=masquerade out-interface=wg-' + prefix);
         lc.push('');
 
@@ -4966,7 +5294,8 @@
         lc.push('/interface/wireguard/add name=wg-' + prefix + ' private-key="' + clientKey.privateKey + '" listen-port=' + clientWgPort + ' disabled=yes');
         lc.push('/interface/wireguard/peers/add interface=wg-' + prefix + ' public-key="' + serverWgPubKey + '" endpoint-address=' + cvethIP + ' endpoint-port=51820 allowed-address=' + clientAllowed + ' persistent-keepalive=' + randomInt(25, 55));
         lc.push('/ip/address/add address=' + tunClientIP + '/24 interface=wg-' + prefix);
-        lc.push('/ip/firewall/filter/add chain=input action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-wg-mgmt');
+        lc.push(firewallTopRule('/ip/firewall/filter',
+            'chain=input action=accept in-interface=wg-' + prefix, prefix + '-wg-mgmt'));
         lc.push('/ip/firewall/nat/add chain=srcnat action=masquerade out-interface=wg-' + prefix);
         lc.push('');
 
@@ -5189,7 +5518,8 @@
         la.push('/interface/wireguard/add name=wg-' + prefix + ' private-key="' + keyA.privateKey + '" listen-port=' + wgPort + ' disabled=yes');
         la.push('/interface/wireguard/peers/add interface=wg-' + prefix + ' public-key="' + keyB.publicKey + '" endpoint-address=' + net.vethAddr.replace(/\/.*/, '') + ' endpoint-port=51820 allowed-address=' + subnet + (lanB ? ',' + lanB : '') + ' persistent-keepalive=' + randomInt(25, 55));
         la.push('/ip/address/add address=' + sn.addr1 + ' interface=wg-' + prefix);
-        la.push('/ip/firewall/filter/add chain=input action=accept in-interface=wg-' + prefix + ' place-before=0 comment=' + prefix + '-wg-mgmt');
+        la.push(firewallTopRule('/ip/firewall/filter',
+            'chain=input action=accept in-interface=wg-' + prefix, prefix + '-wg-mgmt'));
         if (lanB) la.push('/ip/route/add dst-address=' + lanB + ' gateway=wg-' + prefix + ' comment=' + prefix + '-s2s-lan');
         la.push('');
 
@@ -5226,6 +5556,10 @@
         lb.push('  :put "Container package is not installed or disabled. Install it and reboot."');
         lb.push('  :error "Usage: /system/device-mode/update container=yes"');
         lb.push('}');
+        // The firewall rules below match in-interface-list=WAN. Checked here,
+        // before anything is created: RouterOS fails those adds one at a time
+        // and the script would otherwise finish half applied (#64).
+        lb = lb.concat(interfaceListPreflightLines(['WAN']));
         lb.push('');
 
         if (storageB === '__auto') {
@@ -5253,11 +5587,17 @@
 
         // dst-nat + forward accept for AWG port
         lb.push('# 3. Firewall: allow and forward AWG port');
-        lb.push('/ip/firewall/filter/add chain=forward action=accept protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN place-before=0 comment=' + prefix + '-awg-in');
-        lb.push('/ip/firewall/filter/add chain=input action=accept protocol=udp src-address=' + net.vethAddr.replace(/\/.*/, '') + ' dst-port=' + wgPort + ' place-before=0 comment=' + prefix + '-wg-in');
+        lb.push(firewallTopRule('/ip/firewall/filter',
+            'chain=forward action=accept protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN',
+            prefix + '-awg-in'));
+        lb.push(firewallTopRule('/ip/firewall/filter',
+            'chain=input action=accept protocol=udp src-address=' + net.vethAddr.replace(/\/.*/, '') + ' dst-port=' + wgPort,
+            prefix + '-wg-in'));
         lb.push('/ip/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN to-addresses=' + net.vethAddr.replace(/\/.*/, '') + ' to-ports=' + awgParams.port + ' comment=' + prefix + '-dstnat');
         if (net6) {
-            lb.push('/ipv6/firewall/filter/add chain=forward action=accept protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN place-before=0 comment=' + prefix + '-awg-in6');
+            lb.push(firewallTopRule('/ipv6/firewall/filter',
+                'chain=forward action=accept protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN',
+                prefix + '-awg-in6'));
             lb.push('/ipv6/firewall/nat/add chain=dstnat action=dst-nat protocol=udp dst-port=' + awgParams.port + ' in-interface-list=WAN to-address=' + net6.vethAddrBare + ' to-ports=' + awgParams.port + ' comment=' + prefix + '-dstnat6');
         }
         lb.push('');
@@ -5369,8 +5709,125 @@
     // place), the GHCR registry (RouterOS 7.22+, the only path /container/repull can
     // update later), and finally the release archive over /tool/fetch.
     // opts: { completionLines, leaveOpen, memCheck, docLink }
+    // ============================================================
+    // Offline install
+    // ============================================================
+    // GitHub is unreachable from a good number of the routers this is aimed at,
+    // which used to mean you needed a second router with a working tunnel just
+    // to install the first one (#51). The container archive and the RU list can
+    // both be put on the router by hand, and the installer already prefers a
+    // local file when it finds one -- what was missing is knowing which file.
+    //
+    // The name cannot be worked out in the browser: it depends on the
+    // architecture, the RouterOS version (7.20 needs the classic-Docker build)
+    // and, on arm, the board model. So instead of guessing, the prep script
+    // below asks the router and prints the answer.
+    function offlineEnabled() {
+        var el = document.getElementById('offline-enable');
+        return !!(el && el.checked);
+    }
+
+    // Release file name for this router, left in $file (plus $imgTag, $suffix
+    // and $minor). Shared by the installer and the prep script so the two can
+    // never disagree about which archive to look for.
+    function imageFileDetectLines(ind) {
+        var lines = [];
+        lines.push(ind + ':local arch [/system/resource/get architecture-name]');
+        lines.push(ind + ':local ver [/system/resource/get version]');
+        lines.push(ind + ':local dotPos [:find $ver "."]');
+        lines.push(ind + ':local rest [:pick $ver ($dotPos + 1) [:len $ver]]');
+        lines.push(ind + ':local endPos [:find $rest "."]');
+        lines.push(ind + ':if ([:typeof $endPos] = "nil") do={ :set endPos [:find $rest " "] }');
+        lines.push(ind + ':local minor [:tonum [:pick $rest 0 $endPos]]');
+        lines.push(ind + ':local suffix ""');
+        lines.push(ind + ':if ($minor <= 20) do={ :set suffix "-7.20-Docker" }');
+        lines.push(ind + ':local file ""');
+        // armv5 has no place in the multi-arch index (arm32v5/debian only), so it
+        // rides its own registry tag.
+        lines.push(ind + ':local imgTag "latest"');
+        lines.push(ind + ':if ($arch = "arm64") do={ :set file ("awg-proxy-arm64" . $suffix . ".tar.gz") }');
+        lines.push(ind + ':if ($arch = "arm") do={');
+        lines.push(ind + '  :set file ("awg-proxy-arm" . $suffix . ".tar.gz")');
+        lines.push(ind + '  :local rbModel ""');
+        // /system/routerboard does not exist on CHR: RouterOS fails while parsing
+        // the script, before on-error can catch anything, and the whole block dies.
+        // :parse defers the lookup to runtime, so :do handles the missing menu.
+        lines.push(ind + '  :do { :set rbModel [[:parse ":return [/system/routerboard/get model]"]] } on-error={}');
+        lines.push(ind + '  :local bName [/system/resource/get board-name]');
+        lines.push(ind + '  :if ($rbModel~"E50UG" || $rbModel~"E60iUGS" || $bName~"E50UG" || $bName~"E60iUGS" || $bName~"^hEX") do={');
+        lines.push(ind + '    :set file ("awg-proxy-armv5" . $suffix . ".tar.gz")');
+        lines.push(ind + '    :set imgTag "latest-armv5"');
+        lines.push(ind + '  }');
+        lines.push(ind + '}');
+        lines.push(ind + ':if ($arch ~ "x86") do={ :set file ("awg-proxy-amd64" . $suffix . ".tar.gz") }');
+        lines.push(ind + ':if ($file = "") do={ :error "Unsupported architecture: $arch" }');
+        return lines;
+    }
+
+    // Step 0 of an offline install: read-only, changes nothing, prints exactly
+    // which files to download and where to put them. Run this first, fetch the
+    // files on a machine that can reach GitHub, upload them, then run the
+    // install script.
+    function buildOfflinePrepScript(prefix, storageDisk, needsRuList) {
+        var isAuto = storageDisk === '__auto';
+        var lines = [
+            '# ============================================================',
+            '# Offline install, step 0 of 2 -- what to download',
+            '# This script changes nothing. It only prints file names.',
+            '# ============================================================',
+            '{'
+        ];
+        lines = lines.concat(imageFileDetectLines('  '));
+
+        // Where the installer will look. disk1 is the plain files list; an
+        // external disk keeps its own root. Read-only probe: unlike the
+        // installer, this must never offer to format anything.
+        lines.push('  :local disk "disk1"');
+        if (isAuto) {
+            lines.push('  :do {');
+            lines.push('    :local usbFree [/disk/get [find where mount-point="usb1"] free]');
+            lines.push('    :if ($usbFree > 0) do={ :set disk "usb1" }');
+            lines.push('  } on-error={}');
+        } else if (storageDisk !== 'disk1') {
+            lines.push('  :set disk "' + storageDisk + '"');
+        }
+        lines.push('  :local dest $file');
+        lines.push('  :if ($disk != "disk1") do={ :set dest ($disk . "/" . $file) }');
+
+        lines.push('  :put "============================================================"');
+        lines.push('  :put "Offline install: download these on a machine with internet,"');
+        lines.push('  :put "then upload them to this router (Files, or drag into WinBox)."');
+        lines.push('  :put "============================================================"');
+        lines.push('  :put ""');
+        lines.push('  :put "1. Container image"');
+        lines.push('  :put ("   file: " . $file)');
+        lines.push('  :put ("   url:  ' + REPO.dl + '" . $file)');
+        lines.push('  :put ("   put it here: " . $dest)');
+
+        if (needsRuList) {
+            // The RU list comes in two flavours and which one the update script
+            // wants depends on whether device-mode allows schedulers. Print the
+            // one it will ask for; the installer accepts the other as well.
+            lines.push('  :local schedOk true');
+            lines.push('  :do { :set schedOk [/system/device-mode/get scheduler] } on-error={}');
+            lines.push('  :local rscName "ru_ranges_timeout.rsc"');
+            lines.push('  :if (!$schedOk) do={ :set rscName "ru_ranges.rsc" }');
+            lines.push('  :put ""');
+            lines.push('  :put "2. RU address list"');
+            lines.push('  :put ("   file: " . $rscName)');
+            lines.push('  :put ("   url:  ' + RU_RANGES_BASE + '" . $rscName)');
+            lines.push('  :put ("   put it here: " . $disk . "/" . $rscName)');
+        }
+
+        lines.push('  :put ""');
+        lines.push('  :put "Then run the install script from step 1."');
+        lines.push('}');
+        return lines.join('\n');
+    }
+
     function buildImageSetupLines(prefix, storageDisk, opts) {
         opts = opts || {};
+        var offline = offlineEnabled();
         var isAuto = storageDisk === '__auto';
         var isExternal = storageDisk !== 'disk1' && !isAuto;
         var addArgs = 'interface=veth-' + prefix + ' envlist=' + prefix + '-env hostname=' +
@@ -5392,35 +5849,7 @@
         }
 
         lines.push('{');
-        lines.push('  :local arch [/system/resource/get architecture-name]');
-        lines.push('  :local ver [/system/resource/get version]');
-        lines.push('  :local dotPos [:find $ver "."]');
-        lines.push('  :local rest [:pick $ver ($dotPos + 1) [:len $ver]]');
-        lines.push('  :local endPos [:find $rest "."]');
-        lines.push('  :if ([:typeof $endPos] = "nil") do={ :set endPos [:find $rest " "] }');
-        lines.push('  :local minor [:tonum [:pick $rest 0 $endPos]]');
-        lines.push('  :local suffix ""');
-        lines.push('  :if ($minor <= 20) do={ :set suffix "-7.20-Docker" }');
-        lines.push('  :local file ""');
-        // armv5 has no place in the multi-arch index (arm32v5/debian only), so it
-        // rides its own registry tag.
-        lines.push('  :local imgTag "latest"');
-        lines.push('  :if ($arch = "arm64") do={ :set file ("awg-proxy-arm64" . $suffix . ".tar.gz") }');
-        lines.push('  :if ($arch = "arm") do={');
-        lines.push('    :set file ("awg-proxy-arm" . $suffix . ".tar.gz")');
-        lines.push('    :local rbModel ""');
-        // /system/routerboard does not exist on CHR: RouterOS fails while parsing
-        // the script, before on-error can catch anything, and the whole block dies.
-        // :parse defers the lookup to runtime, so :do handles the missing menu.
-        lines.push('    :do { :set rbModel [[:parse ":return [/system/routerboard/get model]"]] } on-error={}');
-        lines.push('    :local bName [/system/resource/get board-name]');
-        lines.push('    :if ($rbModel~"E50UG" || $rbModel~"E60iUGS" || $bName~"E50UG" || $bName~"E60iUGS" || $bName~"^hEX") do={');
-        lines.push('      :set file ("awg-proxy-armv5" . $suffix . ".tar.gz")');
-        lines.push('      :set imgTag "latest-armv5"');
-        lines.push('    }');
-        lines.push('  }');
-        lines.push('  :if ($arch ~ "x86") do={ :set file ("awg-proxy-amd64" . $suffix . ".tar.gz") }');
-        lines.push('  :if ($file = "") do={ :error "Unsupported architecture: $arch" }');
+        lines = lines.concat(imageFileDetectLines('  '));
         lines.push('  :local url "' + REPO.dl + '$file"');
 
         if (isAuto) {
@@ -5459,7 +5888,7 @@
         // 2. Registry. /container/add returns before the pull even starts and never
         // raises, so :do/on-error sees nothing: the only signal is image-id filling in
         // (success) or staying empty while the container flips to download-failed.
-        if (REPO.ghcr) {
+        if (REPO.ghcr && !offline) {
             lines.push('  :if (!$added && $minor >= 22) do={');
             lines.push('    :local img ("' + REPO.ghcr + ':" . $imgTag)');
             lines.push('    :put ("Pulling " . $img)');
@@ -5516,11 +5945,22 @@
         }
         lines.push('      :error "Insufficient disk space"');
         lines.push('    }');
-        lines.push('    :put ("Fetching: $url -> " . $filePath)');
-        lines.push('    /tool/fetch url=$url dst-path=$filePath http-max-redirect-count=10');
-        lines.push('    /container/add file=$filePath ' + addArgs);
-        lines.push('    :set fetched true');
-        lines.push('  }');
+        if (offline) {
+            // Offline install: step 0 printed this exact name. Nothing has been
+            // downloaded, so the only honest outcome is to say which file is
+            // missing and stop.
+            lines.push('    :put ("Image not found on the router: " . $filePath)');
+            lines.push('    :put ("Download it and upload it there, then run this script again:")');
+            lines.push('    :put ("  ' + REPO.dl + '" . $file)');
+            lines.push('    :error "Offline install: image file missing"');
+            lines.push('  }');
+        } else {
+            lines.push('    :put ("Fetching: $url -> " . $filePath)');
+            lines.push('    /tool/fetch url=$url dst-path=$filePath http-max-redirect-count=10');
+            lines.push('    /container/add file=$filePath ' + addArgs);
+            lines.push('    :set fetched true');
+            lines.push('  }');
+        }
 
         lines.push('  :if ($minor > 20) do={ [:parse "/container/set [find where interface=veth-' + prefix + '] shm-size=4M"] }');
         // Параметр появился в 7.23, на 7.22 и ниже его нет - :parse откладывает разбор
@@ -5561,6 +6001,7 @@
         document.getElementById('parsed-section').style.display = 'none';
         document.getElementById('output-section').style.display = 'none';
         document.getElementById('routing-section').style.display = 'none';
+        document.getElementById('offline-section').style.display = 'none';
         document.getElementById('uninstall-section').style.display = 'none';
         document.getElementById('s2s-output-section').style.display = 'none';
         document.getElementById('srv-output-section').style.display = 'none';
@@ -5611,6 +6052,15 @@
             return;
         }
 
+        // A hostname endpoint is useless to the container without a resolver:
+        // the image is scratch and writes /etc/resolv.conf from AWG_DNS alone.
+        // Failing here beats a container that starts and never connects.
+        var endpointHostName = endpointHost(parsed.peer.Endpoint);
+        if (endpointHostName && !isIPLiteral(endpointHostName) && !awgDnsValue()) {
+            showError(t('errDnsRequired'));
+            return;
+        }
+
         var scenario = getScenario();
         var selectedServices = [];
         var exclusions = [];
@@ -5645,6 +6095,18 @@
 
         var dohFwd = getSelectedDohForwarder();
         var storageDisk = getStorageDisk();
+
+        // Step 0 of an offline install. Rendered above the install script and
+        // before the routing one, because that is the order it has to be run in.
+        var offlineSection = document.getElementById('offline-section');
+        if (offlineEnabled() && mode !== 'standalone') {
+            var prep = buildOfflinePrepScript(prefix, storageDisk, scenario === 'non-ru');
+            document.getElementById('offline-output').dataset.plain = prep;
+            document.getElementById('offline-output').innerHTML = highlight(prep);
+            offlineSection.style.display = 'block';
+        } else {
+            offlineSection.style.display = 'none';
+        }
 
         // Routing section (separate for dns-fwd/non-ru to avoid terminal buffer overflow)
         var routingSection = document.getElementById('routing-section');

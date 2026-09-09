@@ -225,5 +225,62 @@ ok('standalone тоже не прибивает DNS к туннелю',
 ok('но выбранные сервера по-прежнему прописаны',
    serversLine(standalone) === '9.9.9.9,149.112.112.112');
 
+
+/* ---- AWG_DNS: the container's own resolver (#54) ------------------------
+ * The image is scratch, so without AWG_DNS there is no /etc/resolv.conf and a
+ * hostname endpoint never resolves. Server and site-to-site modes already
+ * demanded this; the normal mode silently did not. */
+
+function confWith(endpoint) {
+    return [
+        '[Interface]',
+        'PrivateKey = ' + 'A'.repeat(43) + '=',
+        'Address = 10.13.13.2/32',
+        'Jc = 4', 'Jmin = 40', 'Jmax = 70',
+        'S1 = 30', 'S2 = 40',
+        'H1 = 1111111111', 'H2 = 2222222222', 'H3 = 3333333333', 'H4 = 444444444',
+        '',
+        '[Peer]',
+        'PublicKey = ' + 'B'.repeat(43) + '=',
+        'Endpoint = ' + endpoint,
+        'AllowedIPs = 0.0.0.0/0'
+    ].join(NL);
+}
+
+function runGenerate(endpoint, dns) {
+    w.document.getElementById('awg-dns').value = dns;
+    w.document.getElementById('conf-input').value = confWith(endpoint);
+    w.document.getElementById('errors-container').innerHTML = '';
+    w.document.getElementById('output').dataset.plain = '';
+    w.generate();
+    return {
+        err: w.document.getElementById('errors-container').textContent.trim(),
+        out: w.document.getElementById('output').dataset.plain || ''
+    };
+}
+
+const dnsField = w.document.getElementById('awg-dns');
+ok('normal mode has a container DNS field', !!dnsField);
+
+const missingDns = runGenerate('vpn.example.com:443', '');
+ok('a hostname endpoint without AWG_DNS is refused', missingDns.err.length > 0, missingDns.err);
+ok('and nothing is generated', missingDns.out.length === 0);
+
+const withDns = runGenerate('vpn.example.com:443', '192.168.88.1');
+ok('a hostname endpoint with AWG_DNS generates', withDns.err.length === 0, withDns.err);
+ok('AWG_DNS reaches the container env',
+   withDns.out.indexOf('key=AWG_DNS value="192.168.88.1"') >= 0,
+   withDns.out.split(NL).filter(function (l) { return l.indexOf('AWG_') >= 0; }).join(' | ').slice(0, 200));
+
+const literal = runGenerate('198.51.100.1:443', '');
+ok('an IP endpoint needs no AWG_DNS', literal.err.length === 0, literal.err);
+ok('and none is written', literal.out.indexOf('AWG_DNS') < 0);
+
+const literalWithDns = runGenerate('198.51.100.1:443', '192.168.88.1');
+ok('an explicit AWG_DNS is honoured even for an IP endpoint',
+   literalWithDns.out.indexOf('key=AWG_DNS value="192.168.88.1"') >= 0);
+
+w.document.getElementById('awg-dns').value = '';
+
 console.log(NL + passes + '/' + (passes + fails) + ' checks passed' + (fails ? ', ' + fails + ' FAILED' : ''));
 process.exit(fails ? 1 : 0);
